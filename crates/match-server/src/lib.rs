@@ -82,6 +82,18 @@ pub enum MatchCommandRequest {
         command_id: String,
         expected_seq: u64,
     },
+    RequestTakeback {
+        protocol: u8,
+        match_id: String,
+        command_id: String,
+        expected_seq: u64,
+    },
+    AcceptTakeback {
+        protocol: u8,
+        match_id: String,
+        command_id: String,
+        expected_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -103,7 +115,8 @@ pub struct GuestSessionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvitationRequest {
     pub preferred_side: Option<Side>,
-    pub clock_initial_ms: Option<i64>, // None = untimed; Some(600_000) = 10 min default
+    pub preferred_side_mode: Option<String>, // "red" | "black" | "random"
+    pub clock_initial_ms: Option<i64>,       // None = untimed; Some(600_000) = 10 min default
     pub clock_increment_ms: Option<i64>,
     pub is_friendly: Option<bool>,
 }
@@ -153,7 +166,10 @@ pub struct MatchSnapshotResponse {
     pub clock_increment_ms: i64,
     pub red_remaining_ms: Option<i64>,
     pub black_remaining_ms: Option<i64>,
+    pub is_friendly: bool,
     pub draw_offered_by: Option<Side>,
+    pub takeback_requested_by: Option<Side>,
+    pub next_rematch_invitation_code: Option<String>,
     pub outcome: Option<String>,
     pub reason_code: Option<String>,
     pub visibility: Visibility,
@@ -206,6 +222,7 @@ pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> 
         .connect(sqlite_url)
         .await?;
     sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&db).await?;
+    mark_interrupted_timed_matches_on_startup(&db).await?;
 
     Ok(AppState {
         db,
@@ -240,14 +257,30 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/.well-known/apple-app-site-association",
+            get(well_known_apple_universal_links),
+        )
+        .route(
+            "/.well-known/assetlinks.json",
+            get(well_known_android_asset_links),
+        )
         .route("/api/v1/auth/guest", post(create_guest_session))
         .route("/api/v1/invitations", post(create_invitation))
         .route("/api/v1/invitations/{code}", get(inspect_invitation))
         .route("/api/v1/invitations/{code}/join", post(join_invitation))
         .route("/api/v1/matches/{match_id}", get(get_match_snapshot))
         .route(
+            "/api/v1/matches/{match_id}/export.pgn",
+            get(export_match_pgn),
+        )
+        .route(
             "/api/v1/matches/{match_id}/commands",
             post(post_match_command),
+        )
+        .route(
+            "/api/v1/matches/{match_id}/rematch",
+            post(create_or_get_rematch),
         )
         .route(
             "/api/v1/matches/{match_id}/privacy",
@@ -266,6 +299,92 @@ async fn healthz() -> impl IntoResponse {
         "status": "ok",
         "rules_profile": ADOPTED_RULES_PROFILE,
     }))
+}
+
+/// Startup clock-continuity guard (Handoff Section 8, p. 21):
+/// Monotonic clock origins do not survive an unexpected process restart; preserve all moves
+/// and mark previously active timed matches `interrupted` without awarding a loss!
+pub async fn mark_interrupted_timed_matches_on_startup(
+    db: &SqlitePool,
+) -> Result<u64, sqlx::Error> {
+    let now = now_utc_ms();
+    let rows = sqlx::query(
+        "SELECT match_id, current_seq FROM matches WHERE status = 'playing' AND clock_initial_ms IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await?;
+
+    let mut count = 0u64;
+    for r in rows {
+        let mid: String = r.get("match_id");
+        let seq = r.get::<i64, _>("current_seq") + 1;
+        let mut tx = db.begin().await?;
+        sqlx::query(
+            "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
+             VALUES (?, ?, ?, 'system', 'interrupted', '{\"reason\":\"server_interruption\"}', ?)",
+        )
+        .bind(&mid)
+        .bind(seq)
+        .bind(format!("startup_interrupt_seq_{seq}"))
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE matches SET current_seq = ?, status = 'interrupted', outcome = 'interrupted',
+             reason_code = 'server_interruption', turn_started_utc_ms = NULL, updated_at_ms = ?
+             WHERE match_id = ?",
+        )
+        .bind(seq)
+        .bind(now)
+        .bind(&mid)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+async fn well_known_apple_universal_links() -> impl IntoResponse {
+    let app_id = std::env::var("JADE_APPLE_APP_ID")
+        .unwrap_or_else(|_| "PROVISIONAL.play.jade.ios.dev".to_string());
+    let mac_id = std::env::var("JADE_MACOS_APP_ID")
+        .unwrap_or_else(|_| "PROVISIONAL.play.jade.macos.dev".to_string());
+    Json(serde_json::json!({
+        "applinks": {
+            "details": [
+                {
+                    "appIDs": [app_id, mac_id],
+                    "components": [
+                        { "/": "/invite/*", "comment": "Friendly match invitations" },
+                        { "/": "/g/*", "comment": "Shared game replays" },
+                        { "/": "/archive*", "comment": "Archive and position explorer" },
+                        { "/": "/players/*", "comment": "Historical player profiles" }
+                    ]
+                }
+            ]
+        }
+    }))
+}
+
+async fn well_known_android_asset_links() -> impl IntoResponse {
+    let pkg = std::env::var("JADE_ANDROID_PACKAGE")
+        .unwrap_or_else(|_| "play.jade.android.dev".to_string());
+    let cert = std::env::var("JADE_ANDROID_SHA256_CERT").unwrap_or_else(|_| {
+        "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"
+            .to_string()
+    });
+    Json(serde_json::json!([
+        {
+            "relation": ["delegate_permission/common.handle_all_urls"],
+            "target": {
+                "namespace": "android_app",
+                "package_name": pkg,
+                "sha256_cert_fingerprints": [cert]
+            }
+        }
+    ]))
 }
 
 #[derive(Deserialize)]
@@ -451,7 +570,18 @@ async fn create_invitation(
     let clock_increment_ms = req
         .clock_increment_ms
         .unwrap_or(if clock_initial_ms.is_some() { 5_000 } else { 0 });
-    let side = req.preferred_side.unwrap_or(Side::Red);
+    let side = match req.preferred_side_mode.as_deref() {
+        Some("random") => {
+            if Uuid::new_v4().as_bytes()[0] & 1 == 0 {
+                Side::Red
+            } else {
+                Side::Black
+            }
+        }
+        Some("black") => Side::Black,
+        Some("red") => Side::Red,
+        _ => req.preferred_side.unwrap_or(Side::Red),
+    };
     let (red_acct, blk_acct) = match side {
         Side::Red => (Some(creator_id.clone()), None),
         Side::Black => (None, Some(creator_id.clone())),
@@ -1028,8 +1158,8 @@ async fn ensure_match_actor(
         return Ok(handle.clone());
     }
 
-    // Reconstruct authoritative GameState, pending draw offer, and clock instant from SQLite/Postgres!
-    let (mut game_state, initial_turn_instant, initial_draw_offer) =
+    // Reconstruct authoritative GameState, pending offers, and clock instant from SQLite/Postgres!
+    let (mut game_state, initial_turn_instant, initial_draw_offer, initial_takeback_offer) =
         reconstruct_game_from_db(&state.db, match_id).await?;
 
     // Bounded command mailbox per active match (Section 8).
@@ -1042,6 +1172,7 @@ async fn ensure_match_actor(
     tokio::spawn(async move {
         let mut turn_started_mono: Option<Instant> = initial_turn_instant;
         let mut draw_offered_by: Option<Side> = initial_draw_offer;
+        let mut takeback_requested_by: Option<Side> = initial_takeback_offer;
         let mut active_deadline =
             compute_actor_deadline(&db, &mid, game_state.side_to_move(), turn_started_mono).await;
 
@@ -1072,6 +1203,7 @@ async fn ensure_match_actor(
                                 &mut game_state,
                                 &mut turn_started_mono,
                                 &mut draw_offered_by,
+                                &mut takeback_requested_by,
                                 &env.actor_account_id,
                                 env.command,
                                 env.received_at,
@@ -1107,6 +1239,7 @@ async fn ensure_match_actor(
                     )
                     .await
                     {
+                        takeback_requested_by = None;
                         active_deadline = None;
                         let _ = bcast_for_loop.send(snap);
                     } else {
@@ -1237,7 +1370,7 @@ async fn expire_active_clock_if_due(
 async fn reconstruct_game_from_db(
     db: &SqlitePool,
     match_id: &str,
-) -> Result<(GameState, Option<Instant>, Option<Side>), ApiError> {
+) -> Result<(GameState, Option<Instant>, Option<Side>, Option<Side>), ApiError> {
     let mrow = sqlx::query(
         "SELECT initial_fen, rules_profile, status, turn_started_utc_ms FROM matches WHERE match_id = ?",
     )
@@ -1277,12 +1410,14 @@ async fn reconstruct_game_from_db(
     })?;
 
     let mut pending_draw: Option<Side> = None;
+    let mut pending_takeback: Option<Side> = None;
     for ev in events {
         let etype: String = ev.get("event_type");
         let pjson: String = ev.get("payload_json");
         let payload = serde_json::from_str::<serde_json::Value>(&pjson).unwrap_or_default();
         if etype == "move" {
             pending_draw = None;
+            pending_takeback = None;
             if let Some(uci) = payload["move_uci"].as_str()
                 && let Ok(mv) = Move::from_uci_or_iccs(uci)
             {
@@ -1294,8 +1429,19 @@ async fn reconstruct_game_from_db(
                 Some("black") => Some(Side::Black),
                 _ => None,
             };
+        } else if etype == "takeback_requested" {
+            pending_takeback = match payload["requested_by"].as_str() {
+                Some("red") => Some(Side::Red),
+                Some("black") => Some(Side::Black),
+                _ => None,
+            };
+        } else if etype == "takeback_accepted" {
+            pending_draw = None;
+            pending_takeback = None;
+            let _ = game.undo_move();
         } else {
             pending_draw = None;
+            pending_takeback = None;
         }
     }
 
@@ -1310,7 +1456,7 @@ async fn reconstruct_game_from_db(
     } else {
         None
     };
-    Ok((game, mono, pending_draw))
+    Ok((game, mono, pending_draw, pending_takeback))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1320,6 +1466,7 @@ async fn process_single_command(
     game: &mut GameState,
     turn_started_mono: &mut Option<Instant>,
     draw_offered_by: &mut Option<Side>,
+    takeback_requested_by: &mut Option<Side>,
     actor_account_id: &str,
     command: MatchCommandRequest,
     received_at: Instant,
@@ -1345,6 +1492,16 @@ async fn process_single_command(
             command_id,
             expected_seq,
             ..
+        }
+        | MatchCommandRequest::RequestTakeback {
+            command_id,
+            expected_seq,
+            ..
+        }
+        | MatchCommandRequest::AcceptTakeback {
+            command_id,
+            expected_seq,
+            ..
         } => (command_id.as_str(), *expected_seq),
     };
 
@@ -1367,7 +1524,7 @@ async fn process_single_command(
 
     // 2. Load current match seats, sequence, status, and clocks
     let mrow = sqlx::query(
-        "SELECT current_seq, status, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, red_remaining_ms, black_remaining_ms
+        "SELECT current_seq, status, is_friendly, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, red_remaining_ms, black_remaining_ms
          FROM matches WHERE match_id = ?",
     )
     .bind(match_id)
@@ -1381,6 +1538,7 @@ async fn process_single_command(
 
     let current_seq = mrow.get::<i64, _>("current_seq") as u64;
     let status: String = mrow.get("status");
+    let is_friendly = mrow.get::<i64, _>("is_friendly") != 0;
     let red_acct: Option<String> = mrow.get("red_account_id");
     let blk_acct: Option<String> = mrow.get("black_account_id");
     let clock_inc: i64 = mrow.get("clock_increment_ms");
@@ -1531,6 +1689,7 @@ async fn process_single_command(
             // Mutate in-memory actor state ONLY after the database transaction has durably committed!
             *game = staged_game;
             *draw_offered_by = None;
+            *takeback_requested_by = None;
             // Next turn's clock starts AFTER commit so DB latency is never charged to opponent (Section 8)!
             *turn_started_mono = if next_status == "playing" {
                 Some(Instant::now())
@@ -1610,12 +1769,95 @@ async fn process_single_command(
             )
             .await?;
             *draw_offered_by = None;
+            *takeback_requested_by = None;
             *turn_started_mono = None;
+        }
+        MatchCommandRequest::RequestTakeback { .. } => {
+            if !is_friendly {
+                return Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "takeback_friendly_only",
+                    message: "Takebacks are available only in friendly rooms".to_string(),
+                });
+            }
+            if game.ply_count() == 0 {
+                return Err(ApiError {
+                    status: StatusCode::CONFLICT,
+                    code: "no_moves_to_take_back",
+                    message: "No committed moves to take back".to_string(),
+                });
+            }
+            commit_match_event_tx(
+                db,
+                match_id,
+                current_seq + 1,
+                cmd_id,
+                Some(actor_side.as_str()),
+                "takeback_requested",
+                &serde_json::json!({ "requested_by": actor_side.as_str() }),
+                &game.to_fen(),
+                "playing",
+                red_rem,
+                blk_rem,
+                None,
+                None,
+                received_utc_ms,
+            )
+            .await?;
+            *takeback_requested_by = Some(actor_side);
+            *turn_started_mono = Some(Instant::now());
+        }
+        MatchCommandRequest::AcceptTakeback { .. } => {
+            if !is_friendly {
+                return Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "takeback_friendly_only",
+                    message: "Takebacks are available only in friendly rooms".to_string(),
+                });
+            }
+            if *takeback_requested_by != Some(actor_side.opposite()) {
+                return Err(ApiError {
+                    status: StatusCode::CONFLICT,
+                    code: "no_pending_takeback_request",
+                    message: "No pending takeback request from opponent".to_string(),
+                });
+            }
+            let mut staged_game = game.clone();
+            let undone = staged_game.undo_move().map_err(|_| ApiError {
+                status: StatusCode::CONFLICT,
+                code: "no_moves_to_take_back",
+                message: "No committed moves to take back".to_string(),
+            })?;
+            commit_match_event_tx(
+                db,
+                match_id,
+                current_seq + 1,
+                cmd_id,
+                Some(actor_side.as_str()),
+                "takeback_accepted",
+                &serde_json::json!({
+                    "accepted_by": actor_side.as_str(),
+                    "undone_uci": undone.to_uci(),
+                }),
+                &staged_game.to_fen(),
+                "playing",
+                red_rem,
+                blk_rem,
+                None,
+                None,
+                received_utc_ms,
+            )
+            .await?;
+            *game = staged_game;
+            *draw_offered_by = None;
+            *takeback_requested_by = None;
+            *turn_started_mono = Some(Instant::now());
         }
     }
 
     let mut snap = load_match_snapshot(db, match_id, None).await?;
     snap.draw_offered_by = *draw_offered_by;
+    snap.takeback_requested_by = *takeback_requested_by;
     Ok(snap)
 }
 
@@ -1746,6 +1988,7 @@ async fn load_match_snapshot(
     let mut moves_chinese = Vec::new();
     let mut missing_events = Vec::new();
     let mut pending_draw: Option<Side> = None;
+    let mut pending_takeback: Option<Side> = None;
 
     for ev in all_events {
         let seq = ev.get::<i64, _>("seq") as u64;
@@ -1755,6 +1998,7 @@ async fn load_match_snapshot(
             serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
         if etype == "move" {
             pending_draw = None;
+            pending_takeback = None;
             if let Some(u) = payload["move_uci"].as_str() {
                 moves_uci.push(u.to_string());
             }
@@ -1767,8 +2011,20 @@ async fn load_match_snapshot(
                 Some("black") => Some(Side::Black),
                 _ => None,
             };
+        } else if etype == "takeback_requested" {
+            pending_takeback = match payload["requested_by"].as_str() {
+                Some("red") => Some(Side::Red),
+                Some("black") => Some(Side::Black),
+                _ => None,
+            };
+        } else if etype == "takeback_accepted" {
+            pending_draw = None;
+            pending_takeback = None;
+            let _ = moves_uci.pop();
+            let _ = moves_chinese.pop();
         } else {
             pending_draw = None;
+            pending_takeback = None;
         }
         if since_seq.is_some_and(|s| seq > s) {
             missing_events.push(CommittedEventRecord {
@@ -1812,6 +2068,17 @@ async fn load_match_snapshot(
         }
     }
 
+    let next_rematch_code = if let Some(next_mid) = m.get::<Option<String>, _>("next_rematch_id") {
+        sqlx::query_scalar::<_, String>("SELECT invitation_code FROM matches WHERE match_id = ?")
+            .bind(next_mid)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
     Ok(MatchSnapshotResponse {
         match_id: match_id.to_string(),
         invitation_code: m.get("invitation_code"),
@@ -1828,12 +2095,234 @@ async fn load_match_snapshot(
         clock_increment_ms: m.get("clock_increment_ms"),
         red_remaining_ms,
         black_remaining_ms,
+        is_friendly: m.get::<i64, _>("is_friendly") != 0,
         draw_offered_by: pending_draw,
+        takeback_requested_by: pending_takeback,
+        next_rematch_invitation_code: next_rematch_code,
         outcome: m.get("outcome"),
         reason_code: m.get("reason_code"),
         visibility: vis,
         missing_events,
     })
+}
+
+async fn create_or_get_rematch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(match_id): Path<String>,
+) -> Result<Json<InvitationCreatedResponse>, ApiError> {
+    let caller_id = authenticate_request(&state, &headers, true).await?;
+    let mut tx = state.db.begin().await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+
+    let m = sqlx::query(
+        "SELECT status, is_friendly, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, next_rematch_id
+         FROM matches WHERE match_id = ?",
+    )
+    .bind(&match_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?
+    .ok_or_else(|| ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "match_not_found",
+        message: "Match not found".to_string(),
+    })?;
+
+    let status: String = m.get("status");
+    if status != "finished" && status != "interrupted" {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "match_still_active",
+            message: "Rematch can be started once the current game finishes".to_string(),
+        });
+    }
+
+    let prev_red: Option<String> = m.get("red_account_id");
+    let prev_blk: Option<String> = m.get("black_account_id");
+    let caller_was_red = prev_red.as_deref() == Some(caller_id.as_str());
+    let caller_was_blk = prev_blk.as_deref() == Some(caller_id.as_str());
+    if !caller_was_red && !caller_was_blk {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "not_a_participant",
+            message: "Only participants can start a rematch".to_string(),
+        });
+    }
+
+    let clock_initial_ms: Option<i64> = m.get("clock_initial_ms");
+    let clock_increment_ms: i64 = m.get("clock_increment_ms");
+
+    if let Some(existing_rematch_id) = m.get::<Option<String>, _>("next_rematch_id")
+        && let Some(existing_code) = sqlx::query_scalar::<_, String>(
+            "SELECT invitation_code FROM matches WHERE match_id = ?",
+        )
+        .bind(&existing_rematch_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?
+    {
+        tx.commit().await.map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?;
+        return Ok(Json(InvitationCreatedResponse {
+            match_id: existing_rematch_id,
+            share_path: format!("/invite/{existing_code}"),
+            invitation_code: existing_code,
+            rules_profile: ADOPTED_RULES_PROFILE.to_string(),
+            clock_initial_ms,
+            clock_increment_ms,
+        }));
+    }
+
+    let new_match_id = format!("m_{}", Uuid::new_v4().simple());
+    let invitation_code = Uuid::new_v4().simple().to_string()[..10].to_string();
+    // Reverse colors from previous match!
+    let (new_red, new_blk) = if caller_was_red {
+        (None, Some(caller_id))
+    } else {
+        (Some(caller_id), None)
+    };
+    let ts = now_utc_ms();
+    let start_fen = xiangqi_core::STARTING_FEN;
+
+    sqlx::query(
+        "INSERT INTO matches (
+            match_id, invitation_code, rules_profile, is_friendly, initial_fen, current_fen,
+            current_seq, status, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms,
+            red_remaining_ms, black_remaining_ms, visibility, rematch_of_match_id, created_at_ms, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'waiting', ?, ?, ?, ?, ?, ?, 'private', ?, ?, ?)",
+    )
+    .bind(&new_match_id)
+    .bind(&invitation_code)
+    .bind(ADOPTED_RULES_PROFILE)
+    .bind(m.get::<i64, _>("is_friendly"))
+    .bind(start_fen)
+    .bind(start_fen)
+    .bind(&new_red)
+    .bind(&new_blk)
+    .bind(clock_initial_ms)
+    .bind(clock_increment_ms)
+    .bind(clock_initial_ms)
+    .bind(clock_initial_ms)
+    .bind(&match_id)
+    .bind(ts)
+    .bind(ts)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+
+    sqlx::query("UPDATE matches SET next_rematch_id = ?, updated_at_ms = ? WHERE match_id = ?")
+        .bind(&new_match_id)
+        .bind(ts)
+        .bind(&match_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?;
+
+    tx.commit().await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+
+    ensure_match_actor(&state, &new_match_id).await?;
+
+    // Broadcast updated snapshot on finished match so opponent sees in-room "Join Rematch" immediately!
+    if let Ok(prev_actor) = ensure_match_actor(&state, &match_id).await
+        && let Ok(prev_snap) = load_match_snapshot(&state.db, &match_id, None).await
+    {
+        let _ = prev_actor.bcast.send(prev_snap);
+    }
+
+    Ok(Json(InvitationCreatedResponse {
+        match_id: new_match_id,
+        share_path: format!("/invite/{invitation_code}"),
+        invitation_code,
+        rules_profile: ADOPTED_RULES_PROFILE.to_string(),
+        clock_initial_ms,
+        clock_increment_ms,
+    }))
+}
+
+async fn export_match_pgn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(match_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let viewer = authenticate_request(&state, &headers, false).await.ok();
+    check_match_read_access(&state.db, &match_id, viewer.as_deref()).await?;
+    let snap = load_match_snapshot(&state.db, &match_id, None).await?;
+
+    let pgn_res = match snap.outcome.as_deref() {
+        Some("red_win") => "1-0",
+        Some("black_win") => "0-1",
+        Some("draw") => "1/2-1/2",
+        _ => "*",
+    };
+
+    let mut pgn = String::new();
+    pgn.push_str("[Event \"Jade Friendly Xiangqi Match\"]\n");
+    pgn.push_str(&format!("[MatchId \"{}\"]\n", snap.match_id));
+    pgn.push_str(&format!("[RulesProfile \"{}\"]\n", snap.rules_profile));
+    if let Some(init_ms) = snap.clock_initial_ms {
+        pgn.push_str(&format!(
+            "[TimeControl \"{}+{}\"]\n",
+            init_ms / 1000,
+            snap.clock_increment_ms / 1000
+        ));
+    } else {
+        pgn.push_str("[TimeControl \"-\"]\n");
+    }
+    pgn.push_str(&format!("[Result \"{pgn_res}\"]\n"));
+    if let Some(ref r) = snap.reason_code {
+        pgn.push_str(&format!("[Termination \"{r}\"]\n"));
+    }
+    pgn.push('\n');
+
+    for (idx, uci) in snap.moves_uci.iter().enumerate() {
+        let zh = snap
+            .moves_chinese
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or("");
+        if idx % 2 == 0 {
+            pgn.push_str(&format!("{}. {uci} {{{zh}}} ", idx / 2 + 1));
+        } else {
+            pgn.push_str(&format!("{uci} {{{zh}}} "));
+        }
+    }
+    pgn.push_str(pgn_res);
+    pgn.push('\n');
+
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-chess-pgn; charset=utf-8"),
+        )],
+        pgn,
+    ))
 }
 
 #[derive(Deserialize)]

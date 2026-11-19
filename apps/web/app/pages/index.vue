@@ -31,10 +31,50 @@ const lastAnnouncement = ref('')
 const moveError = ref<string | null>(null)
 
 // Friendly online invitation form
-const clockPreset = ref<'10+5' | 'untimed'>('10+5')
-const preferredSide = ref<'red' | 'black'>('red')
+const clockPreset = ref<'5+3' | '10+5' | '15+10' | 'untimed'>('10+5')
+const preferredSide = ref<'red' | 'black' | 'random'>('red')
 const creatingInvite = ref(false)
 const inviteError = ref<string | null>(null)
+
+function resolveClockConfig(preset: '5+3' | '10+5' | '15+10' | 'untimed') {
+  switch (preset) {
+    case '5+3':
+      return { initial: 300_000, inc: 3_000 }
+    case '10+5':
+      return { initial: 600_000, inc: 5_000 }
+    case '15+10':
+      return { initial: 900_000, inc: 10_000 }
+    case 'untimed':
+      return { initial: null, inc: 0 }
+  }
+}
+
+function exportOfflinePgn() {
+  if (typeof window === 'undefined') return
+  const zh = boardData.value?.moves_chinese ?? []
+  const lines = [
+    '[Event "Jade Offline Xiangqi Study"]',
+    `[RulesProfile "${config.public.rulesProfile}"]`,
+    `[FEN "${STARTING_FEN}"]`,
+    '[Result "*"]',
+    '',
+  ]
+  const bodyTokens: string[] = []
+  activeMovesUci.value.forEach((u, idx) => {
+    const z = zh[idx] || ''
+    if (idx % 2 === 0) bodyTokens.push(`${Math.floor(idx / 2) + 1}. ${u} {${z}}`)
+    else bodyTokens.push(`${u} {${z}}`)
+  })
+  bodyTokens.push('*')
+  lines.push(bodyTokens.join(' '))
+  const blob = new Blob([lines.join('\n') + '\n'], { type: 'application/x-chess-pgn;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'jade-offline-game.pgn'
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 const activeMovesUci = computed(() => {
   if (branchOriginPly.value !== null) {
@@ -197,9 +237,10 @@ async function createFriendlyInvitation() {
         'x-csrf-token': session.csrf_token,
       },
       body: JSON.stringify({
-        preferred_side: preferredSide.value,
-        clock_initial_ms: clockPreset.value === '10+5' ? 600_000 : null,
-        clock_increment_ms: clockPreset.value === '10+5' ? 5_000 : 0,
+        preferred_side: preferredSide.value === 'random' ? undefined : preferredSide.value,
+        preferred_side_mode: preferredSide.value,
+        clock_initial_ms: resolveClockConfig(clockPreset.value).initial,
+        clock_increment_ms: resolveClockConfig(clockPreset.value).inc,
         is_friendly: true,
       }),
     })
@@ -285,6 +326,15 @@ const verdictBanner = computed(() => {
         >
           {{ t('board.new_local') }}
         </button>
+        <button
+          type="button"
+          class="jade-btn"
+          data-testid="btn-export-offline-pgn"
+          :disabled="activeMovesUci.length === 0"
+          @click="exportOfflinePgn"
+        >
+          {{ t('export.pgn') }}
+        </button>
       </div>
 
       <p v-if="moveError" class="error-note">{{ moveError }}</p>
@@ -300,7 +350,9 @@ const verdictBanner = computed(() => {
           <label class="option-row">
             <span>Clock</span>
             <select v-model="clockPreset" data-testid="invite-clock-select" class="jade-select">
+              <option value="5+3">{{ t('clock.5_plus_3') }}</option>
               <option value="10+5">{{ t('clock.10_plus_5') }}</option>
+              <option value="15+10">{{ t('clock.15_plus_10') }}</option>
               <option value="untimed">{{ t('clock.untimed') }}</option>
             </select>
           </label>
@@ -310,6 +362,7 @@ const verdictBanner = computed(() => {
             <select v-model="preferredSide" data-testid="invite-side-select" class="jade-select">
               <option value="red">Red (红方先手)</option>
               <option value="black">Black (黑方后手)</option>
+              <option value="random">Random (随机先后手)</option>
             </select>
           </label>
         </div>
