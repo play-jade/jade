@@ -1,0 +1,593 @@
+{
+  "brand": "Jade",
+  "avatar": {
+    "master_dimensions": [
+      1254,
+      1254
+    ],
+    "export_dimensions": [
+      500,
+      500
+    ],
+    "export_bytes": 289864,
+    "resize": "Pillow Lanczos; no retouching, recoloring, cropping or compositional changes",
+    "generated_glyph_status": "Not production-verified"
+  },
+  "files": [
+    {
+      "path": "Avatar_Exports.json",
+      "bytes": 2433,
+      "sha256": "c6d70bb2475fc5521a910e28e447e7b9b283fd3c561ab6f3e170f353f4ebb0ae"
+    },
+    {
+      "path": "Jade_Avatar_Dark_Master.png",
+      "bytes": 1764389,
+      "sha256": "fdd4646fa556af2d28bea385a68de8745dbf30a9bbabcd79f6d6c281ccd1f81d",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Avatar_Master.png",
+      "bytes": 1933849,
+      "sha256": "01a1fafddc2c4b658d2a9d15e32f5416156824ab41216567b1ac793366bba150",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Avatar_Paper_Master.png",
+      "bytes": 1798276,
+      "sha256": "442331c9e9c8e6396fcb8c4d90a6d95ef252e425b80033286a593c4d68ef0d8a",
+      "dimensions": [
+        1254,
+        1254
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Avatar_Variants.png",
+      "bytes": 511761,
+      "sha256": "abfff56da76b6bec31476c57b8610e8822ecd9802e7b6786ccb15d343288decb",
+      "dimensions": [
+        1800,
+        600
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Brand_Guide.txt",
+      "bytes": 5528,
+      "sha256": "45fa0cc57e505e87394ec85e0651403328ef413d92c32d475a0201e763a2226f"
+    },
+    {
+      "path": "Jade_Brand_Plate.png",
+      "bytes": 363910,
+      "sha256": "b5821f724868d6cecaa65975d411217681e957396287a163874f537fae8745d4",
+      "dimensions": [
+        1800,
+        700
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Organization_Avatar.png",
+      "bytes": 289864,
+      "sha256": "a41c7bb08974f03bcab54a7ee0396e00f17a5e5c5646c37f57c4c97ef6b17255",
+      "dimensions": [
+        500,
+        500
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Organization_Avatar_Dark_500.png",
+      "bytes": 277228,
+      "sha256": "c2b9c7a68ccab03e1f5e6cb56d8ba397c1f051930b197a0cfbe41b37a2c2d941",
+      "dimensions": [
+        500,
+        500
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Organization_Avatar_Flat_500.png",
+      "bytes": 28163,
+      "sha256": "aca8d311d5e75c03a86cc1bea8bcaff38fe7e0161c51c9f4997f760f7a6d99c5",
+      "dimensions": [
+        500,
+        500
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Organization_Avatar_Paper_500.png",
+      "bytes": 284993,
+      "sha256": "f356d23c83f1e52a4854b798b68e094e5ea6e8de93197209507c806ece8de832",
+      "dimensions": [
+        500,
+        500
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "Jade_Palette.css",
+      "bytes": 331,
+      "sha256": "48e3538463a36df9833392f9fa4f43536fe770e9f4894fc20db45d012494b8ff"
+    },
+    {
+      "path": "Jade_Palette.json",
+      "bytes": 1226,
+      "sha256": "1157acb2f3b64ac9a54e21702e10991d9f14c3dd814e4c1dc52dc84349bfb4d2"
+    },
+    {
+      "path": "exports/Jade_Avatar_128.png",
+      "bytes": 24666,
+      "sha256": "05772a676c6dc7b067d0ad4211c016d7be68f26c40317f54a9a071717efc66ee",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_256.png",
+      "bytes": 81604,
+      "sha256": "ca1d6d399bd6af2e14221bdecc845db41912999a36719762f3c5603e4c9b2f96",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_32.png",
+      "bytes": 2443,
+      "sha256": "bbe48bc1bf2ef1c9c35f37e5543be98e19e80e74756f819cbef444234a46765d",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_64.png",
+      "bytes": 7914,
+      "sha256": "91d9b9d9bcb1612d6be538652c63bd694778f027eb8ba6822455bbbde808857e",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Circle_128.png",
+      "bytes": 29017,
+      "sha256": "264250699d66c47ebd02ec43664d4e2a711accd7e12ee521ef8d12caf4f682c4",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Circle_256.png",
+      "bytes": 93704,
+      "sha256": "039d2b0fd222dfe5636c9bbe0bcac3662578b92f2e1f0630d30f338fa814ad8e",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Circle_32.png",
+      "bytes": 2965,
+      "sha256": "1913459fe3229d2851cc57f58a649dcbed6e7764dacf7f3c93a5c4ad7cce669b",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Circle_500.png",
+      "bytes": 328538,
+      "sha256": "9a8885b835f89f342be34ad176d1cf09798d26b6f40bf4a28ea72cbf4b192a22",
+      "dimensions": [
+        500,
+        500
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Circle_64.png",
+      "bytes": 9550,
+      "sha256": "9cc718d7e0b082420600403aa939d141d90cd0fc6237c62d9b61a89e3092bfca",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_128.png",
+      "bytes": 23384,
+      "sha256": "4aa3f22f5c35230b87315382c5d3395d658ffb25850d35bb5bed72bc9c387bb2",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_256.png",
+      "bytes": 79006,
+      "sha256": "31dc86de600b499c2887a9446dd76dd195beb46bf1a266a93899344651c10cec",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_32.png",
+      "bytes": 2371,
+      "sha256": "d08e2b6a59121f71b14ef323cb8b069ce83eb6a50197c3f670b54c2326d360b2",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_64.png",
+      "bytes": 7367,
+      "sha256": "c26273372ffa4db159fe18ccf3e89e7ef4f73d7f7df0f2507d73f621ac6b7cb9",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_Circle_128.png",
+      "bytes": 27548,
+      "sha256": "de84d91201162306a26e3d0010f9375a0489ee89e556e3200470370d8bf31d63",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_Circle_32.png",
+      "bytes": 2921,
+      "sha256": "2c5078b7908a3ef1cb1d150d28a46c2bef02d3aab4bbc00ae1106c390e71add6",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Dark_Circle_64.png",
+      "bytes": 9019,
+      "sha256": "f3216e58d5219e3ae60cb762cb78ff9c6e4ef29341b60510ad456cb0ca8156c4",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Flat_256.png",
+      "bytes": 13828,
+      "sha256": "ffb42c0c94ff42a04e7466faf9a64847280eb25744aeed41936c359b54ac97b0",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_128.png",
+      "bytes": 23586,
+      "sha256": "55847fc27cb2059fde45f48c634afb2015fd66dbedc69ebc0b6ad06d59004340",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_256.png",
+      "bytes": 80645,
+      "sha256": "00bba27f8e0957b01280bcd3440f940096cbfdfe379dc8b4fdee200eb65b5ee9",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_32.png",
+      "bytes": 2253,
+      "sha256": "150302c3e449b89eab86a12e8651599f0e8f1d3276370cc843c90b2cf580e3b1",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_64.png",
+      "bytes": 7301,
+      "sha256": "a452fe687b591fd300a350189c5c2a6e5917fa41dd3fda095abf698e4263fe40",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_Circle_128.png",
+      "bytes": 27686,
+      "sha256": "d9bf3b865d108a450e4685ccc4c0ff7638aab32738a3ff7573d8b2f9516cc0b0",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_Circle_32.png",
+      "bytes": 2789,
+      "sha256": "3c3ee0137e5aaf3fa282eeb935d90ecc7dcf671e7b9281eb8d7924eb5a7a4013",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Paper_Circle_64.png",
+      "bytes": 8939,
+      "sha256": "ec61a420e3450be4c20ae0d8c7d21922c991cfec8431ad2e81abf90940172372",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Rounded_128.png",
+      "bytes": 28188,
+      "sha256": "0d304d1f6a4db8078cd4b0579598a13dc9600bc385ac237335a37deb9e4256f1",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Rounded_256.png",
+      "bytes": 92267,
+      "sha256": "a6839bfb8c37a07a163f86c41af403d412c44ebaaa8d99472b2012b82ac11b72",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Rounded_32.png",
+      "bytes": 2832,
+      "sha256": "497ecfdbfa7b84949ee741abe0003f412321c73917592040cf30cecfa5c1896a",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Rounded_500.png",
+      "bytes": 326366,
+      "sha256": "2be52eff7f08431e2c6ebfd64ec8c5cdc2d744888335050df73ba224d640458f",
+      "dimensions": [
+        500,
+        500
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Avatar_Rounded_64.png",
+      "bytes": 9148,
+      "sha256": "e662c7a5f158e06a213e6f51b61b9a036d6c4247cfa782c51870a54220e15d5e",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Mark_Flat_128.png",
+      "bytes": 7408,
+      "sha256": "e325cdc4ed530adb96ab2f4a9be01a4e5e087dff77149e0648ffab96733edc1a",
+      "dimensions": [
+        128,
+        128
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Mark_Flat_256.png",
+      "bytes": 15226,
+      "sha256": "5b11bc1e0c06b72882709203bf6033bf71e64f1af0eff160ceca75f42ffaa523",
+      "dimensions": [
+        256,
+        256
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Mark_Flat_32.png",
+      "bytes": 1687,
+      "sha256": "5b0504813b6dfc78e4afc7eb3b938d3513d8f1b017e532c706d29c00f712fbdf",
+      "dimensions": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Mark_Flat_512.png",
+      "bytes": 32087,
+      "sha256": "abd77899c439d5cd96f3a7c96b57e993a9fbb3c1baf718d77ba7efa28af92a00",
+      "dimensions": [
+        512,
+        512
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Mark_Flat_64.png",
+      "bytes": 3691,
+      "sha256": "d813e3bc9fbe64ee252db9aeeabca458efd73bf49bdce5a9496b5aeead83769c",
+      "dimensions": [
+        64,
+        64
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Mark_Flat_On_Vermilion_512.png",
+      "bytes": 32803,
+      "sha256": "20c672e4df62f7438b90b5bef3293c138ba3078a416e52d01c7a7c25a945d803",
+      "dimensions": [
+        512,
+        512
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Wordmark_Dark.png",
+      "bytes": 38194,
+      "sha256": "90a625bc1756cda30af711d488f081db3b0482a18ace736f8d843f28f6982e1c",
+      "dimensions": [
+        1200,
+        607
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "exports/Jade_Wordmark_Light.png",
+      "bytes": 37548,
+      "sha256": "d7eba00d4f60df5ffcc9c1a9a20d4b7a654a2462612a53b2480870048c11a5ea",
+      "dimensions": [
+        1200,
+        607
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "path": "proofs/Jade_All_Avatar_Size_Proofs.png",
+      "bytes": 267073,
+      "sha256": "48c0323464c9048f57b04d39be9d39b6fc123ef3242fb60e958644286753e538",
+      "dimensions": [
+        1800,
+        1000
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "proofs/Jade_Avatar_Size_Proofs.png",
+      "bytes": 127664,
+      "sha256": "3ce4116646e3599522a9eb549e08e58f200188b4b17c77d449d954eebb50d252",
+      "dimensions": [
+        1600,
+        930
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "proofs/Jade_Wordmark_Proofs.png",
+      "bytes": 105267,
+      "sha256": "75eb33777e0f58f169946296a7b0ad2d0374a2866f2b9b24019ba852e94f91da",
+      "dimensions": [
+        1500,
+        900
+      ],
+      "mode": "RGB"
+    },
+    {
+      "path": "source/font_sources.json",
+      "bytes": 3232,
+      "sha256": "89f4d3b6d9ef63f7843176c603da1d8af42b47a8684653866fa6a95bc71dd8b1"
+    },
+    {
+      "path": "source/fonts/NotoSans-Regular.ttf",
+      "bytes": 512672,
+      "sha256": "89c3c497f618fdaa0b2d1e98fef93582f28c71debd2c4a8cdf41f190ced2909d"
+    },
+    {
+      "path": "source/fonts/NotoSerifCJKsc-Bold.otf",
+      "bytes": 25521436,
+      "sha256": "7ed2e04e7b96734dd67599be8ff3e625aba23c5c550a489070deb8a38a422568"
+    },
+    {
+      "path": "source/fonts/NotoSerifDisplay-Regular.ttf",
+      "bytes": 559120,
+      "sha256": "bcdc596729c24044e28c54815ecbe6004f83b10169a49a51160b22f59116249f"
+    },
+    {
+      "path": "source/jade_avatar_prompt.txt",
+      "bytes": 1405,
+      "sha256": "ef5537cbed61d589651815aa7ef50b1a147dbb6db978b42616965d245e3f28a3"
+    },
+    {
+      "path": "source/jade_avatar_variants.json",
+      "bytes": 1768,
+      "sha256": "577cc1b782e600c006dfc5646dda9dda1d81072bf0b6b663c504653b0c968ebc"
+    },
+    {
+      "path": "source/licenses/Noto_CJK_Copyright_and_License.txt",
+      "bytes": 14712,
+      "sha256": "849f4ea9c214fa4ac3593b770c699f387534b11ce671264c1b10d85bdcb5997b"
+    },
+    {
+      "path": "source/licenses/Noto_Core_Copyright_and_License.txt",
+      "bytes": 5208,
+      "sha256": "075f91382875da1c4b491f1facf2586f55448705133264d98ce15cab6211b125"
+    },
+    {
+      "path": "source/wordmark_geometry.json",
+      "bytes": 142,
+      "sha256": "40b8e8ae409b2d6c426b1fc1b49451f5a4db58749d682eef009284f83e3dd018"
+    },
+    {
+      "path": "svg/Jade_Mark_Flat.svg",
+      "bytes": 5227,
+      "sha256": "ce8f77b020fe585b5c7fec1367a19b5f1b7d2109879a2f1af9a2e1e90508bf5a"
+    },
+    {
+      "path": "svg/Jade_Mark_Flat_On_Vermilion.svg",
+      "bytes": 5275,
+      "sha256": "7f4fb3ec55e16e333942ef9991829395e9676d5d447996afab0637489057f376"
+    },
+    {
+      "path": "svg/Jade_Wordmark_Dark.svg",
+      "bytes": 2421,
+      "sha256": "51fde2cf4180962376ada34442450b3fb5e524a12b0aa72d303bc2b1bfc06284"
+    },
+    {
+      "path": "svg/Jade_Wordmark_Light.svg",
+      "bytes": 2421,
+      "sha256": "fd41fcaebd7a64dfe41d2628aedbde91adc08cbff521df5fa6d26831fe7c0dd5"
+    }
+  ]
+}

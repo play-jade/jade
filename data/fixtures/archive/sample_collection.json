@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "dataset_id": "jade-public-sample-fixtures-v1",
+  "is_synthetic_development_fixture": true,
+  "provenance_banner": "Development sample provider fixture for standalone public checkout (play-jade/jade). Not a production historical corpus total.",
+  "access_policy": {
+    "ordinary_search_and_replay": "free",
+    "individual_game_export": "allowed",
+    "collection_bulk_export": "sample_fixture_only"
+  },
+  "players": [
+    {
+      "player_id": "sample-player-001",
+      "primary_display_name": "Chiu, Yu Kuen",
+      "native_display_name": "赵汝权",
+      "disambiguation_note": "Hong Kong Xiangqi player; WXF titled-player pairing example",
+      "aliases": [
+        {
+          "text": "赵汝权",
+          "script": "zh-Hans",
+          "source": "public-sample-fixture",
+          "verification_state": "reviewed_sample"
+        },
+        {
+          "text": "趙汝權",
+          "script": "zh-Hant",
+          "source": "public-sample-fixture",
+          "verification_state": "reviewed_sample"
+        },
+        {
+          "text": "Chiu, Yu Kuen",
+          "script": "Latn",
+          "source": "wxf-titled-list-reference",
+          "verification_state": "reviewed_sample"
+        }
+      ]
+    },
+    {
+      "player_id": "sample-player-002",
+      "primary_display_name": "Wu, Kui Lin",
+      "native_display_name": "吴贵临",
+      "disambiguation_note": "Taiwan Xiangqi player; WXF titled-player pairing example",
+      "aliases": [
+        {
+          "text": "吴贵临",
+          "script": "zh-Hans",
+          "source": "public-sample-fixture",
+          "verification_state": "reviewed_sample"
+        },
+        {
+          "text": "吳貴臨",
+          "script": "zh-Hant",
+          "source": "public-sample-fixture",
+          "verification_state": "reviewed_sample"
+        },
+        {
+          "text": "Wu, Kui Lin",
+          "script": "Latn",
+          "source": "wxf-titled-list-reference",
+          "verification_state": "reviewed_sample"
+        }
+      ]
+    },
+    {
+      "player_id": "sample-player-003",
+      "primary_display_name": "Lin, Ming (Club A)",
+      "native_display_name": "林明",
+      "disambiguation_note": "Synthetic same-name disambiguation fixture (1998 provincial open)",
+      "aliases": [
+        {
+          "text": "林明",
+          "script": "zh-Hans",
+          "source": "synthetic-disambiguation-fixture",
+          "verification_state": "synthetic_fixture"
+        }
+      ]
+    },
+    {
+      "player_id": "sample-player-004",
+      "primary_display_name": "Lin, Ming (Youth Open)",
+      "native_display_name": "林明",
+      "disambiguation_note": "Synthetic same-name disambiguation fixture (2014 youth open — distinct person)",
+      "aliases": [
+        {
+          "text": "林明",
+          "script": "zh-Hans",
+          "source": "synthetic-disambiguation-fixture",
+          "verification_state": "synthetic_fixture"
+        }
+      ]
+    }
+  ],
+  "games": [
+    {
+      "game_id": "sample-game-central-cannon-001",
+      "dataset_id": "jade-public-sample-fixtures-v1",
+      "is_synthetic_fixture": true,
+      "event_name": "Jade Standalone Central Cannon Study Sample",
+      "date_precision": "year",
+      "date_display": "2026",
+      "participant_kind": "human",
+      "game_context": "casual",
+      "red_player_id": "sample-player-001",
+      "black_player_id": "sample-player-002",
+      "initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+      "moves_uci": [
+        "h2e2",
+        "h9g7",
+        "h0g2",
+        "i9h9",
+        "i0h0",
+        "b9c7",
+        "c3c4",
+        "g6g5",
+        "b0c2",
+        "b7c7"
+      ],
+      "moves_chinese": [
+        "炮二平五",
+        "马８进７",
+        "马二进三",
+        "车９平８",
+        "车一平二",
+        "马２进３",
+        "兵七进一",
+        "卒７进１",
+        "马八进七",
+        "炮２平３"
+      ],
+      "recorded_result": "red_win",
+      "recorded_result_reason": "resignation",
+      "original_rules_provenance": "historical-sample-unverified-repetition",
+      "replay_validity": "valid_prefix_complete"
+    },
+    {
+      "game_id": "sample-game-screen-horse-002",
+      "dataset_id": "jade-public-sample-fixtures-v1",
+      "is_synthetic_fixture": true,
+      "event_name": "Jade Standalone Screen Horse Variation Sample",
+      "date_precision": "month",
+      "date_display": "2026-11",
+      "participant_kind": "human",
+      "game_context": "tournament",
+      "red_player_id": "sample-player-003",
+      "black_player_id": "sample-player-004",
+      "initial_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+      "moves_uci": [
+        "h2e2",
+        "h9g7",
+        "h0g2",
+        "b9c7",
+        "i0h0",
+        "i9h9",
+        "c3c4",
+        "a9b9"
+      ],
+      "moves_chinese": [
+        "炮二平五",
+        "马８进７",
+        "马二进三",
+        "马２进３",
+        "车一平二",
+        "车９平８",
+        "兵七进一",
+        "车１平２"
+      ],
+      "recorded_result": "draw",
+      "recorded_result_reason": "agreed_draw",
+      "original_rules_provenance": "program-2023.11-v1",
+      "replay_validity": "valid_prefix_complete"
+    }
+  ]
+}

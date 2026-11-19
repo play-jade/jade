@@ -1,0 +1,26 @@
+{
+  "name": "@jade/wasm-worker",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Browser Web Worker Xiangqi search engine adapter with inline WebAssembly kernel, cancellation, and normalized evaluation manifests",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/worker_contract.test.ts"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./protocol": "./protocol.ts",
+    "./worker": "./worker.ts",
+    "./client": "./client.ts",
+    "./xiangqi-search-wasm": "./xiangqi-search-wasm.ts"
+  },
+  "files": [
+    "index.ts",
+    "protocol.ts",
+    "worker.ts",
+    "client.ts",
+    "xiangqi-search-wasm.ts",
+    "LICENSE"
+  ]
+}

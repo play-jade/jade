@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-linux-and-gtk:
+    name: Rust Core, Server, Asset Pipeline & Linux GTK4
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK 4, libadwaita, and Cairo development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libcairo2-dev pkg-config xvfb clang
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: Check formatting and Clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Verify deterministic board assets and manifests
+        run: cargo run --release -p jade-asset-pipeline -- --verify
+      - name: Run Rust workspace and WASM compilation checks
+        run: |
+          cargo test --workspace
+          cargo build --release -p core-wasm --target wasm32-unknown-unknown
+      - name: Build and test C++ UCI and mobile engine bridges
+        run: ./dev/build-engines.sh
+      - name: Build and test Linux GTK4 + libadwaita native client
+        run: |
+          cargo test --manifest-path apps/linux/Cargo.toml
+          cargo build --release --manifest-path apps/linux/Cargo.toml
+
+  web-nuxt-and-playwright:
+    name: Web (Nuxt 4 + WASM + Playwright)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - name: Build core-wasm WebAssembly module
+        run: ./dev/build-wasm.sh
+      - name: Build match-server, install web dependencies, and run unit + SSR + Playwright tests
+        run: |
+          cargo build -p jade-match-server
+          pnpm install --frozen-lockfile
+          pnpm --dir apps/web test:unit
+          pnpm --dir apps/web build
+          pnpm --dir apps/web exec playwright install --with-deps chromium
+          pnpm --dir apps/web test:e2e
+
+  apple-macos-and-ios:
+    name: Apple (macOS AppKit/SwiftUI & iOS/iPadOS UIKit/SwiftUI)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+      - name: Build core-ffi, UniFFI Swift bindings, and C++ mobile engine library
+        run: |
+          ./dev/build-engines.sh
+          ./dev/build-apple-ffi.sh
+      - name: Test shared Apple UniFFI package and build macOS native app
+        run: |
+          swift test --package-path packages/apple
+          swift build -c release --package-path apps/macos
+
+  android-compose-and-uniffi:
+    name: Android (Kotlin + Jetpack Compose + UniFFI)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - name: Generate UniFFI Kotlin bindings and run JVM binding tests
+        run: |
+          cargo build --release -p core-ffi
+          cargo run --release -p core-ffi --bin uniffi-bindgen -- generate --library target/release/libcore_ffi.so --language kotlin --out-dir apps/android/app/src/main/java
+
+  windows-winui-and-c-abi:
+    name: Windows (WinUI 3 / .NET LibraryImport + SafeHandle C ABI)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build core-ffi DLL and run .NET P/Invoke SafeHandle fixture tests
+        run: |
+          cargo build --release -p core-ffi
+          dotnet test apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release

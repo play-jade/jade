@@ -1,0 +1,583 @@
+use archive_client::Visibility;
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use futures_util::{SinkExt, StreamExt};
+use http_body_util::BodyExt;
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
+use jade_match_server::{
+    CoordMovePayload, GuestSessionResponse, InvitationCreatedResponse, JoinInvitationResponse,
+    MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest, build_app_state,
+    build_router,
+};
+use tokio::io::DuplexStream;
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{Message, client::IntoClientRequest},
+};
+use tower::ServiceExt;
+use xiangqi_core::{ADOPTED_RULES_PROFILE, Side};
+
+async fn connect_ws_duplex(
+    app: &axum::Router,
+    req: axum::http::Request<()>,
+) -> Result<WebSocketStream<DuplexStream>, Box<tokio_tungstenite::tungstenite::Error>> {
+    let (client_io, server_io) = tokio::io::duplex(65_536);
+    let svc = TowerToHyperService::new(app.clone());
+    tokio::spawn(async move {
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(server_io), svc)
+            .with_upgrades()
+            .await;
+    });
+    let (ws, _) = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .map_err(Box::new)?;
+    Ok(ws)
+}
+
+async fn json_body<T: serde::de::DeserializeOwned>(resp: axum::response::Response) -> T {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, String) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/auth/guest")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "display_name": name, "transport": "web_cookie" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set_cookie = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Lax"));
+    let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+    let guest: GuestSessionResponse = json_body(resp).await;
+    (guest, cookie_pair)
+}
+
+#[tokio::test]
+async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+
+    let (red_guest, red_cookie) = new_guest(&app, "Red Host").await;
+    let (blk_guest, _blk_cookie) = new_guest(&app, "Black Joiner").await;
+    let (spec_guest, _spec_cookie) = new_guest(&app, "Spectator").await;
+
+    // 1. Cookie-authenticated mutation WITHOUT X-CSRF-Token must fail 403!
+    let missing_csrf = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header("cookie", &red_cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "preferred_side": "red",
+                "clock_initial_ms": 600_000,
+                "clock_increment_ms": 5_000
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(missing_csrf).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // 2. Cookie-authenticated mutation WITH valid X-CSRF-Token creates friendly 10+5 invitation!
+    let valid_create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header("cookie", &red_cookie)
+        .header("x-csrf-token", &red_guest.csrf_token)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "preferred_side": "red",
+                "clock_initial_ms": 600_000,
+                "clock_increment_ms": 5_000
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(valid_create).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let created: InvitationCreatedResponse = json_body(resp).await;
+    assert_eq!(created.rules_profile, ADOPTED_RULES_PROFILE);
+    assert_eq!(created.clock_initial_ms, Some(600_000));
+    assert_eq!(created.clock_increment_ms, 5_000);
+    // Shareable link must carry NO seat credentials!
+    assert_eq!(
+        created.share_path,
+        format!("/invite/{}", created.invitation_code)
+    );
+    assert!(!created.share_path.contains("jtok_"));
+
+    // Also verify untimed invitation creation works cleanly (`clock_initial_ms: null`)
+    let untimed_create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header(
+            "authorization",
+            format!("Bearer {}", red_guest.access_token),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "preferred_side": "red",
+                "clock_initial_ms": null
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let untimed_resp = app.clone().oneshot(untimed_create).await.unwrap();
+    assert_eq!(untimed_resp.status(), StatusCode::OK);
+    let untimed_inv: InvitationCreatedResponse = json_body(untimed_resp).await;
+    assert_eq!(untimed_inv.clock_initial_ms, None);
+    assert_eq!(untimed_inv.clock_increment_ms, 0);
+
+    // 3. Re-opening invitation as Red preserves Red seat; Black joins into Black; 3rd user becomes Spectator!
+    let reopen_red = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/v1/invitations/{}/join",
+            created.invitation_code
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", red_guest.access_token),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let red_join: JoinInvitationResponse =
+        json_body(app.clone().oneshot(reopen_red).await.unwrap()).await;
+    assert_eq!(red_join.assigned_side, Some(Side::Red));
+    assert_eq!(red_join.snapshot.status, "waiting");
+
+    let join_blk = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/v1/invitations/{}/join",
+            created.invitation_code
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", blk_guest.access_token),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let blk_join: JoinInvitationResponse =
+        json_body(app.clone().oneshot(join_blk).await.unwrap()).await;
+    assert_eq!(blk_join.assigned_side, Some(Side::Black));
+    assert_eq!(blk_join.snapshot.status, "playing");
+
+    let join_spec = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/v1/invitations/{}/join",
+            created.invitation_code
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", spec_guest.access_token),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let spec_join: JoinInvitationResponse =
+        json_body(app.clone().oneshot(join_spec).await.unwrap()).await;
+    assert_eq!(spec_join.assigned_side, None);
+
+    // 4. Spectator has zero command authority (403)!
+    let spec_cmd = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: created.match_id.clone(),
+        command_id: "cmd_spec_1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 2],
+            to: [4, 2],
+        },
+    };
+    let spec_move_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", created.match_id))
+        .header(
+            "authorization",
+            format!("Bearer {}", spec_guest.access_token),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&spec_cmd).unwrap()))
+        .unwrap();
+    let spec_move_resp = app.clone().oneshot(spec_move_req).await.unwrap();
+    assert_eq!(spec_move_resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let (outsider, _) = new_guest(&app, "Outsider").await;
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "preferred_side": "red",
+                "clock_initial_ms": 600_000,
+                "clock_increment_ms": 5_000
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let inv: InvitationCreatedResponse =
+        json_body(app.clone().oneshot(create_req).await.unwrap()).await;
+
+    let join_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/invitations/{}/join", inv.invitation_code))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let _: JoinInvitationResponse = json_body(app.clone().oneshot(join_req).await.unwrap()).await;
+
+    // 1. Red plays Cannon two-five (`h2e2` = `[7,2] -> [4,2]`)
+    let move1 = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "cmd_red_m1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 2],
+            to: [4, 2],
+        },
+    };
+    let m1_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", inv.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&move1).unwrap()))
+        .unwrap();
+    let snap1: MatchSnapshotResponse = json_body(app.clone().oneshot(m1_req).await.unwrap()).await;
+    assert_eq!(snap1.seq, 1);
+    assert_eq!(snap1.moves_uci, vec!["h2e2"]);
+    assert_eq!(snap1.moves_chinese, vec!["炮二平五"]);
+    let red_rem_after_first = snap1.red_remaining_ms.unwrap();
+    assert!(
+        red_rem_after_first > 600_000,
+        "5s increment should be added"
+    );
+
+    // 2. Duplicate `command_id` retry MUST be idempotent (seq stays 1, clock NOT incremented twice)!
+    let dup_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", inv.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&move1).unwrap()))
+        .unwrap();
+    let dup_resp = app.clone().oneshot(dup_req).await.unwrap();
+    assert_eq!(dup_resp.status(), StatusCode::OK);
+    let snap_dup: MatchSnapshotResponse = json_body(dup_resp).await;
+    assert_eq!(snap_dup.seq, 1);
+    assert_eq!(snap_dup.red_remaining_ms, Some(red_rem_after_first));
+
+    // 3. Stale `expected_seq` (Black sends `expected_seq: 0` when match is at `seq: 1`) MUST be rejected 409!
+    let stale_blk = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "cmd_blk_stale".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 9],
+            to: [6, 7],
+        },
+    };
+    let stale_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", inv.match_id))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&stale_blk).unwrap()))
+        .unwrap();
+    let stale_resp = app.clone().oneshot(stale_req).await.unwrap();
+    assert_eq!(stale_resp.status(), StatusCode::CONFLICT);
+
+    // 4. Black plays `h9g7` (`[7,9] -> [6,7]`) at `expected_seq: 1` -> `seq: 2`
+    let valid_blk = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "cmd_blk_m1".to_string(),
+        expected_seq: 1,
+        mv: CoordMovePayload {
+            from: [7, 9],
+            to: [6, 7],
+        },
+    };
+    let blk_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", inv.match_id))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&valid_blk).unwrap()))
+        .unwrap();
+    let snap2: MatchSnapshotResponse = json_body(app.clone().oneshot(blk_req).await.unwrap()).await;
+    assert_eq!(snap2.seq, 2);
+    assert_eq!(snap2.moves_uci, vec!["h2e2", "h9g7"]);
+
+    // 5. Reconnect gap repair: `since_seq=1` returns committed event `seq=2`!
+    let gap_req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/matches/{}?since_seq=1", inv.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let gap_snap: MatchSnapshotResponse =
+        json_body(app.clone().oneshot(gap_req).await.unwrap()).await;
+    assert_eq!(gap_snap.missing_events.len(), 1);
+    assert_eq!(gap_snap.missing_events[0].seq, 2);
+    assert_eq!(gap_snap.missing_events[0].command_id, "cmd_blk_m1");
+
+    // 6. Private-by-default enforcement + Dual-participant sharing/consent rules!
+    let outsider_read = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/matches/{}", inv.match_id))
+        .header("authorization", format!("Bearer {}", outsider.access_token))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(outsider_read).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // Only Red sets `public` + consents -> match MUST stay `private` and ineligible!
+    let red_priv = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/privacy", inv.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&PrivacyUpdateRequest {
+                visibility: Visibility::Public,
+                allow_internal_training: true,
+                allow_published_research: true,
+                allow_dataset_release: true,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+    let red_priv_json: serde_json::Value =
+        json_body(app.clone().oneshot(red_priv).await.unwrap()).await;
+    assert_eq!(red_priv_json["effective_visibility"], "private");
+    assert_eq!(red_priv_json["eligible_for_internal_training"], false);
+    assert_eq!(red_priv_json["eligible_for_dataset_release"], false);
+
+    // Now Black ALSO opts in -> match becomes `public` and eligible!
+    let blk_priv = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/privacy", inv.match_id))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&PrivacyUpdateRequest {
+                visibility: Visibility::Public,
+                allow_internal_training: true,
+                allow_published_research: true,
+                allow_dataset_release: true,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+    let blk_priv_json: serde_json::Value =
+        json_body(app.clone().oneshot(blk_priv).await.unwrap()).await;
+    assert_eq!(blk_priv_json["effective_visibility"], "public");
+    assert_eq!(blk_priv_json["eligible_for_internal_training"], true);
+    assert_eq!(blk_priv_json["eligible_for_dataset_release"], true);
+
+    // Outsider can now read the explicitly shared public match
+    let outsider_read_ok = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/matches/{}", inv.match_id))
+        .header("authorization", format!("Bearer {}", outsider.access_token))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(outsider_read_ok)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // 7. Draw offer + accept flow!
+    let offer = MatchCommandRequest::OfferDraw {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "cmd_offer_1".to_string(),
+        expected_seq: 2,
+    };
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", inv.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&offer).unwrap()))
+        .unwrap();
+    let snap_offer: MatchSnapshotResponse =
+        json_body(app.clone().oneshot(offer_req).await.unwrap()).await;
+    assert_eq!(snap_offer.seq, 3);
+    assert_eq!(snap_offer.draw_offered_by, Some(Side::Red));
+
+    let accept = MatchCommandRequest::AcceptDraw {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "cmd_accept_1".to_string(),
+        expected_seq: 3,
+    };
+    let accept_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", inv.match_id))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&accept).unwrap()))
+        .unwrap();
+    let snap_done: MatchSnapshotResponse =
+        json_body(app.clone().oneshot(accept_req).await.unwrap()).await;
+    assert_eq!(snap_done.status, "finished");
+    assert_eq!(snap_done.outcome.as_deref(), Some("draw"));
+    assert_eq!(snap_done.reason_code.as_deref(), Some("agreed_draw"));
+}
+
+#[tokio::test]
+async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+
+    let (red, _) = new_guest(&app, "WS Red").await;
+    let (blk, _) = new_guest(&app, "WS Black").await;
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "preferred_side": "red", "clock_initial_ms": 600_000 }).to_string(),
+        ))
+        .unwrap();
+    let inv: InvitationCreatedResponse =
+        json_body(app.clone().oneshot(create_req).await.unwrap()).await;
+
+    let join_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/invitations/{}/join", inv.invitation_code))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let _: JoinInvitationResponse = json_body(app.clone().oneshot(join_req).await.unwrap()).await;
+
+    // 1. Unauthenticated WebSocket upgrade without Origin MUST fail 401 (missing Origin is NEVER auth)!
+    let ws_url = format!("ws://localhost:3000/api/v1/matches/{}/ws", inv.match_id);
+    let unauth_req = ws_url.clone().into_client_request().unwrap();
+    let unauth_res = connect_ws_duplex(&app, unauth_req).await;
+    assert!(unauth_res.is_err(), "unauthenticated WS must be rejected");
+
+    // 2. Disallowed Origin MUST fail 403!
+    let mut bad_origin_req = ws_url.clone().into_client_request().unwrap();
+    bad_origin_req
+        .headers_mut()
+        .insert("Origin", "https://evil.example.com".parse().unwrap());
+    bad_origin_req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", red.access_token).parse().unwrap(),
+    );
+    assert!(
+        connect_ws_duplex(&app, bad_origin_req).await.is_err(),
+        "disallowed WS Origin must be rejected"
+    );
+
+    // 3. Connect both Red and Black over WebSockets and verify live fanout + resignation!
+    let mut red_ws_req = ws_url.clone().into_client_request().unwrap();
+    red_ws_req
+        .headers_mut()
+        .insert("Origin", "http://localhost:3000".parse().unwrap());
+    red_ws_req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", red.access_token).parse().unwrap(),
+    );
+    let mut red_ws = connect_ws_duplex(&app, red_ws_req).await.unwrap();
+
+    let mut blk_ws_req = ws_url.into_client_request().unwrap();
+    blk_ws_req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", blk.access_token).parse().unwrap(),
+    );
+    let mut blk_ws = connect_ws_duplex(&app, blk_ws_req).await.unwrap();
+
+    // Consume initial snapshots
+    let _ = red_ws.next().await.unwrap().unwrap();
+    let _ = blk_ws.next().await.unwrap().unwrap();
+
+    // Red submits move over WS -> Black receives live broadcast over WS!
+    let cmd_move = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "ws_m1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    red_ws
+        .send(Message::Text(
+            serde_json::to_string(&cmd_move).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    let blk_live_msg = blk_ws.next().await.unwrap().unwrap();
+    let blk_snap: MatchSnapshotResponse =
+        serde_json::from_str(blk_live_msg.to_text().unwrap()).unwrap();
+    assert_eq!(blk_snap.seq, 1);
+    assert_eq!(blk_snap.moves_uci, vec!["h0g2"]);
+    let _ = red_ws.next().await.unwrap().unwrap();
+
+    // Black resigns over WS -> Red receives `finished` (`red_win` by `resignation`)!
+    let cmd_resign = MatchCommandRequest::Resign {
+        protocol: 1,
+        match_id: inv.match_id.clone(),
+        command_id: "ws_resign".to_string(),
+        expected_seq: 1,
+    };
+    blk_ws
+        .send(Message::Text(
+            serde_json::to_string(&cmd_resign).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    let red_fin_msg = red_ws.next().await.unwrap().unwrap();
+    let red_fin_snap: MatchSnapshotResponse =
+        serde_json::from_str(red_fin_msg.to_text().unwrap()).unwrap();
+    assert_eq!(red_fin_snap.status, "finished");
+    assert_eq!(red_fin_snap.outcome.as_deref(), Some("red_win"));
+    assert_eq!(red_fin_snap.reason_code.as_deref(), Some("resignation"));
+}

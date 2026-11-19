@@ -1,0 +1,27 @@
+{
+  "name": "@play-jade/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm": "../../dev/build-wasm.sh",
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "test": "vitest run && playwright test"
+  },
+  "dependencies": {
+    "@jade/wasm-worker": "workspace:*",
+    "@play-jade/protocol": "workspace:*",
+    "nuxt": "4.6.4",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}

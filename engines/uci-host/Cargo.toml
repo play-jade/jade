@@ -1,0 +1,18 @@
+[package]
+name = "jade-uci-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+description = "Supervised UCI search engine host, score normalization, evaluation manifests, and canonical continuation validation"
+
+[dependencies]
+xiangqi-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

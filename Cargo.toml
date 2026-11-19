@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/xiangqi-core",
+  "crates/archive-client",
+  "crates/inference",
+  "crates/core-wasm",
+  "crates/core-ffi",
+  "crates/asset-pipeline",
+  "crates/match-server",
+  "engines/uci-host",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+repository = "https://github.com/play-jade/jade"
+
+[workspace.dependencies]
+xiangqi-core = { path = "crates/xiangqi-core", version = "0.1.0" }
+archive-client = { path = "crates/archive-client", version = "0.1.0" }
+jade-inference = { path = "crates/inference", version = "0.1.0" }
+jade-uci-host = { path = "engines/uci-host", version = "0.1.0" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2.0"
+proptest = "1.6"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+uniffi = { version = "0.29", features = ["cli"] }
+ttf-parser = "0.25"
+tiny-skia = "0.11"
+png = "0.17"
+tokio = { version = "1.44", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs", "set-header"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "macros", "migrate"] }
+uuid = { version = "1.16", features = ["v4", "serde"] }
+rand = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }

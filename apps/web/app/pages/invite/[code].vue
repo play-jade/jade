@@ -1,0 +1,795 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
+import { percussionPlayer } from '~/utils/audio'
+
+const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
+
+interface MatchSnapshot {
+  match_id: string
+  invitation_code: string
+  rules_profile: string
+  status: 'waiting' | 'playing' | 'finished'
+  seq: number
+  fen: string
+  side_to_move: 'red' | 'black'
+  moves_uci: string[]
+  moves_chinese: string[]
+  red_seated: boolean
+  black_seated: boolean
+  clock_initial_ms: number | null
+  clock_increment_ms: number
+  red_remaining_ms: number | null
+  black_remaining_ms: number | null
+  draw_offered_by: 'red' | 'black' | null
+  outcome: string | null
+  reason_code: string | null
+  visibility: 'private' | 'unlisted' | 'public'
+}
+
+const route = useRoute()
+const router = useRouter()
+const config = useRuntimeConfig()
+const {
+  locale,
+  material,
+  darkSurface,
+  notationMode,
+  soundEnabled,
+  reducedMotion,
+  traditionalGlyphs,
+  t,
+} = usePreferences()
+
+const code = computed(() => String(route.params.code || ''))
+const assignedSide = ref<'red' | 'black' | null>(null)
+const snapshot = ref<MatchSnapshot | null>(null)
+const connectionState = ref<'connecting' | 'connected' | 'reconnecting' | 'error'>('connecting')
+const errorBanner = ref<string | null>(null)
+const copiedLink = ref(false)
+
+const redBelow = ref(true)
+const selectedUci = ref<string | null>(null)
+const lastAnnouncement = ref('')
+
+// Postgame replay & variation tryout
+const replayPly = ref<number | null>(null)
+const postgameBranchMoves = ref<string[]>([])
+
+// Privacy & dual-participant consent state
+const desiredVisibility = ref<'private' | 'unlisted' | 'public'>('private')
+const consentTraining = ref(false)
+const consentResearch = ref(false)
+const consentDataset = ref(false)
+const privacyStatusMsg = ref<string | null>(null)
+
+// Live clock interpolation
+const displayRedMs = ref<number | null>(null)
+const displayBlackMs = ref<number | null>(null)
+let clockTimer: ReturnType<typeof setInterval> | null = null
+let ws: WebSocket | null = null
+let guestSession: { account_id: string; access_token: string; csrf_token: string } | null = null
+
+const shareUrl = computed(() => {
+  if (typeof window === 'undefined') return `/invite/${code.value}`
+  return `${window.location.origin}/invite/${code.value}`
+})
+
+const effectiveMovesUci = computed(() => {
+  const main = snapshot.value?.moves_uci ?? []
+  if (replayPly.value !== null) {
+    return [...main.slice(0, replayPly.value), ...postgameBranchMoves.value]
+  }
+  return main
+})
+
+const { data: boardData, refresh: refreshBoard } = await useAsyncData(
+  () => `invite-board-${code.value}`,
+  () =>
+    computeBoardView({
+      fen: STARTING_FEN,
+      movesUci: effectiveMovesUci.value,
+      width: 480,
+      height: 533,
+      padding: 20,
+      redBelow: redBelow.value,
+      selectedUci: selectedUci.value,
+      traditionalGlyphs: traditionalGlyphs.value,
+      materialId: material.value,
+      darkSurface: darkSurface.value,
+      reducedMotion: reducedMotion.value,
+    }),
+  {
+    watch: [effectiveMovesUci, redBelow, selectedUci, traditionalGlyphs, material, darkSurface],
+  },
+)
+
+function syncClocksFromSnapshot(snap: MatchSnapshot) {
+  displayRedMs.value = snap.red_remaining_ms
+  displayBlackMs.value = snap.black_remaining_ms
+}
+
+function formatClock(ms: number | null): string {
+  if (ms === null) return t('clock.untimed')
+  const clamped = Math.max(0, ms)
+  const totalSec = Math.floor(clamped / 1000)
+  const mins = Math.floor(totalSec / 60)
+  const secs = totalSec % 60
+  return `${mins}:${String(secs).padStart(2, '0')}`
+}
+
+async function ensureGuestSession() {
+  if (guestSession) return guestSession
+  const raw = sessionStorage.getItem('jade_guest_session')
+  if (raw) {
+    guestSession = JSON.parse(raw)
+    return guestSession!
+  }
+  const resp = await fetch(`${config.public.matchServerUrl}/api/v1/auth/guest`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ display_name: 'Jade Player', transport: 'web_cookie' }),
+  })
+  if (!resp.ok) throw new Error(`Guest session failed (${resp.status})`)
+  guestSession = await resp.json()
+  sessionStorage.setItem('jade_guest_session', JSON.stringify(guestSession))
+  return guestSession!
+}
+
+function connectMatchWebSocket(matchId: string, token: string) {
+  ws?.close()
+  const httpBase = config.public.matchServerUrl
+  const wsBase = httpBase.replace(/^http/, 'ws')
+  // Browser WebSocket uses HttpOnly cookie set on /api/v1/auth/guest; if cross-port in local dev, fallback poll/reconnect stays synced
+  const socket = new WebSocket(`${wsBase}/api/v1/matches/${matchId}/ws`)
+  ws = socket
+
+  socket.onopen = () => {
+    connectionState.value = 'connected'
+  }
+
+  socket.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(String(ev.data))
+      if (data.match_id) {
+        const prevLen = snapshot.value?.moves_uci.length ?? 0
+        snapshot.value = data as MatchSnapshot
+        syncClocksFromSnapshot(snapshot.value)
+        if (snapshot.value.moves_uci.length > prevLen) {
+          void percussionPlayer.play(material.value, 'place', soundEnabled.value, false)
+          const latestZh = snapshot.value.moves_chinese[snapshot.value.moves_chinese.length - 1]
+          if (latestZh) lastAnnouncement.value = latestZh
+        }
+      }
+    } catch {
+      // Ignore malformed frame
+    }
+  }
+
+  socket.onclose = () => {
+    if (snapshot.value && snapshot.value.status !== 'finished') {
+      connectionState.value = 'reconnecting'
+      setTimeout(() => {
+        void recoverGapAndReconnect(matchId, token)
+      }, 1000)
+    }
+  }
+}
+
+async function recoverGapAndReconnect(matchId: string, token: string) {
+  try {
+    const since = snapshot.value?.seq ?? 0
+    const resp = await fetch(
+      `${config.public.matchServerUrl}/api/v1/matches/${matchId}?since_seq=${since}`,
+      {
+        credentials: 'include',
+        headers: { authorization: `Bearer ${token}` },
+      },
+    )
+    if (resp.ok) {
+      const snap = (await resp.json()) as MatchSnapshot
+      snapshot.value = snap
+      syncClocksFromSnapshot(snap)
+      connectionState.value = 'connected'
+    }
+  } catch {
+    // Keep reconnecting indicator visible
+  }
+}
+
+async function joinAndSubscribe() {
+  errorBanner.value = null
+  try {
+    const sess = await ensureGuestSession()
+    const joinResp = await fetch(
+      `${config.public.matchServerUrl}/api/v1/invitations/${code.value}/join`,
+      {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          authorization: `Bearer ${sess.access_token}`,
+          'x-csrf-token': sess.csrf_token,
+        },
+      },
+    )
+    if (!joinResp.ok) {
+      throw new Error(`Invitation not found or unavailable (${joinResp.status})`)
+    }
+    const joined = await joinResp.json()
+    assignedSide.value = joined.assigned_side
+    snapshot.value = joined.snapshot as MatchSnapshot
+    if (assignedSide.value === 'black') {
+      redBelow.value = false
+    }
+    syncClocksFromSnapshot(snapshot.value)
+    connectionState.value = 'connected'
+    connectMatchWebSocket(snapshot.value.match_id, sess.access_token)
+  } catch (err) {
+    connectionState.value = 'error'
+    errorBanner.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function sendMatchCommand(payload: Record<string, unknown>) {
+  if (!snapshot.value) return
+  errorBanner.value = null
+  const sess = await ensureGuestSession()
+  const resp = await fetch(
+    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/commands`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${sess.access_token}`,
+        'x-csrf-token': sess.csrf_token,
+      },
+      body: JSON.stringify(payload),
+    },
+  )
+  const data = await resp.json()
+  if (!resp.ok) {
+    errorBanner.value = data?.error?.message || `Command rejected (${resp.status})`
+    return
+  }
+  snapshot.value = data as MatchSnapshot
+  syncClocksFromSnapshot(snapshot.value)
+  await refreshBoard()
+}
+
+function coordTuple(uci: string): [number, number] {
+  return [uci.charCodeAt(0) - 97, Number(uci[1])]
+}
+
+async function handleBoardPlayMove(fromUci: string, toUci: string) {
+  selectedUci.value = null
+  // Postgame exploration branch!
+  if (snapshot.value?.status === 'finished' || replayPly.value !== null) {
+    try {
+      const res = await applyCoreMove({
+        fen: STARTING_FEN,
+        movesUci: effectiveMovesUci.value,
+        token: `${fromUci}${toUci}`,
+        traditionalGlyphs: traditionalGlyphs.value,
+      })
+      if (replayPly.value === null) {
+        replayPly.value = snapshot.value?.moves_uci.length ?? 0
+      }
+      postgameBranchMoves.value = [...postgameBranchMoves.value, res.move_uci]
+      await refreshBoard()
+    } catch (err) {
+      errorBanner.value = err instanceof Error ? err.message : String(err)
+    }
+    return
+  }
+
+  if (!snapshot.value || snapshot.value.status !== 'playing') return
+  if (assignedSide.value !== snapshot.value.side_to_move) {
+    errorBanner.value = 'Waiting for opponent move'
+    return
+  }
+
+  const commandId = `cmd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  await sendMatchCommand({
+    type: 'move',
+    protocol: 1,
+    match_id: snapshot.value.match_id,
+    command_id: commandId,
+    expected_seq: snapshot.value.seq,
+    move: {
+      from: coordTuple(fromUci),
+      to: coordTuple(toUci),
+    },
+  })
+}
+
+async function offerDraw() {
+  if (!snapshot.value) return
+  await sendMatchCommand({
+    type: 'offer_draw',
+    protocol: 1,
+    match_id: snapshot.value.match_id,
+    command_id: `draw_offer_${Date.now()}`,
+    expected_seq: snapshot.value.seq,
+  })
+}
+
+async function acceptDraw() {
+  if (!snapshot.value) return
+  await sendMatchCommand({
+    type: 'accept_draw',
+    protocol: 1,
+    match_id: snapshot.value.match_id,
+    command_id: `draw_accept_${Date.now()}`,
+    expected_seq: snapshot.value.seq,
+  })
+}
+
+async function resignMatch() {
+  if (!snapshot.value) return
+  await sendMatchCommand({
+    type: 'resign',
+    protocol: 1,
+    match_id: snapshot.value.match_id,
+    command_id: `resign_${Date.now()}`,
+    expected_seq: snapshot.value.seq,
+  })
+}
+
+async function startRematch() {
+  const sess = await ensureGuestSession()
+  const nextSide = assignedSide.value === 'red' ? 'black' : 'red'
+  const resp = await fetch(`${config.public.matchServerUrl}/api/v1/invitations`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${sess.access_token}`,
+      'x-csrf-token': sess.csrf_token,
+    },
+    body: JSON.stringify({
+      preferred_side: nextSide,
+      clock_initial_ms: snapshot.value?.clock_initial_ms ?? 600_000,
+      clock_increment_ms: snapshot.value?.clock_increment_ms ?? 5_000,
+      is_friendly: true,
+    }),
+  })
+  if (resp.ok) {
+    const created = await resp.json()
+    await router.push(`/invite/${created.invitation_code}`)
+  }
+}
+
+async function savePrivacyPreferences() {
+  if (!snapshot.value) return
+  const sess = await ensureGuestSession()
+  const resp = await fetch(
+    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/privacy`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${sess.access_token}`,
+        'x-csrf-token': sess.csrf_token,
+      },
+      body: JSON.stringify({
+        visibility: desiredVisibility.value,
+        allow_internal_training: consentTraining.value,
+        allow_published_research: consentResearch.value,
+        allow_dataset_release: consentDataset.value,
+      }),
+    },
+  )
+  if (resp.ok) {
+    const res = await resp.json()
+    privacyStatusMsg.value = `Effective visibility: ${res.effective_visibility} (requires both players for public/unlisted)`
+  }
+}
+
+async function copyShareLink() {
+  try {
+    await navigator.clipboard.writeText(shareUrl.value)
+    copiedLink.value = true
+    setTimeout(() => {
+      copiedLink.value = false
+    }, 1800)
+  } catch {
+    // Clipboard unavailable
+  }
+}
+
+onMounted(() => {
+  void joinAndSubscribe()
+  clockTimer = setInterval(() => {
+    // Poll snapshot softly while waiting or reconnecting so cross-origin dev tabs stay immediate even if WS cookie is origin-scoped
+    if (snapshot.value && (snapshot.value.status === 'waiting' || snapshot.value.status === 'playing')) {
+      if (guestSession) {
+        void recoverGapAndReconnect(snapshot.value.match_id, guestSession.access_token)
+      }
+    }
+    if (snapshot.value?.status === 'playing') {
+      if (snapshot.value.side_to_move === 'red' && displayRedMs.value !== null) {
+        displayRedMs.value = Math.max(0, displayRedMs.value - 250)
+      } else if (snapshot.value.side_to_move === 'black' && displayBlackMs.value !== null) {
+        displayBlackMs.value = Math.max(0, displayBlackMs.value - 250)
+      }
+    }
+  }, 250)
+})
+
+watch(code, () => {
+  replayPly.value = null
+  postgameBranchMoves.value = []
+  void joinAndSubscribe()
+})
+
+onBeforeUnmount(() => {
+  if (clockTimer) clearInterval(clockTimer)
+  ws?.close()
+})
+</script>
+
+<template>
+  <div class="match-layout">
+    <div class="board-col">
+      <div class="clock-bar" data-testid="match-clock-bar">
+        <div class="clock-pill" :class="{ active: snapshot?.status === 'playing' && snapshot?.side_to_move === 'black' }">
+          <span>Black</span>
+          <strong data-testid="clock-black">{{ formatClock(displayBlackMs) }}</strong>
+        </div>
+
+        <div class="lifecycle-badge" data-testid="match-status-badge">
+          <template v-if="snapshot?.status === 'waiting'">Waiting for friend…</template>
+          <template v-else-if="snapshot?.status === 'playing'">
+            Live · {{ assignedSide ? `You play ${assignedSide}` : 'Spectating' }}
+          </template>
+          <template v-else-if="snapshot?.status === 'finished'">
+            Finished · {{ snapshot.outcome }} ({{ snapshot.reason_code }})
+          </template>
+          <template v-else>{{ connectionState }}</template>
+        </div>
+
+        <div class="clock-pill" :class="{ active: snapshot?.status === 'playing' && snapshot?.side_to_move === 'red' }">
+          <span>Red</span>
+          <strong data-testid="clock-red">{{ formatClock(displayRedMs) }}</strong>
+        </div>
+      </div>
+
+      <XiangqiBoard
+        v-if="boardData"
+        :snapshot="boardData.snapshot"
+        :material="material"
+        :traditional-glyphs="traditionalGlyphs"
+        :dark-surface="darkSurface"
+        :locale="locale"
+        :interactive="assignedSide !== null || snapshot?.status === 'finished'"
+        :last-announcement="lastAnnouncement"
+        @select-square="(sq) => (selectedUci = sq)"
+        @play-move="handleBoardPlayMove"
+      />
+
+      <div class="match-actions">
+        <button type="button" class="jade-btn" @click="redBelow = !redBelow">
+          {{ t('board.flip') }}
+        </button>
+
+        <template v-if="snapshot?.status === 'playing' && assignedSide">
+          <button
+            v-if="snapshot.draw_offered_by && snapshot.draw_offered_by !== assignedSide"
+            type="button"
+            class="jade-btn jade-btn-primary"
+            data-testid="btn-accept-draw"
+            @click="acceptDraw"
+          >
+            Accept draw offer
+          </button>
+          <button
+            v-else
+            type="button"
+            class="jade-btn"
+            data-testid="btn-offer-draw"
+            @click="offerDraw"
+          >
+            {{ t('action.offer_draw') }}
+          </button>
+
+          <button
+            type="button"
+            class="jade-btn jade-btn-danger"
+            data-testid="btn-resign"
+            @click="resignMatch"
+          >
+            {{ t('action.resign') }}
+          </button>
+        </template>
+
+        <template v-if="snapshot?.status === 'finished'">
+          <button
+            type="button"
+            class="jade-btn jade-btn-primary"
+            data-testid="btn-rematch"
+            @click="startRematch"
+          >
+            {{ t('action.rematch') }}
+          </button>
+        </template>
+      </div>
+
+      <p v-if="errorBanner" class="error-note" data-testid="match-error">{{ errorBanner }}</p>
+    </div>
+
+    <aside class="meta-col">
+      <!-- Waiting / Shareable Link Box -->
+      <section v-if="snapshot?.status === 'waiting'" class="jade-card" data-testid="invite-share-card">
+        <h2 class="card-title">Share invitation link</h2>
+        <p class="card-sub">
+          Send this URL to a friend. Seat credentials are kept in your session and never exposed in the link.
+        </p>
+        <div class="share-row">
+          <input
+            type="text"
+            readonly
+            :value="shareUrl"
+            class="share-input"
+            data-testid="share-link-input"
+          />
+          <button type="button" class="jade-btn jade-btn-primary" @click="copyShareLink">
+            {{ copiedLink ? 'Copied' : 'Copy' }}
+          </button>
+        </div>
+      </section>
+
+      <!-- Move History & Postgame Replay / Alternative Line Tryout -->
+      <section class="jade-card" data-testid="match-moves-card">
+        <div class="moves-top">
+          <h2 class="card-title">Moves ({{ snapshot?.rules_profile || 'program-2023.11-v1' }})</h2>
+          <div v-if="snapshot && snapshot.moves_uci.length > 0" class="scrub-group">
+            <button
+              type="button"
+              class="jade-pill-btn"
+              data-testid="postgame-scrub-start"
+              @click="((replayPly = 0), (postgameBranchMoves = []))"
+            >
+              |&lt;
+            </button>
+            <button
+              type="button"
+              class="jade-pill-btn"
+              data-testid="postgame-scrub-live"
+              @click="((replayPly = null), (postgameBranchMoves = []))"
+            >
+              Live
+            </button>
+          </div>
+        </div>
+
+        <div v-if="postgameBranchMoves.length > 0" class="branch-pill" data-testid="postgame-branch-banner">
+          Trying alternative branch ({{ postgameBranchMoves.join(' ') }})
+          <button
+            type="button"
+            class="jade-pill-btn"
+            @click="((replayPly = null), (postgameBranchMoves = []))"
+          >
+            Reset to game
+          </button>
+        </div>
+
+        <ol class="match-move-list" data-testid="match-move-list">
+          <li
+            v-for="(u, i) in snapshot?.moves_uci || []"
+            :key="`${i}-${u}`"
+            class="move-item"
+            @click="((replayPly = i + 1), (postgameBranchMoves = []))"
+          >
+            <span>{{ i + 1 }}.</span>
+            <strong>{{ notationMode === 'chinese' ? snapshot?.moves_chinese[i] || u : u }}</strong>
+          </li>
+        </ol>
+      </section>
+
+      <!-- Postgame Local Engine Analysis -->
+      <EngineAnalysisCard
+        v-if="snapshot?.status === 'finished'"
+        :fen="STARTING_FEN"
+        :moves-uci="effectiveMovesUci"
+        :state-id="`match:${snapshot.match_id}:${effectiveMovesUci.join(',')}`"
+        @play-engine-move="(uci) => handleBoardPlayMove(uci.slice(0, 2), uci.slice(2, 4))"
+      />
+
+      <!-- Dual-Participant Privacy & Consent Controls (Section 3 & 16) -->
+      <section v-if="assignedSide" class="jade-card privacy-card" data-testid="privacy-consent-card">
+        <h3 class="card-title">Privacy &amp; Research Consent</h3>
+        <p class="card-sub">
+          Personal matches are <strong>private by default</strong>. Public/unlisted sharing and any training or research opt-in take effect only when both participants agree.
+        </p>
+
+        <label class="priv-row">
+          <span>Your visibility choice</span>
+          <select v-model="desiredVisibility" class="jade-select" data-testid="privacy-visibility">
+            <option value="private">Private (default)</option>
+            <option value="unlisted">Unlisted link</option>
+            <option value="public">Public archive</option>
+          </select>
+        </label>
+
+        <label class="priv-check">
+          <input v-model="consentTraining" type="checkbox" />
+          <span>Allow internal model training</span>
+        </label>
+        <label class="priv-check">
+          <input v-model="consentResearch" type="checkbox" />
+          <span>Allow published research analysis</span>
+        </label>
+        <label class="priv-check">
+          <input v-model="consentDataset" type="checkbox" />
+          <span>Allow open dataset release</span>
+        </label>
+
+        <button type="button" class="jade-btn" data-testid="save-privacy-btn" @click="savePrivacyPreferences">
+          Save privacy preferences
+        </button>
+        <p v-if="privacyStatusMsg" class="priv-note" data-testid="privacy-status">{{ privacyStatusMsg }}</p>
+      </section>
+    </aside>
+  </div>
+</template>
+
+<style scoped>
+.match-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 540px) minmax(290px, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+@media (max-width: 880px) {
+  .match-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.board-col,
+.meta-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.clock-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.clock-pill {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(65, 84, 71, 0.25);
+  display: flex;
+  flex-direction: column;
+  min-width: 96px;
+  font-size: 0.8rem;
+}
+
+.clock-pill.active {
+  border-color: #A54837;
+  background: rgba(165, 72, 55, 0.1);
+}
+
+.lifecycle-badge {
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.match-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.card-title {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.card-sub {
+  margin: 0 0 10px;
+  font-size: 0.83rem;
+  opacity: 0.8;
+}
+
+.share-row {
+  display: flex;
+  gap: 8px;
+}
+
+.share-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(65, 84, 71, 0.3);
+  font-size: 0.84rem;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.moves-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.scrub-group {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.branch-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(65, 84, 71, 0.14);
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+}
+
+.match-move-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.move-item {
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(65, 84, 71, 0.1);
+  font-size: 0.84rem;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.privacy-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.priv-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.84rem;
+}
+
+.priv-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.84rem;
+}
+
+.priv-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #415447;
+}
+
+.error-note {
+  margin: 0;
+  font-size: 0.84rem;
+  color: #A54837;
+  text-align: center;
+}
+</style>
