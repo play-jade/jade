@@ -28,12 +28,12 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Verify deterministic board assets and manifests
         run: cargo run --release -p jade-asset-pipeline -- --verify
+      - name: Build and test C++ UCI and mobile engine bridges
+        run: ./dev/build-engines.sh
       - name: Run Rust workspace and WASM compilation checks
         run: |
           cargo test --workspace
           cargo build --release -p core-wasm --target wasm32-unknown-unknown
-      - name: Build and test C++ UCI and mobile engine bridges
-        run: ./dev/build-engines.sh
       - name: Build and test Linux GTK4 + libadwaita native client
         run: |
           cargo test --manifest-path apps/linux/Cargo.toml

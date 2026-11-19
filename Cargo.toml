@@ -10,6 +10,9 @@ members = [
   "crates/match-server",
   "engines/uci-host",
 ]
+exclude = [
+  "apps/linux",
+]
 
 [workspace.package]
 version = "0.1.0"
