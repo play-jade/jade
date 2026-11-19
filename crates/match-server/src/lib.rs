@@ -42,7 +42,9 @@ pub struct AppState {
     pub db: SqlitePool,
     pub archive: Arc<SampleArchiveProvider>,
     pub matches: Arc<RwLock<HashMap<String, MatchActorHandle>>>,
+    pub rematch_lock: Arc<tokio::sync::Mutex<()>>,
     pub allowed_origins: Arc<Vec<String>>,
+    _db_owner_lock: Option<Arc<std::fs::File>>,
 }
 
 pub struct MailboxEnvelope {
@@ -216,9 +218,70 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(h.finalize())
 }
 
+fn extract_sqlite_file_path(sqlite_url: &str) -> Option<std::path::PathBuf> {
+    let rest = sqlite_url
+        .strip_prefix("sqlite://")
+        .or_else(|| sqlite_url.strip_prefix("sqlite:"))
+        .unwrap_or(sqlite_url);
+    let (path_part, query_part) = match rest.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (rest, ""),
+    };
+    if path_part.is_empty()
+        || path_part == ":memory:"
+        || query_part.split('&').any(|kv| kv == "mode=memory")
+    {
+        return None;
+    }
+    Some(std::path::PathBuf::from(path_part))
+}
+
+fn acquire_exclusive_sqlite_lock(
+    sqlite_url: &str,
+) -> Result<Option<Arc<std::fs::File>>, sqlx::Error> {
+    let Some(db_path) = extract_sqlite_file_path(sqlite_url) else {
+        return Ok(None);
+    };
+    if let Some(parent) = db_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(sqlx::Error::Io)?;
+    }
+    let mut lock_os = db_path.into_os_string();
+    lock_os.push(".owner.lock");
+    let lock_path = std::path::PathBuf::from(lock_os);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(sqlx::Error::Io)?;
+    file.try_lock().map_err(|_| {
+        sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "SQLite database lock {} is already held by a running match-server",
+                lock_path.display()
+            ),
+        ))
+    })?;
+    Ok(Some(Arc::new(file)))
+}
+
 pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> {
+    // Establish exclusive ownership BEFORE opening or interrupting any stored matches!
+    let owner_lock = acquire_exclusive_sqlite_lock(sqlite_url)?;
     let db = SqlitePoolOptions::new()
         .max_connections(8)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA busy_timeout = 5000;")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(sqlite_url)
         .await?;
     sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&db).await?;
@@ -228,6 +291,7 @@ pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> 
         db,
         archive: Arc::new(SampleArchiveProvider::new_embedded()),
         matches: Arc::new(RwLock::new(HashMap::new())),
+        rematch_lock: Arc::new(tokio::sync::Mutex::new(())),
         allowed_origins: Arc::new(vec![
             "http://localhost:3000".to_string(),
             "http://127.0.0.1:3000".to_string(),
@@ -236,6 +300,7 @@ pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> 
             "http://localhost:4180".to_string(),
             "http://127.0.0.1:4180".to_string(),
         ]),
+        _db_owner_lock: owner_lock,
     })
 }
 
@@ -672,7 +737,7 @@ async fn join_invitation(
 ) -> Result<Json<JoinInvitationResponse>, ApiError> {
     let joiner_id = authenticate_request(&state, &headers, true).await?;
     let row = sqlx::query(
-        "SELECT match_id, red_account_id, black_account_id, status FROM matches WHERE invitation_code = ?",
+        "SELECT match_id, red_account_id, black_account_id, status, rematch_of_match_id FROM matches WHERE invitation_code = ?",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -691,6 +756,31 @@ async fn join_invitation(
     let match_id: String = row.get("match_id");
     let red_id: Option<String> = row.get("red_account_id");
     let blk_id: Option<String> = row.get("black_account_id");
+    let rematch_of_id: Option<String> = row.get("rematch_of_match_id");
+
+    // If this invitation is a linked rematch, reserve the open seat strictly for the original match's participants!
+    let eligible_to_claim_seat = if let Some(ref orig_mid) = rematch_of_id {
+        if let Some(orig_row) =
+            sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
+                .bind(orig_mid)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| ApiError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    code: "db_error",
+                    message: e.to_string(),
+                })?
+        {
+            let orig_red: Option<String> = orig_row.get("red_account_id");
+            let orig_blk: Option<String> = orig_row.get("black_account_id");
+            orig_red.as_deref() == Some(joiner_id.as_str())
+                || orig_blk.as_deref() == Some(joiner_id.as_str())
+        } else {
+            false
+        }
+    } else {
+        true
+    };
 
     // Opening a link never overwrites an already occupied seat (Section 3)!
     let mut transitioned_to_playing = false;
@@ -698,6 +788,8 @@ async fn join_invitation(
         Some(Side::Red)
     } else if blk_id.as_deref() == Some(joiner_id.as_str()) {
         Some(Side::Black)
+    } else if !eligible_to_claim_seat {
+        None
     } else if red_id.is_none() {
         let now = now_utc_ms();
         let next_status = if blk_id.is_some() {
@@ -785,6 +877,7 @@ async fn join_invitation(
     if assigned_side.is_some() {
         let _ = actor.bcast.send(snapshot.clone());
     }
+    let snapshot = redact_snapshot_for_viewer(&state.db, snapshot, Some(&joiner_id)).await;
     Ok(Json(JoinInvitationResponse {
         match_id,
         assigned_side,
@@ -807,7 +900,42 @@ async fn get_match_snapshot(
     // Enforce private-by-default access check (Section 3 & 9)!
     check_match_read_access(&state.db, &match_id, viewer.as_deref()).await?;
     let snap = load_match_snapshot(&state.db, &match_id, q.since_seq).await?;
+    let snap = redact_snapshot_for_viewer(&state.db, snap, viewer.as_deref()).await;
     Ok(Json(snap))
+}
+
+async fn is_match_participant(
+    db: &SqlitePool,
+    match_id: &str,
+    viewer_account_id: Option<&str>,
+) -> bool {
+    let Some(v) = viewer_account_id else {
+        return false;
+    };
+    let Ok(Some(row)) =
+        sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
+            .bind(match_id)
+            .fetch_optional(db)
+            .await
+    else {
+        return false;
+    };
+    let red: Option<String> = row.get("red_account_id");
+    let blk: Option<String> = row.get("black_account_id");
+    red.as_deref() == Some(v) || blk.as_deref() == Some(v)
+}
+
+async fn redact_snapshot_for_viewer(
+    db: &SqlitePool,
+    mut snap: MatchSnapshotResponse,
+    viewer_account_id: Option<&str>,
+) -> MatchSnapshotResponse {
+    if snap.next_rematch_invitation_code.is_some()
+        && !is_match_participant(db, &snap.match_id, viewer_account_id).await
+    {
+        snap.next_rematch_invitation_code = None;
+    }
+    snap
 }
 
 async fn check_match_read_access(
@@ -1067,6 +1195,7 @@ async fn ws_match_stream(
     check_match_read_access(&state.db, &match_id, Some(&account_id)).await?;
     let actor = ensure_match_actor(&state, &match_id).await?;
     let init_snap = load_match_snapshot(&state.db, &match_id, None).await?;
+    let init_snap = redact_snapshot_for_viewer(&state.db, init_snap, Some(&account_id)).await;
 
     let db = state.db.clone();
     Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, db, actor, account_id, init_snap)))
@@ -1097,6 +1226,7 @@ async fn handle_ws_client(
                     let _ = socket.send(Message::Close(None)).await;
                     break;
                 }
+                let snap = redact_snapshot_for_viewer(&db, snap, Some(&account_id)).await;
                 if let Ok(json) = serde_json::to_string(&snap)
                     && socket.send(Message::Text(json.into())).await.is_err()
                 {
@@ -2112,6 +2242,8 @@ async fn create_or_get_rematch(
     Path(match_id): Path<String>,
 ) -> Result<Json<InvitationCreatedResponse>, ApiError> {
     let caller_id = authenticate_request(&state, &headers, true).await?;
+    // Serialize rematch lookup + creation so simultaneous requests from both seats never race on `next_rematch_id`!
+    let _rematch_guard = state.rematch_lock.lock().await;
     let mut tx = state.db.begin().await.map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: "db_error",

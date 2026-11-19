@@ -369,9 +369,29 @@ async function acceptTakeback() {
   })
 }
 
-function exportMatchPgn() {
+async function exportMatchPgn() {
   if (!snapshot.value || typeof window === 'undefined') return
-  window.open(`${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/export.pgn`, '_blank')
+  const sess = await ensureGuestSession()
+  const resp = await fetch(
+    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/export.pgn`,
+    {
+      credentials: 'include',
+      headers: {
+        authorization: `Bearer ${sess.access_token}`,
+      },
+    },
+  )
+  if (!resp.ok) return
+  const pgnText = await resp.text()
+  const blob = new Blob([pgnText], { type: 'application/x-chess-pgn;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `jade-${snapshot.value.match_id}.pgn`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }
 
 async function startRematch() {

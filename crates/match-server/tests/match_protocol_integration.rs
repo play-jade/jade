@@ -1028,3 +1028,198 @@ async fn slice_b_takeback_rematch_pgn_export_app_links_and_outage_interruption()
     assert_eq!(join_rem_blk.assigned_side, Some(Side::Red));
     assert_eq!(join_rem_blk.snapshot.status, "playing");
 }
+
+#[tokio::test]
+async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protection() {
+    let tmp_db = format!(
+        "/tmp/jade_owner_lock_test_{}.db",
+        std::process::id()
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos())
+    );
+    let sqlite_url = format!("sqlite:{tmp_db}?mode=rwc");
+
+    let state1 = build_app_state(&sqlite_url).await.unwrap();
+    let app1 = build_router(state1.clone());
+
+    let (red, _) = new_guest(&app1, "Owner Red").await;
+    let (blk, _) = new_guest(&app1, "Owner Black").await;
+    let (spec, _) = new_guest(&app1, "Spectator").await;
+
+    // Start a timed match on state1
+    let inv: InvitationCreatedResponse = json_body(
+        app1.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/invitations")
+                    .header("authorization", format!("Bearer {}", red.access_token))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "preferred_side": "red",
+                            "clock_initial_ms": 300_000,
+                            "clock_increment_ms": 3_000
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let _: JoinInvitationResponse = json_body(
+        app1.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invitations/{}/join", inv.invitation_code))
+                    .header("authorization", format!("Bearer {}", blk.access_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    // 1. Duplicate server startup against the live DB MUST fail before interrupting active matches!
+    let dup_res = build_app_state(&sqlite_url).await;
+    assert!(
+        dup_res.is_err(),
+        "duplicate build_app_state against owned DB must fail"
+    );
+    let live_snap: MatchSnapshotResponse = json_body(
+        app1.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/matches/{}", inv.match_id))
+                    .header("authorization", format!("Bearer {}", red.access_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        live_snap.status, "playing",
+        "failed duplicate startup must not interrupt live match"
+    );
+
+    // Make match `public` so spectators can view it once finished/interrupted
+    for tok in [&red.access_token, &blk.access_token] {
+        let _ = app1
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/matches/{}/privacy", inv.match_id))
+                    .header("authorization", format!("Bearer {tok}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&PrivacyUpdateRequest {
+                            visibility: Visibility::Public,
+                            allow_internal_training: false,
+                            allow_published_research: false,
+                            allow_dataset_release: false,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Now drop `app1` and `state1` (simulating process exit) -> restarted server acquires lock & interrupts orphaned timed match!
+    drop(app1);
+    drop(state1);
+
+    let state2 = build_app_state(&sqlite_url).await.unwrap();
+    let app2 = build_router(state2);
+
+    // 2. Simultaneous rematch requests from Red and Black serialize cleanly without SQLITE_BUSY!
+    let fut_red = app2.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/matches/{}/rematch", inv.match_id))
+            .header("authorization", format!("Bearer {}", red.access_token))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let fut_blk = app2.clone().oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/matches/{}/rematch", inv.match_id))
+            .header("authorization", format!("Bearer {}", blk.access_token))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let (r_red, r_blk) = tokio::join!(fut_red, fut_blk);
+    let r_red = r_red.unwrap();
+    let r_blk = r_blk.unwrap();
+    assert_eq!(r_red.status(), StatusCode::OK);
+    assert_eq!(r_blk.status(), StatusCode::OK);
+    let c_red: InvitationCreatedResponse = json_body(r_red).await;
+    let c_blk: InvitationCreatedResponse = json_body(r_blk).await;
+    assert_eq!(c_red.match_id, c_blk.match_id);
+    assert_eq!(c_red.invitation_code, c_blk.invitation_code);
+
+    // 3. Spectator reading the public finished match sees `next_rematch_invitation_code == None`,
+    // whereas participants see `Some(code)`, AND spectator cannot claim a seat in the private rematch!
+    let spec_snap: MatchSnapshotResponse = json_body(
+        app2.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/matches/{}", inv.match_id))
+                    .header("authorization", format!("Bearer {}", spec.access_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(spec_snap.next_rematch_invitation_code, None);
+
+    let part_snap: MatchSnapshotResponse = json_body(
+        app2.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/matches/{}", inv.match_id))
+                    .header("authorization", format!("Bearer {}", blk.access_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        part_snap.next_rematch_invitation_code.as_deref(),
+        Some(c_red.invitation_code.as_str())
+    );
+
+    let hijack_resp = app2
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/invitations/{}/join",
+                    c_red.invitation_code
+                ))
+                .header("authorization", format!("Bearer {}", spec.access_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hijack_resp.status(), StatusCode::FORBIDDEN);
+
+    let _ = std::fs::remove_file(&tmp_db);
+    let _ = std::fs::remove_file(format!("{tmp_db}.owner.lock"));
+}

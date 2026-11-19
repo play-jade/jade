@@ -276,13 +276,24 @@ final class MacBoardController: ObservableObject {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    @discardableResult
+    func writePgn(to url: URL) -> Bool {
+        do {
+            try formatAsPgn().write(to: url, atomically: true, encoding: .utf8)
+            statusLine = "Exported \(movesUci.count) plies to \(url.lastPathComponent)"
+            return true
+        } catch {
+            statusLine = "PGN export failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     func exportPgnInteractive() {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "jade-game.pgn"
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
-            try? formatAsPgn().write(to: url, atomically: true, encoding: .utf8)
-            statusLine = "Exported \(movesUci.count) plies to \(url.lastPathComponent)"
+            writePgn(to: url)
         }
     }
 
@@ -291,18 +302,23 @@ final class MacBoardController: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url,
-           let raw = try? String(contentsOf: url, encoding: .utf8) {
-            loadFromPgnText(raw)
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let raw = try String(contentsOf: url, encoding: .utf8)
+                loadFromPgnText(raw)
+            } catch {
+                statusLine = "PGN import failed: \(error.localizedDescription)"
+            }
         }
     }
 
-    func loadFromPgnText(_ raw: String) {
+    @discardableResult
+    func loadFromPgnText(_ raw: String) -> Bool {
         var stripped = ""
         var inBrace = false
         for line in raw.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("[") || trimmed.isEmpty { continue }
+            if trimmed.hasPrefix("[") || trimmed.hasPrefix(";") || trimmed.isEmpty { continue }
             for ch in trimmed {
                 if ch == "{" { inBrace = true }
                 else if ch == "}" { inBrace = false }
@@ -314,8 +330,14 @@ final class MacBoardController: ObservableObject {
         var importedUci: [String] = []
         var importedZh: [String] = []
         for rawTok in stripped.split(whereSeparator: { $0.isWhitespace }) {
-            let tok = String(rawTok).trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            if tok.isEmpty || tok.allSatisfy({ $0.isNumber }) { continue }
+            var candidateTok = String(rawTok)
+            if let dotIdx = candidateTok.firstIndex(of: "."),
+               candidateTok[..<dotIdx].allSatisfy({ $0.isASCII && $0.isNumber }) {
+                let afterDots = candidateTok[dotIdx...].drop(while: { $0 == "." })
+                candidateTok = String(afterDots)
+            }
+            let tok = candidateTok.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            if tok.isEmpty || tok.allSatisfy({ $0.isASCII && $0.isNumber }) { continue }
             if ["1-0", "0-1", "1/2-1/2", "*"].contains(tok) { continue }
             let prevLegal = (try? fresh.summary())?.legalMovesUci ?? []
             if let zh = try? fresh.applyMoveToken(token: tok) {
@@ -335,8 +357,13 @@ final class MacBoardController: ObservableObject {
                 }
                 importedZh.append(zh)
             } else {
-                break
+                statusLine = "PGN import failed at ply \(importedUci.count + 1) (\(tok)); current game preserved"
+                return false
             }
+        }
+        guard !importedUci.isEmpty else {
+            statusLine = "PGN import failed: no moves found; current game preserved"
+            return false
         }
         session = fresh
         movesUci = importedUci
@@ -346,6 +373,7 @@ final class MacBoardController: ObservableObject {
         selectedUci = nil
         legalDestUcis.removeAll()
         refreshStatus()
+        return true
     }
 
     private func refreshStatus() {
