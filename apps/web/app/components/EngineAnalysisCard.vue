@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 
 const props = defineProps<{
   fen: string
@@ -25,7 +25,15 @@ const {
   errorMsg,
   startAnalysis,
   stopAnalysis,
+  invalidateForState,
 } = useLocalEngine()
+
+watch(
+  () => props.stateId,
+  (nextId) => {
+    void invalidateForState(nextId)
+  },
+)
 
 const formattedEval = computed(() => {
   if (mateRed.value !== null) {

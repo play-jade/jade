@@ -63,9 +63,13 @@ const consentResearch = ref(false)
 const consentDataset = ref(false)
 const privacyStatusMsg = ref<string | null>(null)
 
-// Live clock interpolation
+// Live clock interpolation anchored to monotonic performance.now()
 const displayRedMs = ref<number | null>(null)
 const displayBlackMs = ref<number | null>(null)
+let baseRedMs: number | null = null
+let baseBlackMs: number | null = null
+let clockAnchorPerfMs = 0
+let pollTickCount = 0
 let clockTimer: ReturnType<typeof setInterval> | null = null
 let ws: WebSocket | null = null
 let guestSession: { account_id: string; access_token: string; csrf_token: string } | null = null
@@ -105,6 +109,9 @@ const { data: boardData, refresh: refreshBoard } = await useAsyncData(
 )
 
 function syncClocksFromSnapshot(snap: MatchSnapshot) {
+  baseRedMs = snap.red_remaining_ms
+  baseBlackMs = snap.black_remaining_ms
+  clockAnchorPerfMs = typeof performance !== 'undefined' ? performance.now() : Date.now()
   displayRedMs.value = snap.red_remaining_ms
   displayBlackMs.value = snap.black_remaining_ms
 }
@@ -403,17 +410,24 @@ async function copyShareLink() {
 onMounted(() => {
   void joinAndSubscribe()
   clockTimer = setInterval(() => {
-    // Poll snapshot softly while waiting or reconnecting so cross-origin dev tabs stay immediate even if WS cookie is origin-scoped
-    if (snapshot.value && (snapshot.value.status === 'waiting' || snapshot.value.status === 'playing')) {
+    pollTickCount = (pollTickCount + 1) % 4
+    // Only poll HTTP when waiting for seat join or when WebSocket is reconnecting (never overwrite smooth live clocks every 250 ms!)
+    if (
+      snapshot.value &&
+      pollTickCount === 0 &&
+      (snapshot.value.status === 'waiting' || connectionState.value !== 'connected')
+    ) {
       if (guestSession) {
         void recoverGapAndReconnect(snapshot.value.match_id, guestSession.access_token)
       }
     }
     if (snapshot.value?.status === 'playing') {
-      if (snapshot.value.side_to_move === 'red' && displayRedMs.value !== null) {
-        displayRedMs.value = Math.max(0, displayRedMs.value - 250)
-      } else if (snapshot.value.side_to_move === 'black' && displayBlackMs.value !== null) {
-        displayBlackMs.value = Math.max(0, displayBlackMs.value - 250)
+      const nowPerf = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      const elapsed = Math.max(0, Math.floor(nowPerf - clockAnchorPerfMs))
+      if (snapshot.value.side_to_move === 'red' && baseRedMs !== null) {
+        displayRedMs.value = Math.max(0, baseRedMs - elapsed)
+      } else if (snapshot.value.side_to_move === 'black' && baseBlackMs !== null) {
+        displayBlackMs.value = Math.max(0, baseBlackMs - elapsed)
       }
     }
   }, 250)

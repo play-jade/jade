@@ -292,6 +292,9 @@ impl Move {
 
     pub fn from_uci_or_iccs(s: &str) -> Result<Self, CoreError> {
         let trimmed = s.trim();
+        if !trimmed.is_ascii() {
+            return Err(CoreError::InvalidMoveFormat(s.to_string()));
+        }
         if trimmed.len() == 4 {
             let from = Square::from_uci(&trimmed[0..2])?;
             let to = Square::from_uci(&trimmed[2..4])?;
@@ -359,5 +362,18 @@ impl PositionKey {
             canonical_bytes: bytes,
             sha256_hex,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_ascii_four_or_five_byte_tokens_return_err_without_panicking() {
+        assert!(Move::from_uci_or_iccs("炮1").is_err());
+        assert!(Move::from_uci_or_iccs("炮-1").is_err());
+        let board = crate::Board::default();
+        assert!(crate::parse_move_token(&board, "炮1", 0).is_err());
     }
 }

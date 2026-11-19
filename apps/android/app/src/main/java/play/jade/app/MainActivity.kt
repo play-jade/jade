@@ -34,6 +34,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.floor
 import kotlin.math.min
+import uniffi.core_ffi.FfiGameSession
 
 /**
  * Native Android client using Kotlin + Jetpack Compose, Compose Canvas/DrawScope with an
@@ -163,16 +164,36 @@ private fun handleAndroidSquareIntent(
         update(null, moves)
         return
     }
-    if (currentSelected == null) {
-        update(sq, moves)
-    } else if (currentSelected == sq) {
-        update(null, moves)
-    } else {
-        val uci = "${'a' + currentSelected.first}${currentSelected.second}${'a' + sq.first}${sq.second}"
-        val updated = moves + uci
-        db.saveActiveMoves(updated)
-        audio.playPlaceOnce()
-        update(null, updated)
+    val targetUci = "${'a' + sq.first}${sq.second}"
+    FfiGameSession("program-2023.11-v1").use { session ->
+        for (pastMove in moves) {
+            if (runCatching { session.applyMoveToken(pastMove) }.isFailure) {
+                break
+            }
+        }
+        val legalPrefixes = runCatching { session.summary().legalMovesUci }.getOrDefault(emptyList())
+
+        if (currentSelected == null) {
+            if (legalPrefixes.any { it.startsWith(targetUci) }) {
+                update(sq, moves)
+            } else {
+                update(null, moves)
+            }
+        } else if (currentSelected == sq) {
+            update(null, moves)
+        } else {
+            val uci = "${'a' + currentSelected.first}${currentSelected.second}$targetUci"
+            if (runCatching { session.applyMoveToken(uci) }.isSuccess) {
+                val updated = moves + uci
+                db.saveActiveMoves(updated)
+                audio.playPlaceOnce()
+                update(null, updated)
+            } else if (legalPrefixes.any { it.startsWith(targetUci) }) {
+                update(sq, moves)
+            } else {
+                update(null, moves)
+            }
+        }
     }
 }
 

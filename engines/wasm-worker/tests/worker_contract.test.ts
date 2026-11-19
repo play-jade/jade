@@ -156,6 +156,26 @@ export async function runWasmWorkerContractSuite(): Promise<void> {
   assert(cancelledRes.cancelled === true, "explicitly cancelled search must mark cancelled=true");
   assert(cancelledRes.best_move !== null, "cancelled search must still return legal fallback/best move");
 
+  // 7. Cancelling a queued search while an earlier infinite search is still active settles both promises.
+  const searchA = adapter.search({
+    search_id: "wasm-queue-a",
+    state_id: "board-queue-a",
+    fen: "startpos",
+    limits: { infinite: true },
+  });
+  const searchB = adapter.search({
+    search_id: "wasm-queue-b",
+    state_id: "board-queue-b",
+    fen: "startpos",
+    limits: { infinite: true },
+  });
+  await adapter.cancel("wasm-queue-b");
+  const resB = await searchB;
+  assert(resB.cancelled === true, "cancelled queued search B must settle with cancelled=true");
+  await adapter.cancel("wasm-queue-a");
+  const resA = await searchA;
+  assert(resA.cancelled === true, "cancelled active search A must settle with cancelled=true");
+
   await adapter.dispose();
 }
 

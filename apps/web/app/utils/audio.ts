@@ -5,11 +5,11 @@ export type PercussionEvent = 'place' | 'capture' | 'check'
 function audioDirForMaterial(material: MaterialFamilyId): string {
   switch (material) {
     case 'pale-jade':
-      return 'jade-stone'
+      return 'jade'
     case 'boxwood':
       return 'boxwood'
     case 'ivory-stone':
-      return 'soft-felt'
+      return 'ivory-stone'
   }
 }
 

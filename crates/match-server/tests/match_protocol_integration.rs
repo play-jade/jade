@@ -181,6 +181,45 @@ async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
     assert_eq!(blk_join.assigned_side, Some(Side::Black));
     assert_eq!(blk_join.snapshot.status, "playing");
 
+    // 3b. While match is private (default), an unseated 3rd user MUST be denied snapshot access on join!
+    let join_spec_private = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/v1/invitations/{}/join",
+            created.invitation_code
+        ))
+        .header(
+            "authorization",
+            format!("Bearer {}", spec_guest.access_token),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let spec_priv_resp = app.clone().oneshot(join_spec_private).await.unwrap();
+    assert_eq!(spec_priv_resp.status(), StatusCode::FORBIDDEN);
+
+    // Once both participants opt into `unlisted`, 3rd user joins as Spectator (`assigned_side == None`)!
+    for token in [&red_guest.access_token, &blk_guest.access_token] {
+        let share_req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/matches/{}/privacy", created.match_id))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&PrivacyUpdateRequest {
+                    visibility: Visibility::Unlisted,
+                    allow_internal_training: false,
+                    allow_published_research: false,
+                    allow_dataset_release: false,
+                })
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(share_req).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
     let join_spec = Request::builder()
         .method("POST")
         .uri(format!(
@@ -580,4 +619,181 @@ async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
     assert_eq!(red_fin_snap.status, "finished");
     assert_eq!(red_fin_snap.outcome.as_deref(), Some("red_win"));
     assert_eq!(red_fin_snap.reason_code.as_deref(), Some("resignation"));
+}
+
+#[tokio::test]
+async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state.clone());
+
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let (spec, _) = new_guest(&app, "Spectator").await;
+
+    // 1. Proactive automatic flag-fall timeout with zero incoming commands (`80ms` initial clock)!
+    let fast_create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "preferred_side": "red",
+                "clock_initial_ms": 80,
+                "clock_increment_ms": 0
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let fast_inv: InvitationCreatedResponse =
+        json_body(app.clone().oneshot(fast_create).await.unwrap()).await;
+
+    let fast_join = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/v1/invitations/{}/join",
+            fast_inv.invitation_code
+        ))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let _: JoinInvitationResponse = json_body(app.clone().oneshot(fast_join).await.unwrap()).await;
+
+    // Sleep past 80ms without sending any commands; actor deadline timer must commit & broadcast timeout!
+    tokio::time::sleep(std::time::Duration::from_millis(160)).await;
+
+    let snap_req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/matches/{}", fast_inv.match_id))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let timed_out: MatchSnapshotResponse =
+        json_body(app.clone().oneshot(snap_req).await.unwrap()).await;
+    assert_eq!(timed_out.status, "finished");
+    assert_eq!(timed_out.outcome.as_deref(), Some("black_win"));
+    assert_eq!(timed_out.reason_code.as_deref(), Some("timeout"));
+
+    // 2. Draw offer recovery across actor eviction + spectator WebSocket revocation on privacy withdrawal!
+    let g2_create = Request::builder()
+        .method("POST")
+        .uri("/api/v1/invitations")
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "preferred_side": "red", "clock_initial_ms": 600_000 }).to_string(),
+        ))
+        .unwrap();
+    let g2: InvitationCreatedResponse =
+        json_body(app.clone().oneshot(g2_create).await.unwrap()).await;
+    let g2_join = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/invitations/{}/join", g2.invitation_code))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let _: JoinInvitationResponse = json_body(app.clone().oneshot(g2_join).await.unwrap()).await;
+
+    // Both opt into `public` so Spectator can connect a WebSocket
+    for tok in [&red.access_token, &blk.access_token] {
+        let p = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/matches/{}/privacy", g2.match_id))
+            .header("authorization", format!("Bearer {tok}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&PrivacyUpdateRequest {
+                    visibility: Visibility::Public,
+                    allow_internal_training: true,
+                    allow_published_research: false,
+                    allow_dataset_release: false,
+                })
+                .unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(p).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    let ws_url = format!("ws://localhost:3000/api/v1/matches/{}/ws", g2.match_id);
+    let mut spec_ws_req = ws_url.into_client_request().unwrap();
+    spec_ws_req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", spec.access_token).parse().unwrap(),
+    );
+    let mut spec_ws = connect_ws_duplex(&app, spec_ws_req).await.unwrap();
+    let _initial = spec_ws.next().await.unwrap().unwrap();
+
+    // Red revokes visibility back to `Private`: Spectator WS must be closed without receiving private updates!
+    let revoke_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/privacy", g2.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&PrivacyUpdateRequest {
+                visibility: Visibility::Private,
+                allow_internal_training: false,
+                allow_published_research: false,
+                allow_dataset_release: false,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(revoke_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let next_spec_frame = spec_ws.next().await;
+    assert!(
+        matches!(
+            next_spec_frame,
+            None | Some(Ok(Message::Close(_))) | Some(Err(_))
+        ),
+        "spectator WS must close when match becomes private, got {next_spec_frame:?}"
+    );
+
+    // Red offers draw, then we evict in-memory actors (`state.matches.write().await.clear()`) to simulate restart!
+    let offer_cmd = MatchCommandRequest::OfferDraw {
+        protocol: 1,
+        match_id: g2.match_id.clone(),
+        command_id: "offer_1".to_string(),
+        expected_seq: 0,
+    };
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", g2.match_id))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&offer_cmd).unwrap()))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(offer_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    state.matches.write().await.clear();
+
+    // Black accepts draw against freshly reconstructed actor -> MUST succeed!
+    let accept_cmd = MatchCommandRequest::AcceptDraw {
+        protocol: 1,
+        match_id: g2.match_id.clone(),
+        command_id: "accept_1".to_string(),
+        expected_seq: 1,
+    };
+    let accept_req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{}/commands", g2.match_id))
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&accept_cmd).unwrap()))
+        .unwrap();
+    let accept_resp = app.clone().oneshot(accept_req).await.unwrap();
+    assert_eq!(accept_resp.status(), StatusCode::OK);
+    let fin_snap: MatchSnapshotResponse = json_body(accept_resp).await;
+    assert_eq!(fin_snap.status, "finished");
+    assert_eq!(fin_snap.reason_code.as_deref(), Some("agreed_draw"));
 }

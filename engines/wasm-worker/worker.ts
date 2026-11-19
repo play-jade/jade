@@ -184,10 +184,43 @@ export class XiangqiWorkerRuntime {
         }
 
         case "cancel": {
-          if (!cmd.search_id || cmd.search_id === this.activeSearchId ||
-              cmd.search_id === this.latestQueuedSearch?.cmd.search_id) {
-            this.activeGeneration++;
+          const matchesQueued =
+            this.latestQueuedSearch !== null &&
+            (!cmd.search_id || cmd.search_id === this.latestQueuedSearch.cmd.search_id);
+          const matchesActive =
+            this.activeSearchId !== null &&
+            (!cmd.search_id || cmd.search_id === this.activeSearchId);
+
+          if (matchesQueued && this.latestQueuedSearch) {
+            const dropped = this.latestQueuedSearch.cmd;
             this.latestQueuedSearch = null;
+            const manifest = this.engine.getManifest();
+            this.endpoint.postMessage({
+              type: "complete",
+              status: "cancelled",
+              cancelled: true,
+              superseded: false,
+              stale: true,
+              search_id: dropped.search_id,
+              state_id: dropped.state_id,
+              depth: 0,
+              seldepth: 0,
+              nodes: 0,
+              nps: 0,
+              time_ms: 0,
+              hashfull: 0,
+              side_to_move: "red",
+              score: { kind: "cp", value: 0, red_value: 0, mate: null, perspective: "side_to_move" },
+              best_move: null,
+              pv: [],
+              lines: [],
+              ...manifest,
+              manifest,
+            });
+          }
+
+          if (matchesActive || !cmd.search_id) {
+            this.activeGeneration++;
             this.engine.requestStop();
           }
           return;

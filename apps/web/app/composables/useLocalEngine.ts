@@ -16,6 +16,19 @@ export function useLocalEngine() {
 
   let adapter: BrowserWorkerSearchAdapter | null = null
   let searchSeq = 0
+  let activeRunToken = 0
+  let activeStateId: string | null = null
+
+  function clearDisplayedAnalysis() {
+    depth.value = 0
+    nodes.value = 0
+    nps.value = 0
+    scoreRedCp.value = null
+    mateRed.value = null
+    pvUci.value = []
+    bestMoveUci.value = null
+    errorMsg.value = null
+  }
 
   async function ensureAdapter(): Promise<BrowserWorkerSearchAdapter> {
     if (!adapter) {
@@ -28,17 +41,30 @@ export function useLocalEngine() {
     return adapter
   }
 
+  async function invalidateForState(nextStateId: string) {
+    if (activeStateId === nextStateId) return
+    activeStateId = nextStateId
+    activeRunToken++
+    clearDisplayedAnalysis()
+    if (adapter && isAnalyzing.value) {
+      isAnalyzing.value = false
+      await adapter.cancel()
+    }
+  }
+
   async function startAnalysis(params: { fen: string; movesUci?: string[]; stateId: string; movetimeMs?: number }) {
     errorMsg.value = null
+    const runToken = ++activeRunToken
+    activeStateId = params.stateId
     try {
       const eng = await ensureAdapter()
+      if (runToken !== activeRunToken) return
       if (isAnalyzing.value) {
         await eng.cancel()
       }
+      if (runToken !== activeRunToken) return
       isAnalyzing.value = true
-      depth.value = 0
-      pvUci.value = []
-      bestMoveUci.value = null
+      clearDisplayedAnalysis()
 
       const searchId = `web-search-${++searchSeq}`
       const done = await eng.search({
@@ -51,6 +77,7 @@ export function useLocalEngine() {
           movetime_ms: params.movetimeMs ?? 800,
         },
         onInfo: (info) => {
+          if (runToken !== activeRunToken || activeStateId !== params.stateId) return
           depth.value = info.depth
           nodes.value = info.nodes
           nps.value = info.nps
@@ -65,6 +92,10 @@ export function useLocalEngine() {
         },
       })
 
+      if (runToken !== activeRunToken || activeStateId !== params.stateId || done.cancelled || done.stale) {
+        return
+      }
+
       bestMoveUci.value = done.best_move
       if (done.pv.length > 0) {
         pvUci.value = done.pv
@@ -77,20 +108,26 @@ export function useLocalEngine() {
         scoreRedCp.value = null
       }
     } catch (err) {
-      errorMsg.value = err instanceof Error ? err.message : String(err)
+      if (runToken === activeRunToken) {
+        errorMsg.value = err instanceof Error ? err.message : String(err)
+      }
     } finally {
-      isAnalyzing.value = false
+      if (runToken === activeRunToken) {
+        isAnalyzing.value = false
+      }
     }
   }
 
   async function stopAnalysis() {
+    activeRunToken++
     if (adapter && isAnalyzing.value) {
-      await adapter.cancel()
       isAnalyzing.value = false
+      await adapter.cancel()
     }
   }
 
   onBeforeUnmount(() => {
+    activeRunToken++
     void adapter?.dispose()
     adapter = null
   })
@@ -109,5 +146,6 @@ export function useLocalEngine() {
     errorMsg,
     startAnalysis,
     stopAnalysis,
+    invalidateForState,
   }
 }

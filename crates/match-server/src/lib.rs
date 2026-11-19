@@ -15,7 +15,7 @@ use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -26,9 +26,14 @@ use xiangqi_core::{
 
 const INITIAL_SCHEMA_SQL: &str = include_str!("../../../db/game/0001_initial_game_schema.sql");
 
+pub enum ActorMsg {
+    Command(MailboxEnvelope),
+    StartPlaying { started_at: Instant },
+}
+
 #[derive(Clone)]
 pub struct MatchActorHandle {
-    pub tx: mpsc::Sender<MailboxEnvelope>,
+    pub tx: mpsc::Sender<ActorMsg>,
     pub bcast: broadcast::Sender<MatchSnapshotResponse>,
 }
 
@@ -558,6 +563,7 @@ async fn join_invitation(
     let blk_id: Option<String> = row.get("black_account_id");
 
     // Opening a link never overwrites an already occupied seat (Section 3)!
+    let mut transitioned_to_playing = false;
     let assigned_side = if red_id.as_deref() == Some(joiner_id.as_str()) {
         Some(Side::Red)
     } else if blk_id.as_deref() == Some(joiner_id.as_str()) {
@@ -569,12 +575,17 @@ async fn join_invitation(
         } else {
             "waiting"
         };
-        sqlx::query(
+        let turn_utc = if next_status == "playing" {
+            Some(now)
+        } else {
+            None
+        };
+        let res = sqlx::query(
             "UPDATE matches SET red_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND red_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
-        .bind(now)
+        .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
         .execute(&state.db)
@@ -584,7 +595,12 @@ async fn join_invitation(
             code: "db_error",
             message: e.to_string(),
         })?;
-        Some(Side::Red)
+        if res.rows_affected() == 1 {
+            transitioned_to_playing = next_status == "playing";
+            Some(Side::Red)
+        } else {
+            None
+        }
     } else if blk_id.is_none() {
         let now = now_utc_ms();
         let next_status = if red_id.is_some() {
@@ -592,12 +608,17 @@ async fn join_invitation(
         } else {
             "waiting"
         };
-        sqlx::query(
+        let turn_utc = if next_status == "playing" {
+            Some(now)
+        } else {
+            None
+        };
+        let res = sqlx::query(
             "UPDATE matches SET black_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND black_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
-        .bind(now)
+        .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
         .execute(&state.db)
@@ -607,14 +628,33 @@ async fn join_invitation(
             code: "db_error",
             message: e.to_string(),
         })?;
-        Some(Side::Black)
+        if res.rows_affected() == 1 {
+            transitioned_to_playing = next_status == "playing";
+            Some(Side::Black)
+        } else {
+            None
+        }
     } else {
         None
     };
 
+    if assigned_side.is_none() {
+        check_match_read_access(&state.db, &match_id, Some(&joiner_id)).await?;
+    }
+
     let actor = ensure_match_actor(&state, &match_id).await?;
+    if transitioned_to_playing {
+        let _ = actor
+            .tx
+            .send(ActorMsg::StartPlaying {
+                started_at: Instant::now(),
+            })
+            .await;
+    }
     let snapshot = load_match_snapshot(&state.db, &match_id, None).await?;
-    let _ = actor.bcast.send(snapshot.clone());
+    if assigned_side.is_some() {
+        let _ = actor.bcast.send(snapshot.clone());
+    }
     Ok(Json(JoinInvitationResponse {
         match_id,
         assigned_side,
@@ -693,13 +733,13 @@ async fn post_match_command(
     let (reply_tx, reply_rx) = oneshot::channel();
     actor
         .tx
-        .send(MailboxEnvelope {
+        .send(ActorMsg::Command(MailboxEnvelope {
             actor_account_id,
             command: cmd,
             received_at: Instant::now(),
             received_utc_ms: now_utc_ms(),
             reply: reply_tx,
-        })
+        }))
         .await
         .map_err(|_| ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -722,28 +762,6 @@ async fn update_match_privacy(
     Json(req): Json<PrivacyUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = authenticate_request(&state, &headers, true).await?;
-    let row = sqlx::query(
-        "SELECT red_account_id, black_account_id, red_visibility_choice, black_visibility_choice,
-                red_consent_training, black_consent_training, red_consent_research, black_consent_research,
-                red_consent_dataset, black_consent_dataset
-         FROM matches WHERE match_id = ?",
-    )
-    .bind(&match_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?
-    .ok_or_else(|| ApiError {
-        status: StatusCode::NOT_FOUND,
-        code: "match_not_found",
-        message: "Match not found".to_string(),
-    })?;
-
-    let red: Option<String> = row.get("red_account_id");
-    let blk: Option<String> = row.get("black_account_id");
     let parse_vis = |s: &str| match s {
         "public" => Visibility::Public,
         "unlisted" => Visibility::Unlisted,
@@ -755,7 +773,104 @@ async fn update_match_privacy(
         Visibility::Private => "private",
     };
 
-    let mut policy = MatchPrivacyConsent {
+    let mut tx = state.db.begin().await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+
+    let seats =
+        sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
+            .bind(&match_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "db_error",
+                message: e.to_string(),
+            })?
+            .ok_or_else(|| ApiError {
+                status: StatusCode::NOT_FOUND,
+                code: "match_not_found",
+                message: "Match not found".to_string(),
+            })?;
+
+    let red: Option<String> = seats.get("red_account_id");
+    let blk: Option<String> = seats.get("black_account_id");
+    let now = now_utc_ms();
+
+    // Update ONLY the caller's columns inside the transaction so concurrent updates never clobber the other player's revocations!
+    if red.as_deref() == Some(actor.as_str()) {
+        sqlx::query(
+            "UPDATE matches SET
+                red_visibility_choice = ?,
+                red_consent_training = ?,
+                red_consent_research = ?,
+                red_consent_dataset = ?,
+                updated_at_ms = ?
+             WHERE match_id = ?",
+        )
+        .bind(fmt_vis(req.visibility))
+        .bind(i64::from(req.allow_internal_training))
+        .bind(i64::from(req.allow_published_research))
+        .bind(i64::from(req.allow_dataset_release))
+        .bind(now)
+        .bind(&match_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?;
+    } else if blk.as_deref() == Some(actor.as_str()) {
+        sqlx::query(
+            "UPDATE matches SET
+                black_visibility_choice = ?,
+                black_consent_training = ?,
+                black_consent_research = ?,
+                black_consent_dataset = ?,
+                updated_at_ms = ?
+             WHERE match_id = ?",
+        )
+        .bind(fmt_vis(req.visibility))
+        .bind(i64::from(req.allow_internal_training))
+        .bind(i64::from(req.allow_published_research))
+        .bind(i64::from(req.allow_dataset_release))
+        .bind(now)
+        .bind(&match_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?;
+    } else {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "not_a_participant",
+            message: "Only match participants can update match privacy or consent".to_string(),
+        });
+    }
+
+    let row = sqlx::query(
+        "SELECT red_visibility_choice, black_visibility_choice,
+                red_consent_training, black_consent_training,
+                red_consent_research, black_consent_research,
+                red_consent_dataset, black_consent_dataset
+         FROM matches WHERE match_id = ?",
+    )
+    .bind(&match_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+
+    let policy = MatchPrivacyConsent {
         red_visibility: parse_vis(&row.get::<String, _>("red_visibility_choice")),
         black_visibility: parse_vis(&row.get::<String, _>("black_visibility_choice")),
         red_allow_internal_training: row.get::<i64, _>("red_consent_training") != 0,
@@ -765,53 +880,32 @@ async fn update_match_privacy(
         red_allow_dataset_release: row.get::<i64, _>("red_consent_dataset") != 0,
         black_allow_dataset_release: row.get::<i64, _>("black_consent_dataset") != 0,
     };
-
-    if red.as_deref() == Some(actor.as_str()) {
-        policy.red_visibility = req.visibility;
-        policy.red_allow_internal_training = req.allow_internal_training;
-        policy.red_allow_published_research = req.allow_published_research;
-        policy.red_allow_dataset_release = req.allow_dataset_release;
-    } else if blk.as_deref() == Some(actor.as_str()) {
-        policy.black_visibility = req.visibility;
-        policy.black_allow_internal_training = req.allow_internal_training;
-        policy.black_allow_published_research = req.allow_published_research;
-        policy.black_allow_dataset_release = req.allow_dataset_release;
-    } else {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            code: "not_a_participant",
-            message: "Only match participants can update match privacy or consent".to_string(),
-        });
-    }
-
     let effective = policy.effective_visibility();
-    sqlx::query(
-        "UPDATE matches SET
-            visibility = ?, red_visibility_choice = ?, black_visibility_choice = ?,
-            red_consent_training = ?, black_consent_training = ?,
-            red_consent_research = ?, black_consent_research = ?,
-            red_consent_dataset = ?, black_consent_dataset = ?,
-            updated_at_ms = ?
-         WHERE match_id = ?",
-    )
-    .bind(fmt_vis(effective))
-    .bind(fmt_vis(policy.red_visibility))
-    .bind(fmt_vis(policy.black_visibility))
-    .bind(i64::from(policy.red_allow_internal_training))
-    .bind(i64::from(policy.black_allow_internal_training))
-    .bind(i64::from(policy.red_allow_published_research))
-    .bind(i64::from(policy.black_allow_published_research))
-    .bind(i64::from(policy.red_allow_dataset_release))
-    .bind(i64::from(policy.black_allow_dataset_release))
-    .bind(now_utc_ms())
-    .bind(&match_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| ApiError {
+
+    sqlx::query("UPDATE matches SET visibility = ?, updated_at_ms = ? WHERE match_id = ?")
+        .bind(fmt_vis(effective))
+        .bind(now)
+        .bind(&match_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?;
+
+    tx.commit().await.map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: "db_error",
         message: e.to_string(),
     })?;
+
+    // Broadcast the updated visibility so nonparticipant spectator WebSockets revalidate & disconnect immediately if revoked!
+    if let Ok(actor_handle) = ensure_match_actor(&state, &match_id).await
+        && let Ok(snap) = load_match_snapshot(&state.db, &match_id, None).await
+    {
+        let _ = actor_handle.bcast.send(snap);
+    }
 
     Ok(Json(serde_json::json!({
         "effective_visibility": effective,
@@ -844,11 +938,13 @@ async fn ws_match_stream(
     let actor = ensure_match_actor(&state, &match_id).await?;
     let init_snap = load_match_snapshot(&state.db, &match_id, None).await?;
 
-    Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, actor, account_id, init_snap)))
+    let db = state.db.clone();
+    Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, db, actor, account_id, init_snap)))
 }
 
 async fn handle_ws_client(
     mut socket: WebSocket,
+    db: SqlitePool,
     actor: MatchActorHandle,
     account_id: String,
     initial_snapshot: MatchSnapshotResponse,
@@ -863,8 +959,15 @@ async fn handle_ws_client(
     loop {
         tokio::select! {
             bmsg = bcast_rx.recv() => {
-                if let Ok(snap) = bmsg
-                    && let Ok(json) = serde_json::to_string(&snap)
+                let Ok(snap) = bmsg else {
+                    break;
+                };
+                // Revalidate read access on every broadcast so spectators disconnect immediately if privacy is restored!
+                if check_match_read_access(&db, &snap.match_id, Some(&account_id)).await.is_err() {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                if let Ok(json) = serde_json::to_string(&snap)
                     && socket.send(Message::Text(json.into())).await.is_err()
                 {
                     break;
@@ -880,13 +983,13 @@ async fn handle_ws_client(
                     let (rtx, rrx) = oneshot::channel();
                     if actor
                         .tx
-                        .send(MailboxEnvelope {
+                        .send(ActorMsg::Command(MailboxEnvelope {
                             actor_account_id: account_id.clone(),
                             command: cmd,
                             received_at: Instant::now(),
                             received_utc_ms: now_utc_ms(),
                             reply: rtx,
-                        })
+                        }))
                         .await
                         .is_ok()
                         && let Ok(Err(err)) = rrx.await
@@ -925,12 +1028,12 @@ async fn ensure_match_actor(
         return Ok(handle.clone());
     }
 
-    // Reconstruct authoritative GameState by replaying persisted move events from SQLite/Postgres!
-    let (mut game_state, initial_turn_instant) =
+    // Reconstruct authoritative GameState, pending draw offer, and clock instant from SQLite/Postgres!
+    let (mut game_state, initial_turn_instant, initial_draw_offer) =
         reconstruct_game_from_db(&state.db, match_id).await?;
 
     // Bounded command mailbox per active match (Section 8).
-    let (tx, mut rx) = mpsc::channel::<MailboxEnvelope>(64);
+    let (tx, mut rx) = mpsc::channel::<ActorMsg>(64);
     let (bcast_tx, _) = broadcast::channel::<MatchSnapshotResponse>(64);
     let bcast_for_loop = bcast_tx.clone();
     let db = state.db.clone();
@@ -938,25 +1041,85 @@ async fn ensure_match_actor(
 
     tokio::spawn(async move {
         let mut turn_started_mono: Option<Instant> = initial_turn_instant;
-        let mut draw_offered_by: Option<Side> = None;
+        let mut draw_offered_by: Option<Side> = initial_draw_offer;
+        let mut active_deadline =
+            compute_actor_deadline(&db, &mid, game_state.side_to_move(), turn_started_mono).await;
 
-        while let Some(env) = rx.recv().await {
-            let res = process_single_command(
-                &db,
-                &mid,
-                &mut game_state,
-                &mut turn_started_mono,
-                &mut draw_offered_by,
-                &env.actor_account_id,
-                env.command,
-                env.received_at,
-                env.received_utc_ms,
-            )
-            .await;
-            if let Ok(ref snap) = res {
-                let _ = bcast_for_loop.send(snap.clone());
+        loop {
+            let dl_opt = active_deadline;
+            tokio::select! {
+                msg_opt = rx.recv() => {
+                    let Some(msg) = msg_opt else {
+                        break;
+                    };
+                    match msg {
+                        ActorMsg::StartPlaying { started_at } => {
+                            if turn_started_mono.is_none() {
+                                turn_started_mono = Some(started_at);
+                            }
+                            active_deadline = compute_actor_deadline(
+                                &db,
+                                &mid,
+                                game_state.side_to_move(),
+                                turn_started_mono,
+                            )
+                            .await;
+                        }
+                        ActorMsg::Command(env) => {
+                            let res = process_single_command(
+                                &db,
+                                &mid,
+                                &mut game_state,
+                                &mut turn_started_mono,
+                                &mut draw_offered_by,
+                                &env.actor_account_id,
+                                env.command,
+                                env.received_at,
+                                env.received_utc_ms,
+                            )
+                            .await;
+                            active_deadline = compute_actor_deadline(
+                                &db,
+                                &mid,
+                                game_state.side_to_move(),
+                                turn_started_mono,
+                            )
+                            .await;
+                            if let Ok(ref snap) = res {
+                                let _ = bcast_for_loop.send(snap.clone());
+                            }
+                            let _ = env.reply.send(res);
+                        }
+                    }
+                }
+                _ = async {
+                    match dl_opt {
+                        Some(dl) => tokio::time::sleep_until(dl).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    if let Ok(Some(snap)) = expire_active_clock_if_due(
+                        &db,
+                        &mid,
+                        &game_state,
+                        &mut turn_started_mono,
+                        &mut draw_offered_by,
+                    )
+                    .await
+                    {
+                        active_deadline = None;
+                        let _ = bcast_for_loop.send(snap);
+                    } else {
+                        active_deadline = compute_actor_deadline(
+                            &db,
+                            &mid,
+                            game_state.side_to_move(),
+                            turn_started_mono,
+                        )
+                        .await;
+                    }
+                }
             }
-            let _ = env.reply.send(res);
         }
     });
 
@@ -968,16 +1131,120 @@ async fn ensure_match_actor(
     Ok(handle)
 }
 
+async fn compute_actor_deadline(
+    db: &SqlitePool,
+    match_id: &str,
+    side_to_move: Side,
+    turn_started_mono: Option<Instant>,
+) -> Option<tokio::time::Instant> {
+    let started = turn_started_mono?;
+    let row = sqlx::query(
+        "SELECT status, red_remaining_ms, black_remaining_ms FROM matches WHERE match_id = ?",
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await
+    .ok()??;
+
+    let status: String = row.get("status");
+    if status != "playing" {
+        return None;
+    }
+    let rem_ms: Option<i64> = match side_to_move {
+        Side::Red => row.get("red_remaining_ms"),
+        Side::Black => row.get("black_remaining_ms"),
+    };
+    let rem = rem_ms?;
+    Some(tokio::time::Instant::from_std(started) + Duration::from_millis(rem.max(0) as u64))
+}
+
+async fn expire_active_clock_if_due(
+    db: &SqlitePool,
+    match_id: &str,
+    game: &GameState,
+    turn_started_mono: &mut Option<Instant>,
+    draw_offered_by: &mut Option<Side>,
+) -> Result<Option<MatchSnapshotResponse>, ApiError> {
+    let Some(started) = *turn_started_mono else {
+        return Ok(None);
+    };
+    let row = sqlx::query(
+        "SELECT current_seq, status, red_remaining_ms, black_remaining_ms FROM matches WHERE match_id = ?",
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+    let Some(mrow) = row else {
+        return Ok(None);
+    };
+    let status: String = mrow.get("status");
+    if status != "playing" {
+        *turn_started_mono = None;
+        return Ok(None);
+    }
+
+    let current_seq = mrow.get::<i64, _>("current_seq") as u64;
+    let mut red_rem: Option<i64> = mrow.get("red_remaining_ms");
+    let mut blk_rem: Option<i64> = mrow.get("black_remaining_ms");
+    let stm = game.side_to_move();
+    let elapsed_ms = Instant::now()
+        .saturating_duration_since(started)
+        .as_millis() as i64;
+    let active_rem = match stm {
+        Side::Red => &mut red_rem,
+        Side::Black => &mut blk_rem,
+    };
+    let Some(rem) = active_rem else {
+        return Ok(None);
+    };
+    if *rem - elapsed_ms > 0 {
+        return Ok(None);
+    }
+
+    *rem = 0;
+    let winner = match stm.opposite() {
+        Side::Red => "red_win",
+        Side::Black => "black_win",
+    };
+    let cmd_id = format!("auto_timeout_seq_{}", current_seq + 1);
+    commit_match_event_tx(
+        db,
+        match_id,
+        current_seq + 1,
+        &cmd_id,
+        Some("system"),
+        "timeout",
+        &serde_json::json!({ "timed_out": stm.as_str() }),
+        &game.to_fen(),
+        "finished",
+        red_rem,
+        blk_rem,
+        Some(winner),
+        Some("timeout"),
+        now_utc_ms(),
+    )
+    .await?;
+    *turn_started_mono = None;
+    *draw_offered_by = None;
+    load_match_snapshot(db, match_id, None).await.map(Some)
+}
+
 async fn reconstruct_game_from_db(
     db: &SqlitePool,
     match_id: &str,
-) -> Result<(GameState, Option<Instant>), ApiError> {
-    let mrow =
-        sqlx::query("SELECT initial_fen, rules_profile, status FROM matches WHERE match_id = ?")
-            .bind(match_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| ApiError {
+) -> Result<(GameState, Option<Instant>, Option<Side>), ApiError> {
+    let mrow = sqlx::query(
+        "SELECT initial_fen, rules_profile, status, turn_started_utc_ms FROM matches WHERE match_id = ?",
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ApiError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 code: "db_error",
                 message: e.to_string(),
@@ -1009,25 +1276,41 @@ async fn reconstruct_game_from_db(
         message: e.to_string(),
     })?;
 
+    let mut pending_draw: Option<Side> = None;
     for ev in events {
         let etype: String = ev.get("event_type");
+        let pjson: String = ev.get("payload_json");
+        let payload = serde_json::from_str::<serde_json::Value>(&pjson).unwrap_or_default();
         if etype == "move" {
-            let pjson: String = ev.get("payload_json");
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&pjson)
-                && let Some(uci) = v["move_uci"].as_str()
+            pending_draw = None;
+            if let Some(uci) = payload["move_uci"].as_str()
                 && let Ok(mv) = Move::from_uci_or_iccs(uci)
             {
                 let _ = game.apply_move(mv);
             }
+        } else if etype == "draw_offered" {
+            pending_draw = match payload["offered_by"].as_str() {
+                Some("red") => Some(Side::Red),
+                Some("black") => Some(Side::Black),
+                _ => None,
+            };
+        } else {
+            pending_draw = None;
         }
     }
 
     let mono = if status == "playing" {
-        Some(Instant::now())
+        let already_elapsed_ms = mrow
+            .get::<Option<i64>, _>("turn_started_utc_ms")
+            .map(|t| (now_utc_ms() - t).max(0) as u64)
+            .unwrap_or(0);
+        Instant::now()
+            .checked_sub(Duration::from_millis(already_elapsed_ms))
+            .or_else(|| Some(Instant::now()))
     } else {
         None
     };
-    Ok((game, mono))
+    Ok((game, mono, pending_draw))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1194,12 +1477,14 @@ async fn process_single_command(
                 });
             };
             let cmv = Move::new(from, to);
-            let zh = format_chinese_move(game.board(), cmv, false).map_err(|e| ApiError {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "illegal_move",
-                message: e.to_string(),
-            })?;
-            let verdict = game.apply_move(cmv).map_err(|e| ApiError {
+            let mut staged_game = game.clone();
+            let zh =
+                format_chinese_move(staged_game.board(), cmv, false).map_err(|e| ApiError {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: "illegal_move",
+                    message: e.to_string(),
+                })?;
+            let verdict = staged_game.apply_move(cmv).map_err(|e| ApiError {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 code: "illegal_move",
                 message: e.to_string(),
@@ -1218,7 +1503,6 @@ async fn process_single_command(
                     }
                 }
             }
-            *draw_offered_by = None;
 
             let (next_status, outcome_str, reason_str) = map_verdict(&verdict);
             commit_match_event_tx(
@@ -1234,7 +1518,7 @@ async fn process_single_command(
                     "from": mv.from,
                     "to": mv.to,
                 }),
-                &game.to_fen(),
+                &staged_game.to_fen(),
                 next_status,
                 red_rem,
                 blk_rem,
@@ -1244,6 +1528,9 @@ async fn process_single_command(
             )
             .await?;
 
+            // Mutate in-memory actor state ONLY after the database transaction has durably committed!
+            *game = staged_game;
+            *draw_offered_by = None;
             // Next turn's clock starts AFTER commit so DB latency is never charged to opponent (Section 8)!
             *turn_started_mono = if next_status == "playing" {
                 Some(Instant::now())
@@ -1273,10 +1560,10 @@ async fn process_single_command(
                 received_utc_ms,
             )
             .await?;
+            *draw_offered_by = None;
             *turn_started_mono = None;
         }
         MatchCommandRequest::OfferDraw { .. } => {
-            *draw_offered_by = Some(actor_side);
             commit_match_event_tx(
                 db,
                 match_id,
@@ -1294,6 +1581,7 @@ async fn process_single_command(
                 received_utc_ms,
             )
             .await?;
+            *draw_offered_by = Some(actor_side);
             *turn_started_mono = Some(Instant::now());
         }
         MatchCommandRequest::AcceptDraw { .. } => {
@@ -1495,29 +1783,51 @@ async fn load_match_snapshot(
     }
 
     let current_fen: String = m.get("current_fen");
+    let status_str: String = m.get("status");
     let board = xiangqi_core::Board::from_fen(&current_fen).unwrap_or_default();
+    let stm = board.side_to_move();
     let vis = match m.get::<String, _>("visibility").as_str() {
         "public" => Visibility::Public,
         "unlisted" => Visibility::Unlisted,
         _ => Visibility::Private,
     };
 
+    let mut red_remaining_ms: Option<i64> = m.get("red_remaining_ms");
+    let mut black_remaining_ms: Option<i64> = m.get("black_remaining_ms");
+    if status_str == "playing"
+        && let Some(started_utc) = m.get::<Option<i64>, _>("turn_started_utc_ms")
+    {
+        let elapsed = (now_utc_ms() - started_utc).max(0);
+        match stm {
+            Side::Red => {
+                if let Some(ref mut r) = red_remaining_ms {
+                    *r = (*r - elapsed).max(0);
+                }
+            }
+            Side::Black => {
+                if let Some(ref mut b) = black_remaining_ms {
+                    *b = (*b - elapsed).max(0);
+                }
+            }
+        }
+    }
+
     Ok(MatchSnapshotResponse {
         match_id: match_id.to_string(),
         invitation_code: m.get("invitation_code"),
         rules_profile: m.get("rules_profile"),
-        status: m.get("status"),
+        status: status_str,
         seq: m.get::<i64, _>("current_seq") as u64,
         fen: current_fen,
-        side_to_move: board.side_to_move(),
+        side_to_move: stm,
         moves_uci,
         moves_chinese,
         red_seated: m.get::<Option<String>, _>("red_account_id").is_some(),
         black_seated: m.get::<Option<String>, _>("black_account_id").is_some(),
         clock_initial_ms: m.get("clock_initial_ms"),
         clock_increment_ms: m.get("clock_increment_ms"),
-        red_remaining_ms: m.get("red_remaining_ms"),
-        black_remaining_ms: m.get("black_remaining_ms"),
+        red_remaining_ms,
+        black_remaining_ms,
         draw_offered_by: pending_draw,
         outcome: m.get("outcome"),
         reason_code: m.get("reason_code"),

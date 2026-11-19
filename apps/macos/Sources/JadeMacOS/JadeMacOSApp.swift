@@ -238,6 +238,7 @@ final class MacBoardController: ObservableObject {
         if (try? session.undo()) != nil, !movesChinese.isEmpty {
             _ = movesUci.popLast()
             _ = movesChinese.popLast()
+            offlineStore.popLastMove()
             selectedUci = nil
             legalDestUcis.removeAll()
             refreshStatus()
@@ -604,8 +605,8 @@ final class MacPieceAudioEngine {
         let family: String
         switch materialId {
         case "boxwood": family = "boxwood"
-        case "ivory-stone": family = "soft-felt"
-        default: family = "jade-stone"
+        case "ivory-stone": family = "ivory-stone"
+        default: family = "jade"
         }
         let slug = toggle == 0 ? "place-1.wav" : "place-2.wav"
         let url = URL(fileURLWithPath: repoRoot)
@@ -663,6 +664,15 @@ final class MacOfflineSqliteStore {
 
     func clearMoves() {
         if let db { sqlite3_exec(db, "DELETE FROM offline_moves;", nil, nil, nil) }
+    }
+
+    func popLastMove() {
+        guard let db else { return }
+        sqlite3_exec(
+            db,
+            "DELETE FROM offline_moves WHERE seq = (SELECT MAX(seq) FROM offline_moves);",
+            nil, nil, nil
+        )
     }
 }
 
