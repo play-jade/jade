@@ -125,7 +125,7 @@ mod gtk_app {
                 .hexpand(true)
                 .vexpand(true)
                 .focusable(true)
-                .accessible_role(gtk4::AccessibleRole::Application)
+                .accessible_role(gtk4::AccessibleRole::Group)
                 .build();
 
             {
@@ -134,7 +134,11 @@ mod gtk_app {
                     let ctrl = state_draw.borrow();
                     let snap = ctrl.snapshot(width as f64, height as f64);
                     // Warm paper surface (#F3EEE4)
-                    cr.set_source_rgb(0xF3 as f64 / 255.0, 0xEE as f64 / 255.0, 0xE4 as f64 / 255.0);
+                    cr.set_source_rgb(
+                        0xF3 as f64 / 255.0,
+                        0xEE as f64 / 255.0,
+                        0xE4 as f64 / 255.0,
+                    );
                     let _ = cr.paint();
 
                     let Some(vp) = snap.viewport else { return };
@@ -143,7 +147,11 @@ mod gtk_app {
                     let s = vp.cell_size;
 
                     // Charcoal board lines (#252A25)
-                    cr.set_source_rgb(0x25 as f64 / 255.0, 0x2A as f64 / 255.0, 0x25 as f64 / 255.0);
+                    cr.set_source_rgb(
+                        0x25 as f64 / 255.0,
+                        0x2A as f64 / 255.0,
+                        0x25 as f64 / 255.0,
+                    );
                     cr.set_line_width(1.3);
                     for r in 0..10 {
                         let y = oy + (r as f64) * s;
@@ -179,15 +187,31 @@ mod gtk_app {
                         let sq = Square::from_file_rank(p.file, p.rank).unwrap();
                         let (sx, sy) = vp.square_to_screen(sq, snap.orientation);
                         cr.arc(sx, sy, radius, 0.0, std::f64::consts::TAU);
-                        cr.set_source_rgb(0xDC as f64 / 255.0, 0xE3 as f64 / 255.0, 0xCE as f64 / 255.0);
+                        cr.set_source_rgb(
+                            0xDC as f64 / 255.0,
+                            0xE3 as f64 / 255.0,
+                            0xCE as f64 / 255.0,
+                        );
                         let _ = cr.fill_preserve();
-                        cr.set_source_rgb(0x41 as f64 / 255.0, 0x54 as f64 / 255.0, 0x47 as f64 / 255.0);
+                        cr.set_source_rgb(
+                            0x41 as f64 / 255.0,
+                            0x54 as f64 / 255.0,
+                            0x47 as f64 / 255.0,
+                        );
                         cr.set_line_width(1.6);
                         let _ = cr.stroke();
 
                         match p.side {
-                            Side::Red => cr.set_source_rgb(0xA5 as f64 / 255.0, 0x48 as f64 / 255.0, 0x37 as f64 / 255.0),
-                            Side::Black => cr.set_source_rgb(0x25 as f64 / 255.0, 0x2A as f64 / 255.0, 0x25 as f64 / 255.0),
+                            Side::Red => cr.set_source_rgb(
+                                0xA5 as f64 / 255.0,
+                                0x48 as f64 / 255.0,
+                                0x37 as f64 / 255.0,
+                            ),
+                            Side::Black => cr.set_source_rgb(
+                                0x25 as f64 / 255.0,
+                                0x2A as f64 / 255.0,
+                                0x25 as f64 / 255.0,
+                            ),
                         }
                         cr.set_font_size(radius * 1.05);
                         cr.move_to(sx - radius * 0.52, sy + radius * 0.36);
