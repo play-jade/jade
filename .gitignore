@@ -12,8 +12,8 @@ packages/apple/Artifacts/*.dylib
 **/.build/
 **/DerivedData/
 **/build/
-**/bin/
-**/obj/
+apps/windows/**/bin/
+apps/windows/**/obj/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/

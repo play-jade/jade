@@ -105,8 +105,8 @@ impl LinuxBoardController {
 #[cfg(feature = "gtk-ui")]
 mod gtk_app {
     use super::LinuxBoardController;
-    use gtk4::prelude::*;
     use libadwaita as adw;
+    use libadwaita::prelude::*;
     use std::cell::RefCell;
     use std::rc::Rc;
     use xiangqi_core::{Orientation, Side, Square};

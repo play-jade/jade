@@ -79,8 +79,8 @@ jobs:
           ./dev/build-apple-ffi.sh
       - name: Test shared Apple UniFFI package and build macOS native app
         run: |
-          swift test --package-path packages/apple
-          swift build -c release --package-path apps/macos
+          (cd packages/apple && swift run JadeCoreBindingsTests)
+          ./dev/run-macos.sh --build-only
 
   android-compose-and-uniffi:
     name: Android (Kotlin + Jetpack Compose + UniFFI)
@@ -109,6 +109,9 @@ jobs:
         with:
           dotnet-version: "8.0.x"
       - name: Build core-ffi DLL and run .NET P/Invoke SafeHandle fixture tests
+        shell: bash
         run: |
           cargo build --release -p core-ffi
-          dotnet test apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release
+          dotnet build apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release
+          cp target/release/core_ffi.dll apps/windows/Jade.CoreBridge.Tests/bin/Release/net8.0/core_ffi.dll
+          dotnet test apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release --no-build
