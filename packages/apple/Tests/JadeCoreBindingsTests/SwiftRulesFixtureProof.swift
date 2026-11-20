@@ -20,6 +20,14 @@ struct SwiftRulesFixtureProof {
         guard zh == "炮二平五" else {
             fatalError("Expected 炮二平五, got \(zh)")
         }
+        let rm = try game.renderModel(traditionalGlyphs: true, selectedUci: "b9")
+        guard rm.pieces.count == 32,
+              rm.lastMoveFromUci == "h2",
+              rm.lastMoveToUci == "e2",
+              rm.selectedUci == "b9",
+              rm.legalDestsUci.contains("c7") else {
+            fatalError("Unexpected renderModel: \(rm)")
+        }
 
         // 2. Verify Section 4 non-clamping hit test via UniFFI Swift
         if ffiHitTest(width: 486.0, height: 540.0, padding: 18.0, redBelow: true, px: 2.0, py: 2.0) != nil {

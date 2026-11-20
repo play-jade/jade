@@ -126,7 +126,10 @@ final class MacBoardController: ObservableObject {
     let repoRoot: String
     private(set) var session: FfiGameSession
     private let audio: MacPieceAudioEngine
-    private let offlineStore = MacOfflineSqliteStore()
+    private let offlineStore = AppleOfflineSqliteStore(
+        directory: NSTemporaryDirectory(),
+        filename: "jade_macos_offline.sqlite3"
+    )
 
     init() {
         let root = resolveJadeRepoRoot()
@@ -409,135 +412,6 @@ final class MacCoreGraphicsBoardNSView: NSView {
     }
 }
 
-enum CoreGraphicsBoardPainter {
-    static func paint(
-        ctx: CGContext,
-        width: CGFloat,
-        height: CGFloat,
-        redBelow: Bool,
-        darkSurface: Bool,
-        materialId: String,
-        traditionalGlyphs: Bool,
-        pieces: [FfiPieceItem],
-        selectedUci: String?,
-        legalDestUcis: Set<String>,
-        repoRoot: String
-    ) {
-        let p: CGFloat = 24.0
-        let s = min((width - 2.0 * p) / 9.0, (height - 2.0 * p) / 10.0)
-        guard s > 0 else { return }
-        let ox = (width - 8.0 * s) / 2.0
-        let oy = (height - 9.0 * s) / 2.0
-
-        let bg = darkSurface
-            ? CGColor(srgbRed: 0x1D / 255.0, green: 0x24 / 255.0, blue: 0x21 / 255.0, alpha: 1.0)
-            : CGColor(srgbRed: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0, alpha: 1.0)
-        let lineInk = darkSurface
-            ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 0.78)
-            : CGColor(srgbRed: 0x25 / 255.0, green: 0x2A / 255.0, blue: 0x25 / 255.0, alpha: 0.88)
-
-        ctx.setFillColor(bg)
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-
-        // Outer frame + exact 9x10 grid + river + palace diagonals
-        ctx.setStrokeColor(lineInk)
-        ctx.setLineWidth(2.0)
-        ctx.stroke(CGRect(x: ox - 5, y: oy - 5, width: 8 * s + 10, height: 9 * s + 10))
-
-        ctx.setLineWidth(1.25)
-        for r in 0...9 {
-            let y = oy + CGFloat(r) * s
-            ctx.move(to: CGPoint(x: ox, y: y))
-            ctx.addLine(to: CGPoint(x: ox + 8 * s, y: y))
-        }
-        for f in 0...8 {
-            let x = ox + CGFloat(f) * s
-            if f == 0 || f == 8 {
-                ctx.move(to: CGPoint(x: x, y: oy))
-                ctx.addLine(to: CGPoint(x: x, y: oy + 9 * s))
-            } else {
-                ctx.move(to: CGPoint(x: x, y: oy))
-                ctx.addLine(to: CGPoint(x: x, y: oy + 4 * s))
-                ctx.move(to: CGPoint(x: x, y: oy + 5 * s))
-                ctx.addLine(to: CGPoint(x: x, y: oy + 9 * s))
-            }
-        }
-        // Palace diagonals
-        ctx.move(to: CGPoint(x: ox + 3 * s, y: oy)); ctx.addLine(to: CGPoint(x: ox + 5 * s, y: oy + 2 * s))
-        ctx.move(to: CGPoint(x: ox + 5 * s, y: oy)); ctx.addLine(to: CGPoint(x: ox + 3 * s, y: oy + 2 * s))
-        ctx.move(to: CGPoint(x: ox + 3 * s, y: oy + 7 * s)); ctx.addLine(to: CGPoint(x: ox + 5 * s, y: oy + 9 * s))
-        ctx.move(to: CGPoint(x: ox + 5 * s, y: oy + 7 * s)); ctx.addLine(to: CGPoint(x: ox + 3 * s, y: oy + 9 * s))
-        ctx.strokePath()
-
-        let scriptDir = traditionalGlyphs ? "traditional" : "simplified"
-        let shadowURL = URL(fileURLWithPath: repoRoot)
-            .appendingPathComponent("assets/board/materials/contact-shadow@2x.png")
-        let shadowImg = loadCGImage(url: shadowURL)
-
-        let occupied = Set(pieces.map(\.uci))
-        let spriteSpan = s * 0.96
-        for p in pieces {
-            let sx = redBelow ? ox + CGFloat(p.file) * s : ox + CGFloat(8 - p.file) * s
-            let sy = redBelow ? oy + CGFloat(9 - p.rank) * s : oy + CGFloat(p.rank) * s
-            let dstRect = CGRect(x: sx - spriteSpan / 2, y: sy - spriteSpan / 2, width: spriteSpan, height: spriteSpan)
-
-            if let sh = shadowImg {
-                ctx.saveGState()
-                ctx.translateBy(x: dstRect.minX, y: dstRect.maxY)
-                ctx.scaleBy(x: 1, y: -1)
-                ctx.draw(sh, in: CGRect(x: 2.0, y: -3.0, width: spriteSpan, height: spriteSpan))
-                ctx.restoreGState()
-            }
-
-            let spriteName = "\(p.side)-\(p.role)@2x.png"
-            let spriteURL = URL(fileURLWithPath: repoRoot)
-                .appendingPathComponent("assets/board/materials/\(materialId)/\(scriptDir)/\(spriteName)")
-            if let cgSprite = loadCGImage(url: spriteURL) {
-                ctx.saveGState()
-                ctx.translateBy(x: dstRect.minX, y: dstRect.maxY)
-                ctx.scaleBy(x: 1, y: -1)
-                ctx.draw(cgSprite, in: CGRect(origin: .zero, size: dstRect.size))
-                ctx.restoreGState()
-            }
-
-            if selectedUci == p.uci {
-                ctx.setStrokeColor(CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 1.0))
-                ctx.setLineWidth(3.0)
-                let ringR = s * 0.45
-                ctx.strokeEllipse(in: CGRect(x: sx - ringR, y: sy - ringR, width: ringR * 2, height: ringR * 2))
-            }
-        }
-
-        // Legal destination indicators (dots for empty intersections, vermilion rings for captures)
-        for dest in legalDestUcis {
-            guard dest.count == 2,
-                  let fAscii = dest.first?.asciiValue,
-                  let rVal = Int(String(dest.last!)) else { continue }
-            let f = Int(fAscii) - 97
-            let sx = redBelow ? ox + CGFloat(f) * s : ox + CGFloat(8 - f) * s
-            let sy = redBelow ? oy + CGFloat(9 - rVal) * s : oy + CGFloat(rVal) * s
-            if occupied.contains(dest) {
-                ctx.setStrokeColor(CGColor(srgbRed: 0xA5 / 255.0, green: 0x48 / 255.0, blue: 0x37 / 255.0, alpha: 0.95))
-                ctx.setLineWidth(2.6)
-                let cr = s * 0.46
-                ctx.strokeEllipse(in: CGRect(x: sx - cr, y: sy - cr, width: cr * 2, height: cr * 2))
-            } else {
-                let pipColor = darkSurface
-                    ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 0.85)
-                    : CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 0.82)
-                ctx.setFillColor(pipColor)
-                let pr = max(4.5, s * 0.13)
-                ctx.fillEllipse(in: CGRect(x: sx - pr, y: sy - pr, width: pr * 2, height: pr * 2))
-            }
-        }
-    }
-
-    private static func loadCGImage(url: URL) -> CGImage? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
-    }
-}
-
 enum HeadlessCoreGraphicsProof {
     static func render(repoRoot: String, outputPath: String) throws {
         let session = try FfiGameSession(rulesProfile: "program-2023.11-v1")
@@ -616,63 +490,6 @@ final class MacPieceAudioEngine {
             p.volume = 0.75
             p.play()
         }
-    }
-}
-
-final class MacOfflineSqliteStore {
-    private var db: OpaquePointer?
-
-    init() {
-        let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("jade_macos_offline.sqlite3")
-        if sqlite3_open(path, &db) == SQLITE_OK {
-            sqlite3_exec(
-                db,
-                "CREATE TABLE IF NOT EXISTS offline_moves (seq INTEGER PRIMARY KEY AUTOINCREMENT, uci TEXT NOT NULL);",
-                nil, nil, nil
-            )
-        }
-    }
-
-    deinit {
-        if let db { sqlite3_close(db) }
-    }
-
-    func loadMoves() -> [String] {
-        guard let db else { return [] }
-        var stmt: OpaquePointer?
-        var out: [String] = []
-        if sqlite3_prepare_v2(db, "SELECT uci FROM offline_moves ORDER BY seq ASC;", -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                if let cStr = sqlite3_column_text(stmt, 0) {
-                    out.append(String(cString: cStr))
-                }
-            }
-        }
-        sqlite3_finalize(stmt)
-        return out
-    }
-
-    func appendMove(uci: String) {
-        guard let db else { return }
-        var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "INSERT INTO offline_moves (uci) VALUES (?);", -1, &stmt, nil) == SQLITE_OK {
-            sqlite3_bind_text(stmt, 1, (uci as NSString).utf8String, -1, nil)
-            sqlite3_step(stmt)
-        }
-        sqlite3_finalize(stmt)
-    }
-
-    func clearMoves() {
-        if let db { sqlite3_exec(db, "DELETE FROM offline_moves;", nil, nil, nil) }
-    }
-
-    func popLastMove() {
-        guard let db else { return }
-        sqlite3_exec(
-            db,
-            "DELETE FROM offline_moves WHERE seq = (SELECT MAX(seq) FROM offline_moves);",
-            nil, nil, nil
-        )
     }
 }
 

@@ -24,6 +24,7 @@ let package = Package(
             dependencies: ["core_ffiFFI"],
             path: "Sources/JadeCoreBindings",
             linkerSettings: [
+                .linkedLibrary("sqlite3"),
                 .unsafeFlags(["-L", "Artifacts", "-lcore_ffi"]),
             ]
         ),
@@ -32,6 +33,7 @@ let package = Package(
             dependencies: ["JadeCoreBindings"],
             path: "Tests/JadeCoreBindingsTests",
             linkerSettings: [
+                .linkedLibrary("sqlite3"),
                 .unsafeFlags(["-L", "Artifacts", "-lcore_ffi"]),
             ]
         ),

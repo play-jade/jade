@@ -72,6 +72,9 @@ let clockAnchorPerfMs = 0
 let pollTickCount = 0
 let clockTimer: ReturnType<typeof setInterval> | null = null
 let ws: WebSocket | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectingInFlight = false
+let isUnmounted = false
 let guestSession: { account_id: string; access_token: string; csrf_token: string } | null = null
 
 const shareUrl = computed(() => {
@@ -145,15 +148,30 @@ async function ensureGuestSession() {
 }
 
 function connectMatchWebSocket(matchId: string, token: string) {
-  ws?.close()
+  if (isUnmounted) return
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (ws) {
+    const prev = ws
+    ws = null
+    prev.onclose = null
+    prev.close()
+  }
   const httpBase = config.public.matchServerUrl
   const wsBase = httpBase.replace(/^http/, 'ws')
   // Browser WebSocket uses HttpOnly cookie set on /api/v1/auth/guest; if cross-port in local dev, fallback poll/reconnect stays synced
   const socket = new WebSocket(`${wsBase}/api/v1/matches/${matchId}/ws`)
   ws = socket
+  if (typeof window !== 'undefined') {
+    ;(window as unknown as Record<string, unknown>).__jadeActiveMatchSocket = socket
+  }
 
   socket.onopen = () => {
-    connectionState.value = 'connected'
+    if (ws === socket) {
+      connectionState.value = 'connected'
+    }
   }
 
   socket.onmessage = (ev) => {
@@ -175,16 +193,24 @@ function connectMatchWebSocket(matchId: string, token: string) {
   }
 
   socket.onclose = () => {
-    if (snapshot.value && snapshot.value.status !== 'finished') {
+    if (ws === socket) {
+      ws = null
+    }
+    if (!isUnmounted && snapshot.value && snapshot.value.status !== 'finished') {
       connectionState.value = 'reconnecting'
-      setTimeout(() => {
-        void recoverGapAndReconnect(matchId, token)
-      }, 1000)
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null
+          void recoverGapAndReconnect(matchId, token)
+        }, 500)
+      }
     }
   }
 }
 
 async function recoverGapAndReconnect(matchId: string, token: string) {
+  if (isUnmounted || reconnectingInFlight) return
+  reconnectingInFlight = true
   try {
     const since = snapshot.value?.seq ?? 0
     const resp = await fetch(
@@ -198,10 +224,23 @@ async function recoverGapAndReconnect(matchId: string, token: string) {
       const snap = (await resp.json()) as MatchSnapshot
       snapshot.value = snap
       syncClocksFromSnapshot(snap)
-      connectionState.value = 'connected'
+      if (snap.status === 'finished') {
+        connectionState.value = 'connected'
+        return
+      }
+    }
+    // Reopen a live WebSocket if none is currently open or connecting; keep `reconnecting` until `onopen` fires!
+    if (
+      !isUnmounted &&
+      snapshot.value?.status !== 'finished' &&
+      (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING))
+    ) {
+      connectMatchWebSocket(matchId, token)
     }
   } catch {
-    // Keep reconnecting indicator visible
+    // Keep reconnecting indicator and fallback polling active until WebSocket reconnects
+  } finally {
+    reconnectingInFlight = false
   }
 }
 
@@ -230,8 +269,10 @@ async function joinAndSubscribe() {
       redBelow.value = false
     }
     syncClocksFromSnapshot(snapshot.value)
-    connectionState.value = 'connected'
-    connectMatchWebSocket(snapshot.value.match_id, sess.access_token)
+    connectionState.value = snapshot.value.status === 'finished' ? 'connected' : 'connecting'
+    if (snapshot.value.status !== 'finished') {
+      connectMatchWebSocket(snapshot.value.match_id, sess.access_token)
+    }
   } catch (err) {
     connectionState.value = 'error'
     errorBanner.value = err instanceof Error ? err.message : String(err)
@@ -440,8 +481,14 @@ watch(code, () => {
 })
 
 onBeforeUnmount(() => {
+  isUnmounted = true
   if (clockTimer) clearInterval(clockTimer)
-  ws?.close()
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  if (ws) {
+    ws.onclose = null
+    ws.close()
+    ws = null
+  }
 })
 </script>
 
@@ -454,7 +501,7 @@ onBeforeUnmount(() => {
           <strong data-testid="clock-black">{{ formatClock(displayBlackMs) }}</strong>
         </div>
 
-        <div class="lifecycle-badge" data-testid="match-status-badge">
+        <div class="lifecycle-badge" data-testid="match-status-badge" :data-connection-state="connectionState">
           <template v-if="snapshot?.status === 'waiting'">Waiting for friend…</template>
           <template v-else-if="snapshot?.status === 'playing'">
             Live · {{ assignedSide ? `You play ${assignedSide}` : 'Spectating' }}

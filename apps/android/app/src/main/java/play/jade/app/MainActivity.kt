@@ -3,14 +3,16 @@ package play.jade.app
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import androidx.activity.ComponentActivity
 import androidx.activity.BackEventCompat
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -22,8 +24,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
@@ -33,13 +37,16 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
+import uniffi.core_ffi.FfiBoardRenderModel
 import uniffi.core_ffi.FfiGameSession
 
 /**
- * Native Android client using Kotlin + Jetpack Compose, Compose Canvas/DrawScope with an
- * explicit TalkBack accessibility semantics tree, SoundPool short-sample playback,
- * Android Keystore AES-GCM credential encryption, and SQLite offline play persistence.
+ * Native Android client using Kotlin + Jetpack Compose, Compose Canvas/DrawScope with full
+ * `FfiBoardRenderModel` piece/glyph/marker/river rendering, an explicit TalkBack accessibility
+ * semantics tree, SoundPool short-sample playback, Android Keystore AES-GCM credential encryption,
+ * and SQLite offline play persistence.
  */
 class MainActivity : ComponentActivity() {
     private lateinit var offlineDb: JadeOfflineDb
@@ -58,7 +65,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        // Section 12 & 15: pause audio and stop background engine searches on lifecycle suspension.
         audioPool.pauseAll()
         NativeEngineBridge.cancelActiveSearch()
     }
@@ -73,13 +79,18 @@ class MainActivity : ComponentActivity() {
 fun JadeAndroidRoot(offlineDb: JadeOfflineDb, audioPool: JadeSoundController) {
     var redBelow by remember { mutableStateOf(true) }
     var darkMode by remember { mutableStateOf(false) }
+    var traditionalGlyphs by remember { mutableStateOf(false) }
+    var materialId by remember { mutableStateOf("pale-jade") }
     var selectedSquare by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var moveHistory by remember { mutableStateOf(offlineDb.loadActiveMoves()) }
+
+    val renderModel = remember(moveHistory, selectedSquare, traditionalGlyphs) {
+        computeAndroidRenderModel(moveHistory, selectedSquare, traditionalGlyphs)
+    }
 
     val bgColor = if (darkMode) Color(0xFF1D2421) else Color(0xFFF3EEE4)
     val inkColor = if (darkMode) Color(0xFFF3EEE4) else Color(0xFF252A25)
 
-    // Native Android Back deselects active piece before popping navigation.
     PredictiveBackHandler(enabled = selectedSquare != null) { progress ->
         progress.collect { _: BackEventCompat -> }
         selectedSquare = null
@@ -94,61 +105,84 @@ fun JadeAndroidRoot(offlineDb: JadeOfflineDb, audioPool: JadeSoundController) {
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             val isTabletOrFoldable = maxWidth >= 680.dp
+            val onBoardIntent: (Pair<Int, Int>) -> Unit = { sq ->
+                handleAndroidSquareIntent(sq, selectedSquare, moveHistory, offlineDb, audioPool) { nextSel, nextMoves ->
+                    selectedSquare = nextSel
+                    moveHistory = nextMoves
+                }
+            }
+            val renderBoard: @Composable (Modifier) -> Unit = { boardMod ->
+                JadeComposeBoard(
+                    modifier = boardMod,
+                    renderModel = renderModel,
+                    redBelow = redBelow,
+                    darkMode = darkMode,
+                    materialId = materialId,
+                    traditionalGlyphs = traditionalGlyphs,
+                    selected = selectedSquare,
+                    onSquareIntent = onBoardIntent
+                )
+            }
+            val renderControls: @Composable (Modifier) -> Unit = { controlsMod ->
+                JadeControlsColumn(
+                    modifier = controlsMod,
+                    inkColor = inkColor,
+                    renderModel = renderModel,
+                    materialId = materialId,
+                    traditionalGlyphs = traditionalGlyphs,
+                    onFlip = { redBelow = !redBelow },
+                    onUndo = {
+                        if (moveHistory.isNotEmpty()) {
+                            val next = moveHistory.dropLast(1)
+                            selectedSquare = null
+                            moveHistory = next
+                            offlineDb.saveActiveMoves(next)
+                        }
+                    },
+                    onResetOffline = {
+                        selectedSquare = null
+                        moveHistory = emptyList()
+                        offlineDb.saveActiveMoves(emptyList())
+                    },
+                    onToggleDark = { darkMode = !darkMode },
+                    onToggleTraditional = { traditionalGlyphs = !traditionalGlyphs },
+                    onCycleMaterial = {
+                        materialId = when (materialId) {
+                            "pale-jade" -> "boxwood"
+                            "boxwood" -> "ivory-stone"
+                            else -> "pale-jade"
+                        }
+                    }
+                )
+            }
             if (isTabletOrFoldable) {
                 Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    JadeComposeBoard(
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                        redBelow = redBelow,
-                        selected = selectedSquare,
-                        onSquareIntent = { sq ->
-                            handleAndroidSquareIntent(sq, selectedSquare, moveHistory, offlineDb, audioPool) { nextSel, nextMoves ->
-                                selectedSquare = nextSel
-                                moveHistory = nextMoves
-                            }
-                        }
-                    )
-                    JadeControlsColumn(
-                        modifier = Modifier.width(300.dp),
-                        inkColor = inkColor,
-                        moveCount = moveHistory.size,
-                        onFlip = { redBelow = !redBelow },
-                        onResetOffline = {
-                            selectedSquare = null
-                            moveHistory = emptyList()
-                            offlineDb.saveActiveMoves(emptyList())
-                        },
-                        onToggleDark = { darkMode = !darkMode }
-                    )
+                    renderBoard(Modifier.weight(1f).fillMaxHeight())
+                    renderControls(Modifier.width(300.dp))
                 }
             } else {
-                // Phone layout: board stays full-width primary object; never shrunk for a desktop sidebar.
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    JadeComposeBoard(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        redBelow = redBelow,
-                        selected = selectedSquare,
-                        onSquareIntent = { sq ->
-                            handleAndroidSquareIntent(sq, selectedSquare, moveHistory, offlineDb, audioPool) { nextSel, nextMoves ->
-                                selectedSquare = nextSel
-                                moveHistory = nextMoves
-                            }
-                        }
-                    )
-                    JadeControlsColumn(
-                        modifier = Modifier.fillMaxWidth(),
-                        inkColor = inkColor,
-                        moveCount = moveHistory.size,
-                        onFlip = { redBelow = !redBelow },
-                        onResetOffline = {
-                            selectedSquare = null
-                            moveHistory = emptyList()
-                            offlineDb.saveActiveMoves(emptyList())
-                        },
-                        onToggleDark = { darkMode = !darkMode }
-                    )
+                    renderBoard(Modifier.fillMaxWidth().weight(1f))
+                    renderControls(Modifier.fillMaxWidth())
                 }
             }
         }
+    }
+}
+
+internal fun computeAndroidRenderModel(
+    moves: List<String>,
+    selectedSquare: Pair<Int, Int>?,
+    traditionalGlyphs: Boolean
+): FfiBoardRenderModel {
+    val selectedUci = selectedSquare?.let { "${'a' + it.first}${it.second}" }
+    return FfiGameSession("program-2023.11-v1").use { session ->
+        for (mv in moves) {
+            if (runCatching { session.applyMoveToken(mv) }.isFailure) {
+                break
+            }
+        }
+        session.renderModel(traditionalGlyphs, selectedUci)
     }
 }
 
@@ -200,20 +234,43 @@ private fun handleAndroidSquareIntent(
 @Composable
 fun JadeComposeBoard(
     modifier: Modifier,
+    renderModel: FfiBoardRenderModel,
     redBelow: Boolean,
+    darkMode: Boolean,
+    materialId: String,
+    traditionalGlyphs: Boolean,
     selected: Pair<Int, Int>?,
     onSquareIntent: (Pair<Int, Int>?) -> Unit
 ) {
-    val paleJade = Color(0xFFDCE3CE)
+    val surfaceColor = if (darkMode) Color(0xFF1D2421) else Color(0xFFF3EEE4)
+    val lineColor = if (darkMode) Color(0xC7DCE3CE) else Color(0xE0252A25)
     val deepJade = Color(0xFF415447)
     val charcoal = Color(0xFF252A25)
     val vermilion = Color(0xFFA54837)
+    val discFill = when (materialId) {
+        "boxwood" -> Color(0xFFDFC79C)
+        "ivory-stone" -> Color(0xFFEDE7DA)
+        else -> Color(0xFFDCE3CE)
+    }
 
-    // Explicit TalkBack accessibility semantics tree separate from Canvas drawing (Section 6 & 7).
     val semanticDescription = buildString {
-        append("Jade Xiangqi Board, ")
-        append(if (redBelow) "Red pieces at bottom" else "Black pieces at bottom")
+        append("Jade Xiangqi Board, ${renderModel.sideToMove} to move, ${renderModel.pieces.size} pieces on board, ")
+        append(if (redBelow) "Red at bottom" else "Black at bottom")
+        if (renderModel.inCheck) append(", check")
         selected?.let { append(", selected square ${'a' + it.first}${it.second}") }
+    }
+
+    val glyphPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+        }
+    }
+    val riverPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SERIF, Typeface.NORMAL)
+        }
     }
 
     Canvas(
@@ -222,8 +279,8 @@ fun JadeComposeBoard(
                 contentDescription = semanticDescription
                 role = Role.Image
                 customActions = listOf(
-                    CustomAccessibilityAction("Select center cannon e2") {
-                        onSquareIntent(4 to 2)
+                    CustomAccessibilityAction("Select right cannon h2") {
+                        onSquareIntent(7 to 2)
                         true
                     },
                     CustomAccessibilityAction("Clear selection") {
@@ -254,6 +311,7 @@ fun JadeComposeBoard(
                 }
             }
     ) {
+        drawRect(color = surfaceColor)
         val w = size.width
         val h = size.height
         val p = 18f
@@ -262,34 +320,130 @@ fun JadeComposeBoard(
         val ox = (w - 8f * s) / 2f
         val oy = (h - 9f * s) / 2f
 
+        fun screenOffset(file: Int, rank: Int): Offset {
+            val sx = if (redBelow) ox + s * file else ox + s * (8 - file)
+            val sy = if (redBelow) oy + s * (9 - rank) else oy + s * rank
+            return Offset(sx, sy)
+        }
+
+        fun parseUci(uci: String): Pair<Int, Int>? {
+            if (uci.length != 2) return null
+            val f = uci[0] - 'a'
+            val r = uci[1].digitToIntOrNull() ?: return null
+            return if (f in 0..8 && r in 0..9) (f to r) else null
+        }
+
+        // Outer frame + 9x10 grid + river + palace diagonals
+        drawRect(
+            color = lineColor,
+            topLeft = Offset(ox - 5f, oy - 5f),
+            size = Size(8f * s + 10f, 9f * s + 10f),
+            style = Stroke(width = 2.2f)
+        )
         for (r in 0..9) {
-            drawLine(charcoal, Offset(ox, oy + r * s), Offset(ox + 8f * s, oy + r * s), strokeWidth = 2f)
+            drawLine(lineColor, Offset(ox, oy + r * s), Offset(ox + 8f * s, oy + r * s), strokeWidth = 1.6f)
         }
         for (f in 0..8) {
             if (f == 0 || f == 8) {
-                drawLine(charcoal, Offset(ox + f * s, oy), Offset(ox + f * s, oy + 9f * s), strokeWidth = 2f)
+                drawLine(lineColor, Offset(ox + f * s, oy), Offset(ox + f * s, oy + 9f * s), strokeWidth = 1.8f)
             } else {
-                drawLine(charcoal, Offset(ox + f * s, oy), Offset(ox + f * s, oy + 4f * s), strokeWidth = 1.6f)
-                drawLine(charcoal, Offset(ox + f * s, oy + 5f * s), Offset(ox + f * s, oy + 9f * s), strokeWidth = 1.6f)
+                drawLine(lineColor, Offset(ox + f * s, oy), Offset(ox + f * s, oy + 4f * s), strokeWidth = 1.5f)
+                drawLine(lineColor, Offset(ox + f * s, oy + 5f * s), Offset(ox + f * s, oy + 9f * s), strokeWidth = 1.5f)
             }
         }
-        // Palace diagonals
-        drawLine(charcoal, Offset(ox + 3f * s, oy), Offset(ox + 5f * s, oy + 2f * s), strokeWidth = 1.6f)
-        drawLine(charcoal, Offset(ox + 5f * s, oy), Offset(ox + 3f * s, oy + 2f * s), strokeWidth = 1.6f)
-        drawLine(charcoal, Offset(ox + 3f * s, oy + 7f * s), Offset(ox + 5f * s, oy + 9f * s), strokeWidth = 1.6f)
-        drawLine(charcoal, Offset(ox + 5f * s, oy + 7f * s), Offset(ox + 3f * s, oy + 9f * s), strokeWidth = 1.6f)
+        drawLine(lineColor, Offset(ox + 3f * s, oy), Offset(ox + 5f * s, oy + 2f * s), strokeWidth = 1.5f)
+        drawLine(lineColor, Offset(ox + 5f * s, oy), Offset(ox + 3f * s, oy + 2f * s), strokeWidth = 1.5f)
+        drawLine(lineColor, Offset(ox + 3f * s, oy + 7f * s), Offset(ox + 5f * s, oy + 9f * s), strokeWidth = 1.5f)
+        drawLine(lineColor, Offset(ox + 5f * s, oy + 7f * s), Offset(ox + 3f * s, oy + 9f * s), strokeWidth = 1.5f)
 
-        selected?.let { (x, y) ->
-            val sx = if (redBelow) ox + s * x else ox + s * (8 - x)
-            val sy = if (redBelow) oy + s * (9 - y) else oy + s * y
+        // River inscriptions (`楚河` / `漢界` or `汉界`)
+        riverPaint.textSize = s * 0.42f
+        riverPaint.color = if (darkMode) 0xC7DCE3CE.toInt() else 0xCC252A25.toInt()
+        val riverBaseline = oy + 4.5f * s - (riverPaint.descent() + riverPaint.ascent()) / 2f
+        drawContext.canvas.nativeCanvas.drawText("楚河", ox + 2f * s, riverBaseline, riverPaint)
+        drawContext.canvas.nativeCanvas.drawText(
+            if (traditionalGlyphs) "漢界" else "汉界",
+            ox + 6f * s,
+            riverBaseline,
+            riverPaint
+        )
+
+        // Last-move markers & check danger ring
+        listOfNotNull(renderModel.lastMoveFromUci, renderModel.lastMoveToUci).forEach { uci ->
+            parseUci(uci)?.let { (f, r) ->
+                val c = screenOffset(f, r)
+                val half = s * 0.44f
+                drawRect(
+                    color = deepJade.copy(alpha = 0.6f),
+                    topLeft = Offset(c.x - half, c.y - half),
+                    size = Size(half * 2f, half * 2f),
+                    style = Stroke(width = 2.2f)
+                )
+            }
+        }
+        renderModel.checkUci?.let(::parseUci)?.let { (f, r) ->
             drawCircle(
                 color = vermilion,
-                radius = s * 0.46f,
-                center = Offset(sx, sy),
+                radius = s * 0.48f,
+                center = screenOffset(f, r),
                 style = Stroke(width = 3.5f)
             )
-            drawCircle(color = paleJade, radius = s * 0.41f, center = Offset(sx, sy))
-            drawCircle(color = deepJade, radius = s * 0.41f, center = Offset(sx, sy), style = Stroke(width = 2f))
+        }
+
+        // Pieces (carved material discs + glyphs)
+        val occupied = renderModel.pieces.map { it.uci }.toSet()
+        val radius = s * 0.43f
+        glyphPaint.textSize = radius * 1.12f
+        for (piece in renderModel.pieces) {
+            val center = screenOffset(piece.file.toInt(), piece.rank.toInt())
+            drawCircle(
+                color = Color(0x38000000),
+                radius = radius,
+                center = Offset(center.x + 1.8f, center.y + 2.8f)
+            )
+            drawCircle(color = discFill, radius = radius, center = center)
+            drawCircle(color = deepJade, radius = radius, center = center, style = Stroke(width = 2f))
+
+            val pieceInk = if (piece.side == "red") vermilion else charcoal
+            drawCircle(
+                color = pieceInk.copy(alpha = 0.55f),
+                radius = radius * 0.83f,
+                center = center,
+                style = Stroke(width = 1.2f)
+            )
+
+            glyphPaint.color = if (piece.side == "red") 0xFFA54837.toInt() else 0xFF252A25.toInt()
+            val textY = center.y - (glyphPaint.descent() + glyphPaint.ascent()) / 2f
+            drawContext.canvas.nativeCanvas.drawText(piece.glyph, center.x, textY, glyphPaint)
+
+            if (renderModel.selectedUci == piece.uci) {
+                drawCircle(
+                    color = deepJade,
+                    radius = s * 0.46f,
+                    center = center,
+                    style = Stroke(width = 3.5f)
+                )
+            }
+        }
+
+        // Legal destination indicators
+        for (dest in renderModel.legalDestsUci) {
+            val (f, r) = parseUci(dest) ?: continue
+            val center = screenOffset(f, r)
+            if (occupied.contains(dest)) {
+                drawCircle(
+                    color = vermilion,
+                    radius = s * 0.46f,
+                    center = center,
+                    style = Stroke(width = 2.8f)
+                )
+            } else {
+                drawCircle(
+                    color = if (darkMode) Color(0xD8DCE3CE) else deepJade.copy(alpha = 0.82f),
+                    radius = max(5f, s * 0.13f),
+                    center = center
+                )
+            }
         }
     }
 }
@@ -298,17 +452,31 @@ fun JadeComposeBoard(
 private fun JadeControlsColumn(
     modifier: Modifier,
     inkColor: Color,
-    moveCount: Int,
+    renderModel: FfiBoardRenderModel,
+    materialId: String,
+    traditionalGlyphs: Boolean,
     onFlip: () -> Unit,
+    onUndo: () -> Unit,
     onResetOffline: () -> Unit,
-    onToggleDark: () -> Unit
+    onToggleDark: () -> Unit,
+    onToggleTraditional: () -> Unit,
+    onCycleMaterial: () -> Unit
 ) {
+    val statusDesc = renderModel.outcome?.let { "Finished: $it (${renderModel.reason ?: ""})" }
+        ?: "${renderModel.sideToMove.replaceFirstChar { it.uppercase() }} to move · ${renderModel.plyCount} plies" +
+        if (renderModel.inCheck) " · CHECK" else ""
+
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Jade · 玉枰象棋", color = inkColor, style = MaterialTheme.typography.titleMedium)
-        Text("Offline game · $moveCount plies · program-2023.11-v1", color = inkColor, style = MaterialTheme.typography.bodySmall)
+        Text(statusDesc, color = inkColor, style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onFlip) { Text("Flip") }
-            OutlinedButton(onClick = onResetOffline) { Text("New Offline") }
+            OutlinedButton(onClick = onUndo) { Text("Undo") }
+            OutlinedButton(onClick = onResetOffline) { Text("New") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onCycleMaterial) { Text(materialId) }
+            OutlinedButton(onClick = onToggleTraditional) { Text(if (traditionalGlyphs) "繁體" else "简体") }
             OutlinedButton(onClick = onToggleDark) { Text("Surface") }
         }
     }
@@ -374,11 +542,6 @@ class JadeOfflineDb(context: Context) : SQLiteOpenHelper(context, "jade_offline.
     }
 }
 
-/**
- * Android Keystore AES-GCM key protector for revocable native session refresh credentials.
- * Android Keystore holds the non-exportable AES key; encrypted ciphertext lives in dedicated private prefs,
- * never in the ordinary study/game SQLite database (Section 8 & 15).
- */
 object AndroidCredentialVault {
     private const val KEY_ALIAS = "jade_session_aes_key_v1"
     private const val PREFS_NAME = "jade_encrypted_auth"

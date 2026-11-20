@@ -8,7 +8,7 @@ APP_DIR="$REPO_ROOT/target/macos-app/Jade.app"
 MACOS_BIN="$APP_DIR/Contents/MacOS/JadeMacOS"
 
 # 1. Ensure Rust core-ffi static library & Swift UniFFI bindings exist
-if [ ! -f "$REPO_ROOT/packages/apple/Artifacts/libcore_ffi.a" ]; then
+if [ ! -f "$REPO_ROOT/packages/apple/Artifacts/libcore_ffi.a" ] || [ ! -f "$REPO_ROOT/packages/apple/Sources/JadeCoreBindings/core_ffi.swift" ]; then
   "$SCRIPT_DIR/build-apple-ffi.sh"
 fi
 
@@ -50,6 +50,7 @@ SWIFT_BUILD_DIR="/tmp/jade-macos-swift-build"
 mkdir -p "$SWIFT_BUILD_DIR"
 
 /usr/bin/swiftc -O \
+  -whole-module-optimization \
   -parse-as-library \
   -emit-module \
   -emit-object \
@@ -58,6 +59,7 @@ mkdir -p "$SWIFT_BUILD_DIR"
   -Xcc -fmodules-cache-path=/tmp/jade-clang-modcache \
   -I "$REPO_ROOT/packages/apple/Sources/core_ffiFFI/include" \
   "$REPO_ROOT/packages/apple/Sources/JadeCoreBindings/core_ffi.swift" \
+  "$REPO_ROOT/packages/apple/Sources/JadeCoreBindings/CoreGraphicsBoardPainter.swift" \
   -emit-module-path "$SWIFT_BUILD_DIR/JadeCoreBindings.swiftmodule" \
   -o "$SWIFT_BUILD_DIR/JadeCoreBindings.o"
 

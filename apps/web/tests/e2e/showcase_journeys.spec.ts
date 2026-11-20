@@ -109,6 +109,40 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         timeout: 6_000,
       })
 
+      // Force-drop Red's live WebSocket and verify Red recovers gap AND reopens a brand-new live WebSocket for subsequent moves!
+      await redPage.waitForFunction(() => {
+        const s = (window as unknown as Record<string, WebSocket | undefined>).__jadeActiveMatchSocket
+        return Boolean(s && s.readyState === WebSocket.OPEN)
+      })
+      await redPage.evaluate(() => {
+        const sock = (window as unknown as Record<string, (WebSocket & { __droppedForTest?: boolean }) | undefined>).__jadeActiveMatchSocket
+        if (sock) {
+          sock.__droppedForTest = true
+          sock.close()
+        }
+      })
+      await redPage.waitForFunction(
+        () => {
+          const s = (window as unknown as Record<string, (WebSocket & { __droppedForTest?: boolean }) | undefined>).__jadeActiveMatchSocket
+          return Boolean(s && !s.__droppedForTest && s.readyState === WebSocket.OPEN)
+        },
+        undefined,
+        { timeout: 6_000 },
+      )
+      await expect(redPage.getByTestId('match-status-badge')).toHaveAttribute(
+        'data-connection-state',
+        'connected',
+        { timeout: 6_000 },
+      )
+      await playBoardSquares(redPage, 'h0', 'g2')
+      await expect(blkPage.getByTestId('match-move-list')).toContainText('马二进三', {
+        timeout: 6_000,
+      })
+      await playBoardSquares(blkPage, 'i9', 'h9')
+      await expect(redPage.getByTestId('match-move-list')).toContainText('车9平8', {
+        timeout: 6_000,
+      })
+
       await redPage.screenshot({
         path: resolve(VISUAL_REF_DIR, 'web-online-match-live.png'),
         fullPage: false,
