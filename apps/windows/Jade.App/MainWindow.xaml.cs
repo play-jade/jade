@@ -337,14 +337,15 @@ public static partial class WindowsCredentialStore
     private const uint CRED_TYPE_GENERIC = 1;
     private const uint CRED_PERSIST_LOCAL_MACHINE = 2;
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    [StructLayout(LayoutKind.Sequential)]
     private struct CREDENTIALW
     {
         public uint Flags;
         public uint Type;
         public nint TargetName;
         public nint Comment;
-        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint LastWrittenLowDateTime;
+        public uint LastWrittenHighDateTime;
         public uint CredentialBlobSize;
         public nint CredentialBlob;
         public uint Persist;
@@ -356,9 +357,9 @@ public static partial class WindowsCredentialStore
 
     [LibraryImport("Advapi32.dll", EntryPoint = "CredWriteW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool CredWriteW(ref CREDENTIALW userCredential, uint flags);
+    private static partial bool CredWriteW(nint userCredential, uint flags);
 
-    public static bool StoreRefreshToken(string installId, string refreshToken)
+    public static unsafe bool StoreRefreshToken(string installId, string refreshToken)
     {
         var bytes = Encoding.UTF8.GetBytes(refreshToken);
         var targetPtr = Marshal.StringToCoTaskMemUni($"PlayJade/RefreshToken/{installId}");
@@ -376,7 +377,7 @@ public static partial class WindowsCredentialStore
                 Persist = CRED_PERSIST_LOCAL_MACHINE,
                 UserName = userPtr
             };
-            return CredWriteW(ref cred, 0);
+            return CredWriteW((nint)(&cred), 0);
         }
         finally
         {
