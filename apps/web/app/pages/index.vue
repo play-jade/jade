@@ -105,6 +105,8 @@ const { data: boardData, refresh: refreshBoard } = await useAsyncData(
 )
 
 onMounted(async () => {
+  // A server render that could not compute the board leaves no data to hydrate, so the client computes it.
+  if (!boardData.value) await refreshBoard()
   const saved = await loadOfflineGame('active_board')
   if (saved && saved.movesUci.length > 0 && mainlineMovesUci.value.length === 0) {
     mainlineMovesUci.value = saved.movesUci

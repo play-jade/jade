@@ -12,6 +12,17 @@ async function playBoardSquares(page: Page, fromSq: string, toSq: string) {
 }
 
 test.describe('Jade Slice A Web Showcase Journeys', () => {
+  test('0. Home board renders on first load without any interaction', async ({ page, request }) => {
+    const ssr = await request.get('/')
+    const html = await ssr.text()
+    expect(html).toContain('data-testid="xiangqi-board"')
+    expect(html).not.toContain('core_wasm.wasm not found')
+
+    await page.goto('/')
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.locator('[data-square="e0"]')).toHaveAttribute('aria-label', /\(/)
+  })
+
   test('1. Home board, tactile move play, preference switching without state loss, and local engine worker', async ({
     page,
   }) => {
