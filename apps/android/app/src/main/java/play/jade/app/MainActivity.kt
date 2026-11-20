@@ -275,6 +275,7 @@ fun JadeComposeBoard(
         selected?.let { append(", selected square ${'a' + it.first}${it.second}") }
     }
 
+    val currentOnSquareIntent by rememberUpdatedState(onSquareIntent)
     val glyphPaint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textAlign = Paint.Align.CENTER
@@ -296,11 +297,11 @@ fun JadeComposeBoard(
                 role = Role.Image
                 customActions = listOf(
                     CustomAccessibilityAction("Select right cannon h2") {
-                        onSquareIntent(7 to 2)
+                        currentOnSquareIntent(7 to 2)
                         true
                     },
                     CustomAccessibilityAction("Clear selection") {
-                        onSquareIntent(null)
+                        currentOnSquareIntent(null)
                         true
                     }
                 )
@@ -317,12 +318,12 @@ fun JadeComposeBoard(
                     val u = (tap.x - ox) / s
                     val v = (tap.y - oy) / s
                     if (u < -0.5 || u >= 8.5 || v < -0.5 || v >= 9.5) {
-                        onSquareIntent(null)
+                        currentOnSquareIntent(null)
                     } else {
                         val c = floor(u + 0.5).toInt()
                         val r = floor(v + 0.5).toInt()
                         val sq = if (redBelow) (c to (9 - r)) else ((8 - c) to r)
-                        onSquareIntent(sq)
+                        currentOnSquareIntent(sq)
                     }
                 }
             }
