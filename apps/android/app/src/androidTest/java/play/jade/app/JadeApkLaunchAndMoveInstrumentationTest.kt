@@ -43,17 +43,17 @@ class JadeApkLaunchAndMoveInstrumentationTest {
         )
 
         // 2. Tap `h2` (file = 7, rank = 2) then `e2` (file = 4, rank = 2) on the Compose board
-        val bounds = boardNode.fetchSemanticsNode().boundsInRoot
-        val w = bounds.width
-        val h = bounds.height
-        val p = 18f
-        val s = min((w - 2f * p) / 9f, (h - 2f * p) / 10f)
-        val ox = (w - 8f * s) / 2f
-        val oy = (h - 9f * s) / 2f
+        fun TouchInjectionScopeSquare(w: Float, h: Float, file: Int, rank: Int): Offset {
+            val p = 18f
+            val s = min((w - 2f * p) / 9f, (h - 2f * p) / 10f)
+            val ox = (w - 8f * s) / 2f
+            val oy = (h - 9f * s) / 2f
+            return Offset(ox + file * s, oy + (9 - rank) * s)
+        }
 
-        fun squarePixel(file: Int, rank: Int) = Offset(ox + file * s, oy + (9 - rank) * s)
-
-        boardNode.performTouchInput { click(squarePixel(7, 2)) }
+        boardNode.performTouchInput {
+            click(TouchInjectionScopeSquare(width.toFloat(), height.toFloat(), 7, 2))
+        }
         composeRule.waitForIdle()
 
         val selectedDesc = boardNode.fetchSemanticsNode()
@@ -64,7 +64,9 @@ class JadeApkLaunchAndMoveInstrumentationTest {
             selectedDesc.contains("selected square h2")
         )
 
-        boardNode.performTouchInput { click(squarePixel(4, 2)) }
+        boardNode.performTouchInput {
+            click(TouchInjectionScopeSquare(width.toFloat(), height.toFloat(), 4, 2))
+        }
         composeRule.waitForIdle()
 
         // 3. Verify move `h2e2` (`炮二平五`) executed through packaged Rust FFI and updated turn + notation
@@ -72,6 +74,6 @@ class JadeApkLaunchAndMoveInstrumentationTest {
             .assertTextContains("Black to move · 1 plies")
         composeRule.onNodeWithTag("jade-last-move-text")
             .assertIsDisplayed()
-            .assertTextContains("炮二平五")
+            .assertTextContains("Last move: 炮二平五")
     }
 }
