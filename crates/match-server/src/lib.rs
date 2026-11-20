@@ -434,12 +434,14 @@ async fn well_known_apple_universal_links() -> impl IntoResponse {
 }
 
 async fn well_known_android_asset_links() -> impl IntoResponse {
-    let pkg = std::env::var("JADE_ANDROID_PACKAGE")
-        .unwrap_or_else(|_| "play.jade.android.dev".to_string());
-    let cert = std::env::var("JADE_ANDROID_SHA256_CERT").unwrap_or_else(|_| {
-        "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"
-            .to_string()
-    });
+    let pkg =
+        std::env::var("JADE_ANDROID_PACKAGE").unwrap_or_else(|_| "play.jade.app.dev".to_string());
+    let cert = std::env::var("JADE_ANDROID_SHA256_CERT")
+        .or_else(|_| std::env::var("JADE_ANDROID_CERT_SHA256"))
+        .unwrap_or_else(|_| {
+            "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"
+                .to_string()
+        });
     Json(serde_json::json!([
         {
             "relation": ["delegate_permission/common.handle_all_urls"],
