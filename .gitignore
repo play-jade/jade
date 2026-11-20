@@ -8,6 +8,7 @@
 **/dist/
 apps/web/public/wasm/
 apps/android/app/src/main/java/uniffi/
+apps/android/app/src/main/jniLibs/
 packages/apple/Artifacts/*.a
 packages/apple/Artifacts/*.dylib
 packages/apple/Sources/JadeCoreBindings/core_ffi.swift
