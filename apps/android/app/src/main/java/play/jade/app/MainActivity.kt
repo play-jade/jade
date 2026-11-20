@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.unit.dp
 import java.security.KeyStore
@@ -84,9 +85,10 @@ fun JadeAndroidRoot(offlineDb: JadeOfflineDb, audioPool: JadeSoundController) {
     var selectedSquare by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var moveHistory by remember { mutableStateOf(offlineDb.loadActiveMoves()) }
 
-    val renderModel = remember(moveHistory, selectedSquare, traditionalGlyphs) {
-        computeAndroidRenderModel(moveHistory, selectedSquare, traditionalGlyphs)
+    val uiState = remember(moveHistory, selectedSquare, traditionalGlyphs) {
+        computeAndroidBoardUiState(moveHistory, selectedSquare, traditionalGlyphs)
     }
+    val renderModel = uiState.renderModel
 
     val bgColor = if (darkMode) Color(0xFF1D2421) else Color(0xFFF3EEE4)
     val inkColor = if (darkMode) Color(0xFFF3EEE4) else Color(0xFF252A25)
@@ -128,6 +130,7 @@ fun JadeAndroidRoot(offlineDb: JadeOfflineDb, audioPool: JadeSoundController) {
                     modifier = controlsMod,
                     inkColor = inkColor,
                     renderModel = renderModel,
+                    movesChinese = uiState.movesChinese,
                     materialId = materialId,
                     traditionalGlyphs = traditionalGlyphs,
                     onFlip = { redBelow = !redBelow },
@@ -170,21 +173,33 @@ fun JadeAndroidRoot(offlineDb: JadeOfflineDb, audioPool: JadeSoundController) {
     }
 }
 
+internal data class AndroidBoardUiState(
+    val renderModel: FfiBoardRenderModel,
+    val movesChinese: List<String>
+)
+
+internal fun computeAndroidBoardUiState(
+    moves: List<String>,
+    selectedSquare: Pair<Int, Int>?,
+    traditionalGlyphs: Boolean
+): AndroidBoardUiState {
+    val selectedUci = selectedSquare?.let { "${'a' + it.first}${it.second}" }
+    val zhMoves = mutableListOf<String>()
+    val model = FfiGameSession("program-2023.11-v1").use { session ->
+        for (mv in moves) {
+            val zh = runCatching { session.applyMoveToken(mv) }.getOrNull() ?: break
+            zhMoves.add(zh)
+        }
+        session.renderModel(traditionalGlyphs, selectedUci)
+    }
+    return AndroidBoardUiState(renderModel = model, movesChinese = zhMoves)
+}
+
 internal fun computeAndroidRenderModel(
     moves: List<String>,
     selectedSquare: Pair<Int, Int>?,
     traditionalGlyphs: Boolean
-): FfiBoardRenderModel {
-    val selectedUci = selectedSquare?.let { "${'a' + it.first}${it.second}" }
-    return FfiGameSession("program-2023.11-v1").use { session ->
-        for (mv in moves) {
-            if (runCatching { session.applyMoveToken(mv) }.isFailure) {
-                break
-            }
-        }
-        session.renderModel(traditionalGlyphs, selectedUci)
-    }
-}
+): FfiBoardRenderModel = computeAndroidBoardUiState(moves, selectedSquare, traditionalGlyphs).renderModel
 
 private fun handleAndroidSquareIntent(
     sq: Pair<Int, Int>?,
@@ -275,6 +290,7 @@ fun JadeComposeBoard(
 
     Canvas(
         modifier = modifier
+            .testTag("jade-compose-board")
             .semantics {
                 contentDescription = semanticDescription
                 role = Role.Image
@@ -453,6 +469,7 @@ private fun JadeControlsColumn(
     modifier: Modifier,
     inkColor: Color,
     renderModel: FfiBoardRenderModel,
+    movesChinese: List<String>,
     materialId: String,
     traditionalGlyphs: Boolean,
     onFlip: () -> Unit,
@@ -468,7 +485,20 @@ private fun JadeControlsColumn(
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Jade · 玉枰象棋", color = inkColor, style = MaterialTheme.typography.titleMedium)
-        Text(statusDesc, color = inkColor, style = MaterialTheme.typography.bodySmall)
+        Text(
+            statusDesc,
+            color = inkColor,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag("jade-status-text")
+        )
+        if (movesChinese.isNotEmpty()) {
+            Text(
+                "Last move: ${movesChinese.last()}",
+                color = inkColor,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("jade-last-move-text")
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onFlip) { Text("Flip") }
             OutlinedButton(onClick = onUndo) { Text("Undo") }
