@@ -32,8 +32,10 @@ export default defineConfig({
       timeout: 90_000,
     },
     {
-      command: 'node .output/server/index.mjs',
-      cwd: currentDir,
+      // The server starts from the repository root, as a deployment starts it outside apps/web, so a render that
+      // resolves files against the working directory fails here too.
+      command: 'node apps/web/.output/server/index.mjs',
+      cwd: repoRoot,
       env: {
         ...process.env,
         PORT: '3180',

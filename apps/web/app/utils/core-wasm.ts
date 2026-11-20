@@ -156,8 +156,13 @@ async function instantiateCoreWasm(): Promise<RawWasmExports> {
   let wasmBytes: BufferSource
   if (import.meta.server || typeof window === 'undefined') {
     const { readFile } = await import('node:fs/promises')
-    const { resolve } = await import('node:path')
+    const { dirname, resolve } = await import('node:path')
+    // The built server (`.output/server/index.mjs`) serves `.output/public`, whatever directory it starts in, so the
+    // module resolves beside its entry first and only then against the working directory of `nuxt dev`.
+    const entry = process.argv[1]
     const candidates = [
+      ...(entry ? [resolve(dirname(entry), '../public/wasm/core_wasm.wasm')] : []),
+      resolve(process.cwd(), '.output/public/wasm/core_wasm.wasm'),
       resolve(process.cwd(), 'public/wasm/core_wasm.wasm'),
       resolve(process.cwd(), 'apps/web/public/wasm/core_wasm.wasm'),
     ]

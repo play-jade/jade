@@ -449,6 +449,8 @@ async function copyShareLink() {
 }
 
 onMounted(() => {
+  // A server render that could not compute the board leaves no data to hydrate, so the client computes it.
+  if (!boardData.value) void refreshBoard()
   void joinAndSubscribe()
   clockTimer = setInterval(() => {
     pollTickCount = (pollTickCount + 1) % 4
