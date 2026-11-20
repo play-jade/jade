@@ -105,7 +105,7 @@ fun JadeAndroidRoot(offlineDb: JadeOfflineDb, audioPool: JadeSoundController) {
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(16.dp)) {
             val isTabletOrFoldable = maxWidth >= 680.dp
-            val onBoardIntent: (Pair<Int, Int>) -> Unit = { sq ->
+            val onBoardIntent: (Pair<Int, Int>?) -> Unit = { sq ->
                 handleAndroidSquareIntent(sq, selectedSquare, moveHistory, offlineDb, audioPool) { nextSel, nextMoves ->
                     selectedSquare = nextSel
                     moveHistory = nextMoves

@@ -17,14 +17,14 @@ uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
-    #[error("{message}")]
-    Core { message: String },
+    #[error("{detail}")]
+    Core { detail: String },
 }
 
 impl From<xiangqi_core::CoreError> for FfiError {
     fn from(e: xiangqi_core::CoreError) -> Self {
         Self::Core {
-            message: e.to_string(),
+            detail: e.to_string(),
         }
     }
 }
@@ -97,7 +97,7 @@ impl FfiGameSession {
 
     pub fn apply_move_token(&self, token: String) -> Result<String, FfiError> {
         let mut guard = self.inner.lock().map_err(|_| FfiError::Core {
-            message: "mutex poisoned".to_string(),
+            detail: "mutex poisoned".to_string(),
         })?;
         let ply = guard.ply_count();
         let mv = parse_move_token(guard.board(), &token, ply)?;
@@ -108,14 +108,14 @@ impl FfiGameSession {
 
     pub fn undo(&self) -> Result<String, FfiError> {
         let mut guard = self.inner.lock().map_err(|_| FfiError::Core {
-            message: "mutex poisoned".to_string(),
+            detail: "mutex poisoned".to_string(),
         })?;
         Ok(guard.undo_move()?.to_uci())
     }
 
     pub fn summary(&self) -> Result<FfiStateSummary, FfiError> {
         let guard = self.inner.lock().map_err(|_| FfiError::Core {
-            message: "mutex poisoned".to_string(),
+            detail: "mutex poisoned".to_string(),
         })?;
         let board = guard.board();
         let stm = board.side_to_move();
@@ -158,7 +158,7 @@ impl FfiGameSession {
         selected_uci: Option<String>,
     ) -> Result<FfiBoardRenderModel, FfiError> {
         let guard = self.inner.lock().map_err(|_| FfiError::Core {
-            message: "mutex poisoned".to_string(),
+            detail: "mutex poisoned".to_string(),
         })?;
         let mut prefs = PresentationPrefsSnapshot::default();
         if traditional_glyphs {
@@ -256,9 +256,9 @@ pub fn ffi_sample_archive_query_position_json(fen: String) -> Result<String, Ffi
     let provider = SampleArchiveProvider::new_embedded();
     let res = provider
         .query_position(&fen)
-        .map_err(|message| FfiError::Core { message })?;
+        .map_err(|detail| FfiError::Core { detail })?;
     serde_json::to_string(&res).map_err(|e| FfiError::Core {
-        message: e.to_string(),
+        detail: e.to_string(),
     })
 }
 
