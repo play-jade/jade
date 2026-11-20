@@ -7,8 +7,12 @@
 **/.cache/
 **/dist/
 apps/web/public/wasm/
+apps/android/app/src/main/java/uniffi/
 packages/apple/Artifacts/*.a
 packages/apple/Artifacts/*.dylib
+packages/apple/Sources/JadeCoreBindings/core_ffi.swift
+packages/apple/Sources/core_ffiFFI/include/core_ffiFFI.h
+packages/apple/Sources/core_ffiFFI/include/module.modulemap
 **/.build/
 **/DerivedData/
 **/build/

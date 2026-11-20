@@ -22,14 +22,12 @@ struct JadeIOSApp: App {
             JadeAdaptiveAppleRootView(model: model)
                 .onChange(of: scenePhase) { _, phase in
                     if phase != .active {
-                        // Section 12 & 15: stop engine searches, pause audio, and checkpoint local state on background/lock.
                         model.suspendForBackground()
                     } else {
                         model.resumeForeground()
                     }
                 }
                 .onOpenURL { url in
-                    // Verified Apple Universal Links destination preservation (`https://<domain>/invite/<code>`).
                     model.handleUniversalLink(url)
                 }
         }
@@ -45,7 +43,6 @@ struct JadeAdaptiveAppleRootView: View {
     var body: some View {
         let isPadRegular = UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
         if isPadRegular {
-            // iPadOS deliberate board-and-study split layout (never a stretched phone screen — Section 3 & 17).
             NavigationSplitView {
                 List {
                     Section("Study & Replay") {
@@ -61,6 +58,7 @@ struct JadeAdaptiveAppleRootView: View {
                             Text("Ivory Stone").tag("ivory-stone")
                         }
                         Toggle("Traditional Faces", isOn: $model.traditionalGlyphs)
+                        Toggle("Dark Surface", isOn: $model.darkSurface)
                         Toggle("Pencil Study Overlay", isOn: $enablePencilAnnotation)
                     }
                 }
@@ -82,8 +80,6 @@ struct JadeAdaptiveAppleRootView: View {
                 }
             }
         } else {
-            // iPhone layout: board stays the unshrunk primary object; clocks and thumb controls sit adjacent;
-            // move history and analysis open in a secondary sheet/drawer (Section 3).
             VStack(spacing: 10) {
                 HStack {
                     Text("Jade · 玉枰象棋")
@@ -98,10 +94,12 @@ struct JadeAdaptiveAppleRootView: View {
                 IOSCoreGraphicsBoardRepresentable(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     Button("Flip") { model.redBelow.toggle() }
                         .buttonStyle(.bordered)
                     Button("Undo") { model.undo() }
+                        .buttonStyle(.bordered)
+                    Button("Surface") { model.darkSurface.toggle() }
                         .buttonStyle(.bordered)
                     Button("Moves (\(model.movesChinese.count))") { showMoveSheet = true }
                         .buttonStyle(.borderedProminent)
@@ -124,6 +122,7 @@ struct JadeAdaptiveAppleRootView: View {
 
 final class IOSBoardModel: ObservableObject {
     @Published var redBelow = true
+    @Published var darkSurface = false
     @Published var materialId = "pale-jade"
     @Published var traditionalGlyphs = false
     @Published var selectedUci: String? = nil
@@ -131,42 +130,82 @@ final class IOSBoardModel: ObservableObject {
     @Published var statusLine = "Red to move · Offline"
     @Published var pendingUniversalLink: URL? = nil
 
+    private let offlineStore = AppleOfflineSqliteStore(
+        directory: NSSearchPathForDirectoriesInDomains(.applicationSupportDirectory, .userDomainMask, true).first
+            ?? NSTemporaryDirectory(),
+        filename: "jade_ios_offline.sqlite3"
+    )
     private(set) var session: FfiGameSession
 
     init() {
-        self.session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
+        let s = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
+        var restoredZh: [String] = []
+        for uci in offlineStore.loadMoves() {
+            if let zh = try? s.applyMoveToken(token: uci) {
+                restoredZh.append(zh)
+            } else {
+                break
+            }
+        }
+        self.session = s
+        self.movesChinese = restoredZh
+        refreshStatus()
+    }
+
+    func currentRenderModel() -> FfiBoardRenderModel? {
+        try? session.renderModel(traditionalGlyphs: traditionalGlyphs, selectedUci: selectedUci)
     }
 
     func tapSquare(file: Int, rank: Int) {
         let uci = "\(Character(UnicodeScalar(97 + file)!))\(rank)"
+        let legalMoves = (try? session.summary())?.legalMovesUci ?? []
         if selectedUci == nil {
-            selectedUci = uci
+            if legalMoves.contains(where: { $0.hasPrefix(uci) }) {
+                selectedUci = uci
+            }
         } else if selectedUci == uci {
             selectedUci = nil
         } else if let from = selectedUci {
-            if let zh = try? session.applyMoveToken(token: "\(from)\(uci)") {
+            let moveUci = "\(from)\(uci)"
+            if let zh = try? session.applyMoveToken(token: moveUci) {
                 movesChinese.append(zh)
+                offlineStore.appendMove(uci: moveUci)
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 selectedUci = nil
-            } else {
+            } else if legalMoves.contains(where: { $0.hasPrefix(uci) }) {
                 selectedUci = uci
+            } else {
+                selectedUci = nil
             }
         }
-        if let sum = try? session.summary() {
-            statusLine = sum.outcome ?? "\(sum.sideToMove.capitalized) to move"
-        }
+        refreshStatus()
     }
 
     func resetOffline() {
         session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
         selectedUci = nil
         movesChinese.removeAll()
-        statusLine = "Red to move · Offline"
+        offlineStore.clearMoves()
+        refreshStatus()
     }
 
     func undo() {
         if (try? session.undo()) != nil, !movesChinese.isEmpty {
             movesChinese.removeLast()
+            offlineStore.popLastMove()
+            selectedUci = nil
+            refreshStatus()
+        }
+    }
+
+    func refreshStatus() {
+        if let sum = try? session.summary() {
+            if let outcome = sum.outcome {
+                statusLine = "Finished: \(outcome)"
+            } else {
+                let chk = sum.inCheck ? " · Check" : ""
+                statusLine = "\(sum.sideToMove.capitalized) to move · \(sum.plyCount) plies\(chk)"
+            }
         }
     }
 
@@ -175,7 +214,7 @@ final class IOSBoardModel: ObservableObject {
     }
 
     func resumeForeground() {
-        // Reconciles hosted state when in an online room; preserves offline game state locally.
+        refreshStatus()
     }
 
     func handleUniversalLink(_ url: URL) {
@@ -201,15 +240,47 @@ struct IOSCoreGraphicsBoardRepresentable: UIViewRepresentable {
 
 final class IOSBoardUIView: UIView {
     weak var model: IOSBoardModel?
+    private static let boardPadding: CGFloat = 16.0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = UIColor(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0, alpha: 1.0)
+        isOpaque = true
+        contentMode = .redraw
         isAccessibilityElement = false
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(onTap(_:))))
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext(),
+              let m = model,
+              let render = m.currentRenderModel() else { return }
+
+        CoreGraphicsBoardPainter.paint(
+            ctx: ctx,
+            width: bounds.width,
+            height: bounds.height,
+            padding: Self.boardPadding,
+            redBelow: m.redBelow,
+            darkSurface: m.darkSurface,
+            materialId: m.materialId,
+            traditionalGlyphs: m.traditionalGlyphs,
+            pieces: render.pieces,
+            selectedUci: render.selectedUci,
+            legalDestUcis: Set(render.legalDestsUci),
+            lastMoveFromUci: render.lastMoveFromUci,
+            lastMoveToUci: render.lastMoveToUci,
+            checkUci: render.checkUci,
+            repoRoot: ProcessInfo.processInfo.environment["JADE_REPO_ROOT"]
+        )
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        rebuildVoiceOverElements()
+        setNeedsDisplay()
+    }
 
     @objc private func onTap(_ recognizer: UITapGestureRecognizer) {
         guard let m = model else { return }
@@ -217,7 +288,7 @@ final class IOSBoardUIView: UIView {
         if let hit = ffiHitTest(
             width: Double(bounds.width),
             height: Double(bounds.height),
-            padding: 16.0,
+            padding: Double(Self.boardPadding),
             redBelow: m.redBelow,
             px: Double(pt.x),
             py: Double(pt.y)
@@ -226,18 +297,28 @@ final class IOSBoardUIView: UIView {
         } else {
             m.selectedUci = nil
         }
+        rebuildVoiceOverElements()
         setNeedsDisplay()
     }
 
     func rebuildVoiceOverElements() {
         guard let m = model,
-              let pieces = try? m.session.pieces(traditionalGlyphs: m.traditionalGlyphs) else {
+              let render = m.currentRenderModel() else {
             return
         }
-        accessibilityElements = pieces.map { p in
+        accessibilityElements = render.pieces.map { p in
             let el = UIAccessibilityElement(accessibilityContainer: self)
-            el.accessibilityLabel = "\(p.side.capitalized) \(p.role) (\(p.glyph)) at \(p.uci)"
+            let selSuffix = render.selectedUci == p.uci ? ", selected" : ""
+            el.accessibilityLabel = "\(p.side.capitalized) \(p.role) (\(p.glyph)) at \(p.uci)\(selSuffix)"
             el.accessibilityTraits = .button
+            el.accessibilityFrameInContainerSpace = CoreGraphicsBoardPainter.pieceAccessibilityRect(
+                width: bounds.width,
+                height: bounds.height,
+                padding: Self.boardPadding,
+                redBelow: m.redBelow,
+                file: Int(p.file),
+                rank: Int(p.rank)
+            )
             return el
         }
     }

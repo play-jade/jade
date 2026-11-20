@@ -3,6 +3,7 @@ set -eu
 
 REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+cd "$REPO_ROOT"
 
 cargo build --release --manifest-path "$REPO_ROOT/Cargo.toml" -p core-ffi --bins --lib
 

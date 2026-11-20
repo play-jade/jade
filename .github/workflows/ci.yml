@@ -77,10 +77,12 @@ jobs:
         run: |
           ./dev/build-engines.sh
           ./dev/build-apple-ffi.sh
-      - name: Test shared Apple UniFFI package and build macOS native app
+      - name: Test shared Apple UniFFI package and build both macOS and iOS native app bundles
         run: |
           (cd packages/apple && swift run JadeCoreBindingsTests)
           ./dev/run-macos.sh --build-only
+          chmod +x ./dev/build-ios-sim.sh
+          ./dev/build-ios-sim.sh
 
   android-compose-and-uniffi:
     name: Android (Kotlin + Jetpack Compose + UniFFI)
@@ -91,13 +93,24 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Configure Android SDK 35 on runner
+        run: |
+          SDKMGR="$(ls /usr/local/lib/android/sdk/cmdline-tools/*/bin/sdkmanager | sort -V | tail -n 1)"
+          yes | "$SDKMGR" --sdk_root=/usr/local/lib/android/sdk --licenses >/dev/null || true
+          "$SDKMGR" --sdk_root=/usr/local/lib/android/sdk "platforms;android-35" "build-tools;35.0.0"
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: aarch64-linux-android, x86_64-linux-android
-      - name: Generate UniFFI Kotlin bindings and run JVM binding tests
+      - name: Generate UniFFI Kotlin bindings, build Android debug APK, and run JVM unit tests
         run: |
           cargo build --release -p core-ffi
           cargo run --release -p core-ffi --bin uniffi-bindgen -- generate --library target/release/libcore_ffi.so --language kotlin --out-dir apps/android/app/src/main/java
+          gradle -p apps/android assembleDebug testDebugUnitTest --no-daemon
 
   windows-winui-and-c-abi:
     name: Windows (WinUI 3 / .NET LibraryImport + SafeHandle C ABI)
@@ -108,10 +121,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - name: Build core-ffi DLL and run .NET P/Invoke SafeHandle fixture tests
+      - name: Build core-ffi DLL, run .NET SafeHandle fixture tests, and build WinUI 3 Jade.App
         shell: bash
         run: |
           cargo build --release -p core-ffi
           dotnet build apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release
           cp target/release/core_ffi.dll apps/windows/Jade.CoreBridge.Tests/bin/Release/net8.0/core_ffi.dll
           dotnet test apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release --no-build
+          dotnet build apps/windows/Jade.App/Jade.App.csproj -c Release -p:Platform=x64 -r win-x64

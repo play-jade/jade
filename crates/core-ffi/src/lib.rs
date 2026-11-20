@@ -59,6 +59,21 @@ pub struct FfiStateSummary {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiBoardRenderModel {
+    pub side_to_move: String,
+    pub ply_count: u32,
+    pub in_check: bool,
+    pub pieces: Vec<FfiPieceItem>,
+    pub selected_uci: Option<String>,
+    pub legal_dests_uci: Vec<String>,
+    pub last_move_from_uci: Option<String>,
+    pub last_move_to_uci: Option<String>,
+    pub check_uci: Option<String>,
+    pub outcome: Option<String>,
+    pub reason: Option<String>,
+}
+
 #[derive(uniffi::Object)]
 pub struct FfiGameSession {
     inner: Mutex<GameState>,
@@ -134,6 +149,14 @@ impl FfiGameSession {
     }
 
     pub fn pieces(&self, traditional_glyphs: bool) -> Result<Vec<FfiPieceItem>, FfiError> {
+        Ok(self.render_model(traditional_glyphs, None)?.pieces)
+    }
+
+    pub fn render_model(
+        &self,
+        traditional_glyphs: bool,
+        selected_uci: Option<String>,
+    ) -> Result<FfiBoardRenderModel, FfiError> {
         let guard = self.inner.lock().map_err(|_| FfiError::Core {
             message: "mutex poisoned".to_string(),
         })?;
@@ -141,17 +164,20 @@ impl FfiGameSession {
         if traditional_glyphs {
             prefs.glyph_set_id = "traditional-prototype-v1".to_string();
         }
+        let selected_sq = selected_uci
+            .as_deref()
+            .and_then(|s| Square::from_uci(s).ok());
         let snap = BoardViewSnapshot::from_game(
             &guard,
             guard.ply_count() as u64,
             1,
             Orientation::RedBelow,
             None,
-            None,
+            selected_sq,
             Vec::new(),
             prefs,
         );
-        Ok(snap
+        let pieces = snap
             .pieces
             .into_iter()
             .map(|p| FfiPieceItem {
@@ -167,7 +193,38 @@ impl FfiGameSession {
                 uci: p.square,
                 glyph: p.glyph,
             })
-            .collect())
+            .collect();
+        let outcome = snap.adjudication.as_ref().map(|a| {
+            serde_json::to_value(a.outcome)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        });
+        let reason = snap.adjudication.as_ref().map(|a| {
+            serde_json::to_value(a.reason)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        });
+        Ok(FfiBoardRenderModel {
+            side_to_move: snap.side_to_move.as_str().to_string(),
+            ply_count: guard.ply_count() as u32,
+            in_check: snap.check_square.is_some(),
+            pieces,
+            selected_uci: snap.selection.map(|sq| sq.to_uci()),
+            legal_dests_uci: snap
+                .legal_destinations
+                .into_iter()
+                .map(|sq| sq.to_uci())
+                .collect(),
+            last_move_from_uci: snap.last_move.map(|m| m.from.to_uci()),
+            last_move_to_uci: snap.last_move.map(|m| m.to.to_uci()),
+            check_uci: snap.check_square.map(|sq| sq.to_uci()),
+            outcome,
+            reason,
+        })
     }
 }
 
