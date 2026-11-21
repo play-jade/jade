@@ -185,6 +185,13 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await playBoardSquares(redPage, 'b2', 'e2')
       await expect(redPage.getByTestId('postgame-branch-banner')).toContainText('b2e2')
 
+      // Black opens the finished game's replay, which sits at the same table as play
+      const replayHref = await blkPage.getByTestId('link-open-replay').getAttribute('href')
+      await blkPage.goto(replayHref ?? '')
+      await expect(blkPage.getByTestId('match-replay-page')).toContainText('C2=5')
+      await expect(blkPage.locator('.jade-table .jade-capsule')).toBeVisible()
+      await blkPage.screenshot({ path: test.info().outputPath('match-replay.png') })
+
       // Rematch creates fresh invitation cleanly
       await redPage.getByTestId('btn-rematch').click()
       await expect(redPage.getByTestId('match-status-badge')).toContainText('Waiting for friend')

@@ -49,3 +49,18 @@ export function capturedFaces(
 export function plateOrder(redBelow: boolean): Side[] {
   return redBelow ? ['black', 'red'] : ['red', 'black']
 }
+
+export interface MoveRow {
+  number: number
+  plies: { ply: number; label: string }[]
+}
+
+/** Moves paired by move number for the ledger: Red's ply, then Black's. */
+export function pairMoves(movesUci: readonly string[], labels: readonly string[]): MoveRow[] {
+  const rows: MoveRow[] = []
+  movesUci.forEach((u, idx) => {
+    if (idx % 2 === 0) rows.push({ number: idx / 2 + 1, plies: [] })
+    rows[rows.length - 1].plies.push({ ply: idx + 1, label: labels[idx] ?? u })
+  })
+  return rows
+}

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
-import { capturedFaces, plateOrder, sideName } from '~/utils/side-plates'
+import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -562,16 +562,7 @@ const plates = computed(() => {
   })
 })
 
-/** Moves paired by move number, Red's ply then Black's. */
-const moveRows = computed(() => {
-  const moves = snapshot.value?.moves_uci ?? []
-  const rows: { number: number; plies: { ply: number; label: string }[] }[] = []
-  moves.forEach((u, idx) => {
-    if (idx % 2 === 0) rows.push({ number: idx / 2 + 1, plies: [] })
-    rows[rows.length - 1].plies.push({ ply: idx + 1, label: moveLabels.value[idx] ?? u })
-  })
-  return rows
-})
+const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveLabels.value))
 
 function showPly(ply: number | null) {
   replayPly.value = ply
