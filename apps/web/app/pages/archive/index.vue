@@ -365,7 +365,7 @@ async function applyContinuation(uci: string) {
 .opening-tag {
   font-size: 0.78rem;
   font-weight: 600;
-  color: #415447;
+  color: var(--jade-pale);
   text-transform: uppercase;
 }
 
@@ -428,12 +428,12 @@ async function applyContinuation(uci: string) {
 }
 
 .archive-move:hover:not(:disabled):not(.current) {
-  background: rgba(65, 84, 71, 0.1);
+  background: rgba(243, 238, 228, 0.1);
 }
 
 .archive-move.current {
-  background: #415447;
-  color: #F3EEE4;
+  background: var(--jade-current-bg);
+  color: var(--jade-current-ink);
 }
 
 .archive-move:disabled {
@@ -445,7 +445,7 @@ async function applyContinuation(uci: string) {
 .record-break {
   margin: 0;
   font-size: 0.82rem;
-  color: #A54837;
+  color: var(--jade-vermilion-text);
 }
 
 .archive-error {
@@ -473,7 +473,7 @@ async function applyContinuation(uci: string) {
   font-size: 0.75rem;
   padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(65, 84, 71, 0.14);
+  background: rgba(243, 238, 228, 0.14);
   font-weight: 600;
 }
 
@@ -487,7 +487,7 @@ async function applyContinuation(uci: string) {
 .explorer-table td {
   text-align: left;
   padding: 6px 8px;
-  border-bottom: 1px solid rgba(65, 84, 71, 0.16);
+  border-bottom: 1px solid rgba(243, 238, 228, 0.16);
 }
 
 .cont-row {
@@ -504,7 +504,7 @@ async function applyContinuation(uci: string) {
   flex: 1;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(65, 84, 71, 0.3);
+  border: 1px solid rgba(243, 238, 228, 0.3);
   font: inherit;
   font-size: 0.86rem;
 }
@@ -523,7 +523,7 @@ async function applyContinuation(uci: string) {
   flex-direction: column;
   padding: 8px 10px;
   border-radius: 6px;
-  background: rgba(65, 84, 71, 0.08);
+  background: rgba(243, 238, 228, 0.08);
 }
 
 .player-link {

@@ -813,7 +813,7 @@ onBeforeUnmount(() => {
 .clock-pill {
   padding: 6px 12px;
   border-radius: 8px;
-  border: 1px solid rgba(65, 84, 71, 0.25);
+  border: 1px solid rgba(243, 238, 228, 0.25);
   display: flex;
   flex-direction: column;
   min-width: 96px;
@@ -821,7 +821,7 @@ onBeforeUnmount(() => {
 }
 
 .clock-pill.active {
-  border-color: #A54837;
+  border-color: var(--jade-vermilion-text);
   background: rgba(165, 72, 55, 0.1);
 }
 
@@ -858,9 +858,9 @@ onBeforeUnmount(() => {
   flex: 1;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(65, 84, 71, 0.3);
+  border: 1px solid rgba(243, 238, 228, 0.3);
   font-size: 0.84rem;
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--jade-surface);
 }
 
 .moves-top {
@@ -881,7 +881,7 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   padding: 6px 10px;
   border-radius: 6px;
-  background: rgba(65, 84, 71, 0.14);
+  background: rgba(243, 238, 228, 0.14);
   font-size: 0.8rem;
   margin-bottom: 8px;
 }
@@ -898,7 +898,7 @@ onBeforeUnmount(() => {
 .move-item {
   padding: 4px 8px;
   border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
+  background: rgba(243, 238, 228, 0.1);
   font-size: 0.84rem;
   cursor: pointer;
   display: inline-flex;
@@ -928,13 +928,13 @@ onBeforeUnmount(() => {
 .priv-note {
   margin: 0;
   font-size: 0.8rem;
-  color: #415447;
+  color: var(--jade-pale);
 }
 
 .error-note {
   margin: 0;
   font-size: 0.84rem;
-  color: #A54837;
+  color: var(--jade-vermilion-text);
   text-align: center;
 }
 </style>

@@ -296,7 +296,7 @@ async function exportMatchPgn() {
   gap: 8px;
   padding: 8px;
   border-radius: 6px;
-  background: rgba(65, 84, 71, 0.14);
+  background: rgba(243, 238, 228, 0.14);
   font-size: 0.82rem;
   margin-bottom: 8px;
 }
@@ -313,13 +313,13 @@ async function exportMatchPgn() {
 .moves li {
   padding: 4px 8px;
   border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
+  background: rgba(243, 238, 228, 0.1);
   cursor: pointer;
   font-size: 0.85rem;
 }
 
 .moves li.current {
-  background: #415447;
-  color: #F3EEE4;
+  background: var(--jade-current-bg);
+  color: var(--jade-current-ink);
 }
 </style>

@@ -275,21 +275,86 @@ const verdictBanner = computed(() => {
   if (adj.reason === 'perpetual_chase') return `${t('outcome.perpetual_chase_loss')} — ${adj.detail}`
   return `${adj.outcome}: ${adj.detail}`
 })
+
+// Side plates: the large side name, whose turn it is, and the pieces each side has lost (as on macOS).
+type Side = 'red' | 'black'
+const SIDE_NAMES: Record<Side, { en: string; hans: string; hant: string }> = {
+  red: { en: 'Red', hans: '红方', hant: '紅方' },
+  black: { en: 'Black', hans: '黑方', hant: '黑方' },
+}
+function sideName(side: Side): string {
+  const names = SIDE_NAMES[side]
+  if (locale.value === 'zh-Hans-CN') return names.hans
+  if (locale.value.startsWith('zh')) return names.hant
+  return names.en
+}
+
+const STARTING_COUNTS: Record<string, number> = {
+  chariot: 2, horse: 2, cannon: 2, elephant: 2, advisor: 2, soldier: 5, general: 1,
+}
+const FACES: Record<'simplified' | 'traditional', Record<Side, Record<string, string>>> = {
+  simplified: {
+    red: { chariot: '车', horse: '马', cannon: '炮', elephant: '相', advisor: '仕', soldier: '兵', general: '帅' },
+    black: { chariot: '车', horse: '马', cannon: '炮', elephant: '象', advisor: '士', soldier: '卒', general: '将' },
+  },
+  traditional: {
+    red: { chariot: '車', horse: '馬', cannon: '炮', elephant: '相', advisor: '仕', soldier: '兵', general: '帥' },
+    black: { chariot: '車', horse: '馬', cannon: '砲', elephant: '象', advisor: '士', soldier: '卒', general: '將' },
+  },
+}
+
+function capturedFaces(side: Side): string[] {
+  const pieces = boardData.value?.snapshot.pieces ?? []
+  const faces = FACES[traditionalGlyphs.value ? 'traditional' : 'simplified'][side]
+  const out: string[] = []
+  for (const role of Object.keys(STARTING_COUNTS)) {
+    const left = pieces.filter((p) => p.side === side && p.role === role).length
+    for (let i = left; i < STARTING_COUNTS[role]; i++) out.push(faces[role])
+  }
+  return out
+}
+
+const sideToMove = computed<Side>(() => (boardData.value?.snapshot.side_to_move === 'black' ? 'black' : 'red'))
+const plates = computed(() => {
+  const order: Side[] = redBelow.value ? ['black', 'red'] : ['red', 'black']
+  return order.map((side) => ({
+    side,
+    name: sideName(side),
+    toMove: side === sideToMove.value && !boardData.value?.snapshot.adjudication,
+    captured: capturedFaces(side),
+  }))
+})
+
+/** Moves paired by move number, Red's ply then Black's. */
+const moveRows = computed(() => {
+  const rows: { number: number; plies: typeof displayedMoves.value }[] = []
+  displayedMoves.value.forEach((m, idx) => {
+    if (idx % 2 === 0) rows.push({ number: idx / 2 + 1, plies: [] })
+    rows[rows.length - 1].plies.push(m)
+  })
+  return rows
+})
 </script>
 
 <template>
-  <div class="home-grid">
-    <div class="board-column">
-      <div class="board-status-strip" data-testid="board-status-strip">
-        <span class="turn-indicator" :class="`side-${boardData?.snapshot.side_to_move}`">
-          {{ boardData?.snapshot.side_to_move === 'black' ? t('turn.black') : t('turn.red') }}
-        </span>
-        <span v-if="boardData?.snapshot.in_check_side" class="check-pill" data-testid="check-badge">
-          {{ t('state.check') }}
-        </span>
-        <span class="rules-pill">Rules: {{ config.public.rulesProfile }}</span>
+  <div class="table-layout">
+    <aside class="plates" data-testid="board-status-strip" :aria-label="sideToMove === 'black' ? t('turn.black') : t('turn.red')">
+      <div v-for="plate in plates" :key="plate.side" class="plate" :class="{ 'to-move': plate.toMove }">
+        <div class="plate-caption">
+          <span class="plate-dot" aria-hidden="true" />
+          <span>{{ plate.toMove ? (plate.side === 'black' ? t('turn.black') : t('turn.red')) : ' ' }}</span>
+        </div>
+        <div class="plate-name">{{ plate.name }}</div>
+        <div v-if="plate.captured.length" class="plate-captured" :aria-label="`${plate.name}: ${plate.captured.length} captured`">
+          {{ plate.captured.join(' ') }}
+        </div>
       </div>
+      <span v-if="boardData?.snapshot.in_check_side" class="check-note" data-testid="check-badge">
+        {{ t('state.check') }}
+      </span>
+    </aside>
 
+    <div class="board-stage">
       <div v-if="verdictBanner" class="verdict-banner" data-testid="verdict-banner">
         {{ verdictBanner }}
       </div>
@@ -306,51 +371,103 @@ const verdictBanner = computed(() => {
         @play-move="handlePlayMove"
       />
 
-      <div class="board-toolbar">
-        <button type="button" class="jade-btn" data-testid="btn-flip" @click="redBelow = !redBelow">
-          {{ t('board.flip') }}
+      <!-- The only on-board controls: one glass capsule, as on macOS. -->
+      <div class="capsule" role="toolbar" aria-label="Board">
+        <button type="button" class="jade-icon-btn" data-testid="btn-flip" :aria-label="t('board.flip')" :title="t('board.flip')" @click="redBelow = !redBelow">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3" /></svg>
         </button>
         <button
           type="button"
-          class="jade-btn"
+          class="jade-icon-btn"
           data-testid="btn-undo"
+          :aria-label="t('board.undo')"
+          :title="t('board.undo')"
           :disabled="activeMovesUci.length === 0"
           @click="handleUndo"
         >
-          {{ t('board.undo') }}
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 5 3.5 8.5 7 12" /><path d="M3.5 8.5H12a4.5 4.5 0 0 1 0 9H9" /></svg>
         </button>
         <button
           type="button"
-          class="jade-btn"
+          class="jade-icon-btn"
           data-testid="btn-reset"
+          :aria-label="t('board.new_local')"
+          :title="t('board.new_local')"
           :disabled="mainlineMovesUci.length === 0 && branchOriginPly === null"
           @click="handleReset"
         >
-          {{ t('board.new_local') }}
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a6 6 0 1 0 1.8-4.3" /><path d="M4 3.5v3h3" /></svg>
         </button>
         <button
           type="button"
-          class="jade-btn"
+          class="jade-icon-btn"
           data-testid="btn-export-offline-pgn"
+          :aria-label="t('export.pgn')"
+          :title="t('export.pgn')"
           :disabled="activeMovesUci.length === 0"
           @click="exportOfflinePgn"
         >
-          {{ t('export.pgn') }}
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14.5v2h12v-2" /></svg>
         </button>
       </div>
 
       <p v-if="moveError" class="error-note">{{ moveError }}</p>
     </div>
 
-    <aside class="side-column">
-      <!-- Friendly Online Match Invitation Card -->
-      <section class="jade-card invite-card" data-testid="play-friend-card">
-        <h2 class="section-heading">{{ t('action.play_friend') }}</h2>
-        <p class="section-sub">{{ t('product.tagline') }}</p>
+    <aside class="ledger">
+      <section class="moves" data-testid="move-list-card" aria-label="Moves">
+        <div v-if="branchOriginPly !== null" class="branch-banner" data-testid="branch-banner">
+          <span>Trying a line from ply {{ branchOriginPly }}</span>
+          <button type="button" class="jade-pill-btn" data-testid="exit-branch-btn" @click="exitBranch">
+            Return to main line
+          </button>
+        </div>
 
+        <ol v-if="displayedMoves.length > 0" class="move-list" data-testid="move-list">
+          <li v-for="row in moveRows" :key="row.number" class="move-row">
+            <span class="move-number">{{ row.number }}</span>
+            <button
+              v-for="m in row.plies"
+              :key="`${m.ply}-${m.uci}`"
+              type="button"
+              class="move"
+              :class="{ current: m.ply === activeMovesUci.length }"
+              :disabled="branchOriginPly !== null"
+              @click="stepToPly(m.ply)"
+            >
+              {{ m.label }}
+            </button>
+          </li>
+        </ol>
+        <p v-else class="empty-moves">Your moves will appear here.</p>
+
+        <div class="scrub" aria-label="Replay">
+          <button type="button" class="jade-icon-btn" data-testid="scrub-start" aria-label="First move" @click="stepToPly(0)">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v12M15 4l-7 6 7 6" /></svg>
+          </button>
+          <button type="button" class="jade-icon-btn" data-testid="scrub-prev" aria-label="Previous move" @click="stepToPly(cursorPly - 1)">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 4 6.5 10l6 6" /></svg>
+          </button>
+          <button type="button" class="jade-icon-btn" data-testid="scrub-next" aria-label="Next move" @click="stepToPly(cursorPly + 1)">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7.5 4 6 6-6 6" /></svg>
+          </button>
+          <button type="button" class="jade-icon-btn" data-testid="scrub-end" aria-label="Last move" @click="stepToPly(mainlineMovesUci.length)">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4v12M5 4l7 6-7 6" /></svg>
+          </button>
+        </div>
+      </section>
+
+      <EngineAnalysisCard
+        :fen="STARTING_FEN"
+        :moves-uci="activeMovesUci"
+        :state-id="`home:${activeMovesUci.join(',')}`"
+        @play-engine-move="(uci) => handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
+      />
+
+      <section class="invite" data-testid="play-friend-card" aria-label="Play a friend">
         <div class="invite-options">
-          <label class="option-row">
-            <span>Clock</span>
+          <label class="option">
+            <span class="sr-only">Clock</span>
             <select v-model="clockPreset" data-testid="invite-clock-select" class="jade-select">
               <option value="5+3">{{ t('clock.5_plus_3') }}</option>
               <option value="10+5">{{ t('clock.10_plus_5') }}</option>
@@ -358,213 +475,221 @@ const verdictBanner = computed(() => {
               <option value="untimed">{{ t('clock.untimed') }}</option>
             </select>
           </label>
-
-          <label class="option-row">
-            <span>Your seat</span>
+          <label class="option">
+            <span class="sr-only">Your side</span>
             <select v-model="preferredSide" data-testid="invite-side-select" class="jade-select">
-              <option value="red">Red (红方先手)</option>
-              <option value="black">Black (黑方后手)</option>
-              <option value="random">Random (随机先后手)</option>
+              <option value="red">Play Red</option>
+              <option value="black">Play Black</option>
+              <option value="random">Random side</option>
             </select>
           </label>
         </div>
-
         <button
           type="button"
-          class="jade-btn jade-btn-primary full-width-btn"
+          class="jade-btn jade-btn-primary invite-btn"
           data-testid="create-invite-btn"
           :disabled="creatingInvite"
           @click="createFriendlyInvitation"
         >
-          {{ creatingInvite ? 'Creating link…' : `${t('action.play_friend')} →` }}
+          {{ creatingInvite ? 'Creating link…' : t('action.play_friend') }}
         </button>
         <p v-if="inviteError" class="error-note">{{ inviteError }}</p>
       </section>
-
-      <!-- Move Record, Replay Scrub & Variation Tryout -->
-      <section class="jade-card moves-card" data-testid="move-list-card">
-        <div class="moves-header">
-          <h2 class="section-heading">{{ t('study.title') }} · Offline Board</h2>
-          <div class="scrub-controls">
-            <button type="button" class="jade-pill-btn" data-testid="scrub-start" @click="stepToPly(0)">
-              |&lt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="scrub-prev"
-              @click="stepToPly(cursorPly - 1)"
-            >
-              &lt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="scrub-next"
-              @click="stepToPly(cursorPly + 1)"
-            >
-              &gt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="scrub-end"
-              @click="stepToPly(mainlineMovesUci.length)"
-            >
-              &gt;|
-            </button>
-          </div>
-        </div>
-
-        <div v-if="branchOriginPly !== null" class="branch-banner" data-testid="branch-banner">
-          <span>Exploring alternative line from ply {{ branchOriginPly }}</span>
-          <button type="button" class="jade-pill-btn" data-testid="exit-branch-btn" @click="exitBranch">
-            Return to main line
-          </button>
-        </div>
-
-        <ol v-if="displayedMoves.length > 0" class="move-list" data-testid="move-list">
-          <li
-            v-for="m in displayedMoves"
-            :key="`${m.ply}-${m.uci}`"
-            class="move-chip"
-            @click="branchOriginPly === null && stepToPly(m.ply)"
-          >
-            <span class="ply-num">{{ m.ply }}.</span>
-            <span>{{ m.label }}</span>
-          </li>
-        </ol>
-        <p v-else class="empty-moves">
-          Tap or drag any Red piece to play same-device or offline. Progress saves locally on this device.
-        </p>
-      </section>
-
-      <!-- Local Browser Web Worker Engine Analysis -->
-      <EngineAnalysisCard
-        :fen="STARTING_FEN"
-        :moves-uci="activeMovesUci"
-        :state-id="`home:${activeMovesUci.join(',')}`"
-        @play-engine-move="(uci) => handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
-      />
     </aside>
   </div>
 </template>
 
 <style scoped>
-.home-grid {
+/* Lamplit table: side plates, the board as the lit object, and a quiet ledger of moves. */
+.table-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 540px) minmax(290px, 1fr);
-  gap: 24px;
-  align-items: start;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 720px) minmax(240px, 300px);
+  justify-content: center;
+  gap: 40px;
+  align-items: stretch;
+  min-height: calc(100vh - 110px);
 }
 
-@media (max-width: 880px) {
-  .home-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.board-column {
-  min-width: 0;
+.plates {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.board-status-strip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 0.9rem;
+  padding: 24px 0 72px;
 }
 
-.turn-indicator {
-  font-weight: 650;
+.plate {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.turn-indicator.side-red {
-  color: #A54837;
+.plate-caption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--jade-muted);
 }
 
-.check-pill {
-  background: #A54837;
-  color: #F3EEE4;
-  padding: 2px 9px;
-  border-radius: 999px;
+.plate-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--jade-hairline);
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+
+.plate.to-move .plate-caption {
+  color: var(--jade-pale);
+}
+
+.plate.to-move .plate-dot {
+  background: var(--jade-pale);
+  box-shadow: 0 0 12px 2px rgba(220, 227, 206, 0.55);
+}
+
+.plate-name {
+  font-family: var(--jade-display);
+  font-size: clamp(2.6rem, 4.2vw, 3.6rem);
+  line-height: 1;
+  color: var(--jade-muted);
+  transition: color 180ms ease;
+}
+
+.plate.to-move .plate-name {
+  color: var(--jade-paper);
+}
+
+.plate-captured {
+  font-family: 'Noto Serif SC', 'Songti SC', serif;
+  font-size: 1.05rem;
+  letter-spacing: 0.08em;
+  color: var(--jade-muted);
+}
+
+.check-note {
   font-size: 0.8rem;
-  font-weight: 650;
+  color: var(--jade-vermilion-text);
 }
 
-.rules-pill {
-  font-size: 0.78rem;
-  opacity: 0.72;
+/* The slab fits the window height with the capsule below it, as macOS fits it to the window. */
+.board-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding-top: 8px;
+  min-width: 0;
+  width: 100%;
+  max-width: min(720px, calc((100vh - 170px) / 1.11));
+  justify-self: center;
+}
+
+.capsule {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(29, 36, 33, 0.62);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: inset 0 0 0 1px var(--jade-hairline), 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.capsule .jade-icon-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
 }
 
 .verdict-banner {
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: rgba(165, 72, 55, 0.14);
-  border: 1px solid rgba(165, 72, 55, 0.45);
-  font-weight: 600;
+  align-self: stretch;
+  text-align: center;
+  font-family: var(--jade-display);
+  font-size: 1.25rem;
+  color: var(--jade-paper);
 }
 
-.board-toolbar {
+.ledger {
   display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.side-column {
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 0 72px;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
 }
 
-.section-heading {
+.moves {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 160px;
+}
+
+.move-list {
+  list-style: none;
   margin: 0;
-  font-size: 1.05rem;
+  padding: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  font-variant-numeric: tabular-nums;
 }
 
-.section-sub {
-  margin: 4px 0 12px;
-  font-size: 0.88rem;
-  opacity: 0.8;
+.move-row {
+  display: grid;
+  grid-template-columns: 2.2em minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline;
 }
 
-.invite-options {
+.move-number {
+  font-size: 0.75rem;
+  color: var(--jade-muted);
+}
+
+.move {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: transparent;
+  color: rgba(243, 238, 228, 0.82);
+  font: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.move:hover:not(:disabled):not(.current) {
+  background: var(--jade-surface-hover);
+}
+
+.move.current {
+  color: var(--jade-paper);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: rgba(220, 227, 206, 0.6);
+  text-underline-offset: 6px;
+}
+
+.move:disabled {
+  cursor: default;
+}
+
+.empty-moves {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--jade-muted);
+}
+
+.scrub {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.option-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.88rem;
-}
-
-.full-width-btn {
-  width: 100%;
-  padding: 9px 14px;
-}
-
-.moves-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.scrub-controls {
-  display: inline-flex;
-  gap: 4px;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--jade-hairline);
 }
 
 .branch-banner {
@@ -572,46 +697,65 @@ const verdictBanner = computed(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
-  margin-bottom: 8px;
-  border-radius: 6px;
-  background: rgba(65, 84, 71, 0.14);
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  color: var(--jade-pale);
 }
 
-.move-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
+.invite {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 190px;
-  overflow-y: auto;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--jade-hairline);
 }
 
-.move-chip {
-  padding: 4px 8px;
-  border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
-  font-size: 0.85rem;
-  cursor: pointer;
+.invite-options {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 8px;
 }
 
-.ply-num {
-  opacity: 0.65;
-  margin-right: 4px;
+.invite-options .jade-select {
+  width: 100%;
 }
 
-.empty-moves {
-  margin: 0;
-  font-size: 0.85rem;
-  opacity: 0.75;
+.invite-btn {
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 0.95rem;
 }
 
 .error-note {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 0.82rem;
-  color: #A54837;
+  color: var(--jade-vermilion-text);
+}
+
+/* Narrow windows: the board stays the main object; plates sit above and below it and the ledger follows. */
+@media (max-width: 1100px) {
+  .table-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    min-height: 0;
+  }
+
+  .plates {
+    flex-direction: row;
+    padding: 0;
+    gap: 16px;
+  }
+
+  .plate-name {
+    font-size: 2rem;
+  }
+
+  .ledger {
+    padding: 0;
+  }
+
+  .moves {
+    justify-content: flex-start;
+    min-height: 0;
+  }
 }
 </style>
