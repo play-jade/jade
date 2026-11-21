@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { SUPPORTED_LOCALES } from '~/utils/i18n'
 
 const {
@@ -13,9 +13,39 @@ const {
 } = usePreferences()
 
 const settingsOpen = ref(false)
+const settingsToggle = ref<HTMLButtonElement | null>(null)
+const settingsSheet = ref<HTMLElement | null>(null)
+
+function sheetControls(): HTMLElement[] {
+  return Array.from(settingsSheet.value?.querySelectorAll<HTMLElement>('select, button') ?? [])
+}
+
+// A modal sheet: focus moves into it on opening, Tab stays inside it while the page behind it is inert, and focus
+// returns to the Settings button on closing.
+watch(settingsOpen, async (open) => {
+  await nextTick()
+  if (open) sheetControls()[0]?.focus()
+  else settingsToggle.value?.focus()
+})
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape') settingsOpen.value = false
+  if (!settingsOpen.value) return
+  if (e.key === 'Escape') {
+    settingsOpen.value = false
+    return
+  }
+  if (e.key !== 'Tab') return
+  const controls = sheetControls()
+  if (controls.length === 0) return
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault()
+    last.focus()
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault()
+    first.focus()
+  }
 }
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
@@ -33,13 +63,13 @@ useHead(() => ({
     <div class="jade-ground" aria-hidden="true" />
 
     <header class="jade-topbar">
-      <NuxtLink to="/" class="jade-brand-link" data-testid="brand-home-link">
+      <NuxtLink to="/" class="jade-brand-link" data-testid="brand-home-link" :inert="settingsOpen">
         <img src="/assets/brand/mark.svg" alt="" width="26" height="26" class="jade-signet" />
         <!-- The brand name; the glossary's product.title is the descriptive title for metadata. -->
         <span class="jade-brand-title">Jade</span>
       </NuxtLink>
 
-      <nav class="jade-nav" aria-label="Primary">
+      <nav class="jade-nav" aria-label="Primary" :inert="settingsOpen">
         <NuxtLink to="/" class="jade-nav-item" data-testid="nav-board">
           {{ t('nav.play') }}
         </NuxtLink>
@@ -49,6 +79,7 @@ useHead(() => ({
       </nav>
 
       <button
+        ref="settingsToggle"
         type="button"
         class="jade-icon-btn jade-settings-toggle"
         data-testid="settings-toggle"
@@ -72,8 +103,10 @@ useHead(() => ({
     <section
       v-show="settingsOpen"
       id="jade-settings"
+      ref="settingsSheet"
       class="jade-settings"
       role="dialog"
+      aria-modal="true"
       aria-label="Settings"
       data-testid="settings-sheet"
     >
@@ -136,7 +169,7 @@ useHead(() => ({
       </div>
     </section>
 
-    <main class="jade-main">
+    <main class="jade-main" :inert="settingsOpen">
       <NuxtPage />
     </main>
   </div>

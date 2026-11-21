@@ -48,12 +48,20 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     // Switch locale (`zh-Hant-HK`), material (`boxwood`), notation (`uci`), and theme (`Dark`) WITHOUT losing active move!
     // Preferences live in the settings sheet, as on macOS.
     await page.getByTestId('settings-toggle').click()
+    // The sheet is modal: focus moves in, the page behind it is inert, and Tab wraps inside the sheet.
+    await expect(page.getByTestId('pref-locale')).toBeFocused()
+    await expect(page.locator('main')).toHaveAttribute('inert', '')
+    await page.getByTestId('pref-sound').focus()
+    await page.keyboard.press('Tab')
+    await expect(page.getByTestId('pref-locale')).toBeFocused()
     await page.getByTestId('pref-locale').selectOption('zh-Hant-HK')
     await page.getByTestId('pref-material').selectOption('boxwood')
     await page.getByTestId('pref-notation').selectOption('uci')
     await page.getByTestId('pref-theme').click()
     await page.keyboard.press('Escape')
     await expect(page.getByTestId('settings-sheet')).toBeHidden()
+    await expect(page.getByTestId('settings-toggle')).toBeFocused()
+    await expect(page.locator('main')).not.toHaveAttribute('inert', '')
 
     await expect(page.getByTestId('move-list')).toContainText('h2e2')
     await expect(page.getByTestId('board-status-strip')).toContainText('黑方行棋')
