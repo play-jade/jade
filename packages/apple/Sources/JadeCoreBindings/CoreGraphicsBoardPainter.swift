@@ -31,24 +31,42 @@ public enum CoreGraphicsBoardPainter {
         let ox = (width - 8.0 * s) / 2.0
         let oy = (height - 9.0 * s) / 2.0
 
+        // Surface, ink and marker values match the web board (apps/web/app/components/XiangqiBoard.vue), so the
+        // board reads the same on every client.
         let bg = darkSurface
-            ? CGColor(srgbRed: 0x1D / 255.0, green: 0x24 / 255.0, blue: 0x21 / 255.0, alpha: 1.0)
-            : CGColor(srgbRed: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0, alpha: 1.0)
+            ? CGColor(srgbRed: 0x22 / 255.0, green: 0x2B / 255.0, blue: 0x27 / 255.0, alpha: 1.0)
+            : CGColor(srgbRed: 0xED / 255.0, green: 0xE5 / 255.0, blue: 0xD6 / 255.0, alpha: 1.0)
         let lineInk = darkSurface
-            ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 0.78)
-            : CGColor(srgbRed: 0x25 / 255.0, green: 0x2A / 255.0, blue: 0x25 / 255.0, alpha: 0.88)
+            ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 0.72)
+            : CGColor(srgbRed: 0x25 / 255.0, green: 0x2A / 255.0, blue: 0x25 / 255.0, alpha: 0.76)
+        let markerInk = darkSurface
+            ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 1.0)
+            : CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 1.0)
+        let riverInk = darkSurface
+            ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 0.56)
+            : CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 0.68)
+        let pieceDiameter = s * 0.88
         let vermilion = CGColor(srgbRed: 0xA5 / 255.0, green: 0x48 / 255.0, blue: 0x37 / 255.0, alpha: 1.0)
-        let deepJade = CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 1.0)
 
         ctx.setFillColor(bg)
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        // Low-contrast grain over the surface, as the web board lays its grain tile.
+        if let root = repoRoot, !root.isEmpty,
+           let grain = loadCGImage(url: URL(fileURLWithPath: root)
+               .appendingPathComponent("assets/board/materials/\(darkSurface ? "dark-grain" : "paper-grain").png")) {
+            ctx.saveGState()
+            ctx.clip(to: CGRect(x: 0, y: 0, width: width, height: height))
+            ctx.setAlpha(darkSurface ? 0.24 : 0.32)
+            ctx.draw(grain, in: CGRect(x: 0, y: 0, width: CGFloat(grain.width), height: CGFloat(grain.height)), byTiling: true)
+            ctx.restoreGState()
+        }
 
         // Outer frame + exact 9x10 grid + river + palace diagonals
         ctx.setStrokeColor(lineInk)
         ctx.setLineWidth(2.0)
         ctx.stroke(CGRect(x: ox - 5, y: oy - 5, width: 8 * s + 10, height: 9 * s + 10))
 
-        ctx.setLineWidth(1.25)
+        ctx.setLineWidth(1.15)
         for r in 0...9 {
             let y = oy + CGFloat(r) * s
             ctx.move(to: CGPoint(x: ox, y: y))
@@ -96,27 +114,37 @@ public enum CoreGraphicsBoardPainter {
 
         // River inscriptions (`楚河` / `漢界` or `汉界`)
         let riverY = oy + 4.5 * s
-        let leftText = "楚河"
-        let rightText = traditionalGlyphs ? "漢界" : "汉界"
-        drawCenteredLabel(ctx: ctx, text: leftText, center: CGPoint(x: ox + 2.0 * s, y: riverY), fontSize: s * 0.42, color: lineInk)
-        drawCenteredLabel(ctx: ctx, text: rightText, center: CGPoint(x: ox + 6.0 * s, y: riverY), fontSize: s * 0.42, color: lineInk)
+        let leftText = "楚 河"
+        let rightText = traditionalGlyphs ? "漢 界" : "汉 界"
+        drawCenteredLabel(ctx: ctx, text: leftText, center: CGPoint(x: ox + 2.0 * s, y: riverY), fontSize: s * 0.44, color: riverInk, serif: true)
+        drawCenteredLabel(ctx: ctx, text: rightText, center: CGPoint(x: ox + 6.0 * s, y: riverY), fontSize: s * 0.44, color: riverInk, serif: true)
 
-        // Last-move markers & check ring
+        // Last-move corner brackets (a shape cue, never color alone) and the dashed check ring
+        let half = pieceDiameter * 0.52
+        let bracketArm = max(5, s * 0.16)
+        ctx.setStrokeColor(markerInk)
+        ctx.setLineWidth(2.0)
         for uciOpt in [lastMoveFromUci, lastMoveToUci] {
-            if let uci = uciOpt, let (f, r) = parseUci(uci) {
-                let (mx, my) = screenPoint(ox: ox, oy: oy, s: s, file: f, rank: r, redBelow: redBelow)
-                ctx.setStrokeColor(deepJade.copy(alpha: 0.55) ?? deepJade)
-                ctx.setLineWidth(2.0)
-                let half = s * 0.44
-                ctx.stroke(CGRect(x: mx - half, y: my - half, width: half * 2, height: half * 2))
+            guard let uci = uciOpt, let (f, r) = parseUci(uci) else { continue }
+            let (mx, my) = screenPoint(ox: ox, oy: oy, s: s, file: f, rank: r, redBelow: redBelow)
+            for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                let cx = mx + CGFloat(dx) * half
+                let cy = my + CGFloat(dy) * half
+                ctx.move(to: CGPoint(x: cx - CGFloat(dx) * bracketArm, y: cy))
+                ctx.addLine(to: CGPoint(x: cx, y: cy))
+                ctx.addLine(to: CGPoint(x: cx, y: cy - CGFloat(dy) * bracketArm))
             }
         }
+        ctx.strokePath()
         if let chk = checkUci, let (f, r) = parseUci(chk) {
             let (kx, ky) = screenPoint(ox: ox, oy: oy, s: s, file: f, rank: r, redBelow: redBelow)
+            ctx.saveGState()
             ctx.setStrokeColor(vermilion)
-            ctx.setLineWidth(3.2)
-            let cr = s * 0.48
+            ctx.setLineWidth(2.6)
+            ctx.setLineDash(phase: 0, lengths: [5, 3])
+            let cr = pieceDiameter * 0.58
             ctx.strokeEllipse(in: CGRect(x: kx - cr, y: ky - cr, width: cr * 2, height: cr * 2))
+            ctx.restoreGState()
         }
 
         let scriptDir = traditionalGlyphs ? "traditional" : "simplified"
@@ -127,7 +155,8 @@ public enum CoreGraphicsBoardPainter {
         }
 
         let occupied = Set(pieces.map(\.uci))
-        let spriteSpan = s * 0.96
+        // The sprite box is one grid spacing (docs/rendering.md §4), as on the web.
+        let spriteSpan = s
         for p in pieces {
             let (sx, sy) = screenPoint(ox: ox, oy: oy, s: s, file: Int(p.file), rank: Int(p.rank), redBelow: redBelow)
             let dstRect = CGRect(x: sx - spriteSpan / 2, y: sy - spriteSpan / 2, width: spriteSpan, height: spriteSpan)
@@ -144,7 +173,7 @@ public enum CoreGraphicsBoardPainter {
                     ctx.saveGState()
                     ctx.translateBy(x: dstRect.minX, y: dstRect.maxY)
                     ctx.scaleBy(x: 1, y: -1)
-                    ctx.draw(sh, in: CGRect(x: 2.0, y: -3.0, width: spriteSpan, height: spriteSpan))
+                    ctx.draw(sh, in: CGRect(origin: .zero, size: dstRect.size))
                     ctx.restoreGState()
                 }
                 ctx.saveGState()
@@ -157,9 +186,9 @@ public enum CoreGraphicsBoardPainter {
             }
 
             if selectedUci == p.uci {
-                ctx.setStrokeColor(deepJade)
-                ctx.setLineWidth(3.0)
-                let ringR = s * 0.45
+                ctx.setStrokeColor(markerInk)
+                ctx.setLineWidth(2.5)
+                let ringR = pieceDiameter * 0.54
                 ctx.strokeEllipse(in: CGRect(x: sx - ringR, y: sy - ringR, width: ringR * 2, height: ringR * 2))
             }
         }
@@ -169,14 +198,14 @@ public enum CoreGraphicsBoardPainter {
             guard let (f, rVal) = parseUci(dest) else { continue }
             let (sx, sy) = screenPoint(ox: ox, oy: oy, s: s, file: f, rank: rVal, redBelow: redBelow)
             if occupied.contains(dest) {
-                ctx.setStrokeColor(vermilion.copy(alpha: 0.95) ?? vermilion)
-                ctx.setLineWidth(2.6)
-                let cr = s * 0.46
+                ctx.setStrokeColor(vermilion)
+                ctx.setLineWidth(2.5)
+                let cr = pieceDiameter * 0.53
                 ctx.strokeEllipse(in: CGRect(x: sx - cr, y: sy - cr, width: cr * 2, height: cr * 2))
             } else {
                 let pipColor = darkSurface
                     ? CGColor(srgbRed: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0, alpha: 0.85)
-                    : CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 0.82)
+                    : CGColor(srgbRed: 0x41 / 255.0, green: 0x54 / 255.0, blue: 0x47 / 255.0, alpha: 0.78)
                 ctx.setFillColor(pipColor)
                 let pr = max(4.5, s * 0.13)
                 ctx.fillEllipse(in: CGRect(x: sx - pr, y: sy - pr, width: pr * 2, height: pr * 2))
@@ -256,8 +285,20 @@ public enum CoreGraphicsBoardPainter {
         drawCenteredLabel(ctx: ctx, text: glyph, center: center, fontSize: radius * 1.12, color: ink)
     }
 
-    private static func drawCenteredLabel(ctx: CGContext, text: String, center: CGPoint, fontSize: CGFloat, color: CGColor) {
-        let font = CTFontCreateWithName("PingFangSC-Semibold" as CFString, fontSize, nil)
+    private static func drawCenteredLabel(
+        ctx: CGContext,
+        text: String,
+        center: CGPoint,
+        fontSize: CGFloat,
+        color: CGColor,
+        serif: Bool = false
+    ) {
+        // The river inscription uses a Song serif, as the web board does; PingFang stands in where it is missing.
+        var font = CTFontCreateWithName("PingFangSC-Semibold" as CFString, fontSize, nil)
+        if serif {
+            let song = CTFontCreateWithName("STSongti-SC-Bold" as CFString, fontSize, nil)
+            if (CTFontCopyPostScriptName(song) as String) == "STSongti-SC-Bold" { font = song }
+        }
         let attrs: [CFString: Any] = [
             kCTFontAttributeName: font,
             kCTForegroundColorAttributeName: color,
