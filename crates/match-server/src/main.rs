@@ -11,21 +11,32 @@ async fn main() {
         )
         .init();
 
-    let db_url =
-        std::env::var("JADE_SQLITE_URL").unwrap_or_else(|_| "sqlite:jade_dev.db?mode=rwc".into());
+    let db_url = if let Ok(path) = std::env::var("DATABASE_URL_FILE")
+        && !path.trim().is_empty()
+    {
+        std::fs::read_to_string(path.trim())
+            .expect("read DATABASE_URL_FILE")
+            .trim()
+            .to_string()
+    } else {
+        std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("JADE_SQLITE_URL"))
+            .unwrap_or_else(|_| "sqlite:jade_dev.db?mode=rwc".into())
+    };
     let bind_addr: SocketAddr = std::env::var("JADE_BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:4180".into())
         .parse()
         .expect("valid JADE_BIND_ADDR");
 
+    // Bind the listening socket BEFORE acquiring DB ownership or running outage recovery!
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .expect("bind match-server listener");
     let state = build_app_state(&db_url)
         .await
         .expect("initialize match-server SQLx state");
     let app = build_router(state);
 
-    let listener = TcpListener::bind(bind_addr)
-        .await
-        .expect("bind match-server listener");
     tracing::info!("Jade authoritative match server listening on http://{bind_addr}");
     axum::serve(listener, app).await.expect("run match-server");
 }

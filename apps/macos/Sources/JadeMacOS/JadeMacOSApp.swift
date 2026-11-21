@@ -66,6 +66,11 @@ struct JadeMacOSGuiApp: App {
                         Button("Undo") { controller.undo() }
                     }
                     HStack {
+                        Button("Export PGN…") { controller.exportPgnInteractive() }
+                            .disabled(controller.movesUci.isEmpty)
+                        Button("Open PGN…") { controller.importPgnInteractive() }
+                    }
+                    HStack {
                         Button(controller.engineThinking ? "Engine thinking…" : "Engine Move") {
                             controller.requestEngineMove()
                         }
@@ -103,6 +108,11 @@ struct JadeMacOSGuiApp: App {
                     .keyboardShortcut("z", modifiers: [.command])
                 Button("Play Engine Move") { controller.requestEngineMove() }
                     .keyboardShortcut("e", modifiers: [.command])
+                Divider()
+                Button("Open PGN Record…") { controller.importPgnInteractive() }
+                    .keyboardShortcut("o", modifiers: [.command])
+                Button("Export Game PGN…") { controller.exportPgnInteractive() }
+                    .keyboardShortcut("s", modifiers: [.command])
             }
         }
     }
@@ -246,6 +256,127 @@ final class MacBoardController: ObservableObject {
             legalDestUcis.removeAll()
             refreshStatus()
         }
+    }
+
+    func formatAsPgn() -> String {
+        var lines = [
+            "[Event \"Jade macOS Offline Game\"]",
+            "[RulesProfile \"program-2023.11-v1\"]",
+            "[Result \"*\"]",
+            ""
+        ]
+        var body: [String] = []
+        for (idx, uci) in movesUci.enumerated() {
+            let zh = idx < movesChinese.count ? movesChinese[idx] : uci
+            if idx % 2 == 0 {
+                body.append("\(idx / 2 + 1). \(uci) {\(zh)}")
+            } else {
+                body.append("\(uci) {\(zh)}")
+            }
+        }
+        body.append("*")
+        lines.append(body.joined(separator: " "))
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    @discardableResult
+    func writePgn(to url: URL) -> Bool {
+        do {
+            try formatAsPgn().write(to: url, atomically: true, encoding: .utf8)
+            statusLine = "Exported \(movesUci.count) plies to \(url.lastPathComponent)"
+            return true
+        } catch {
+            statusLine = "PGN export failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func exportPgnInteractive() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "jade-game.pgn"
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let url = panel.url {
+            writePgn(to: url)
+        }
+    }
+
+    func importPgnInteractive() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let raw = try String(contentsOf: url, encoding: .utf8)
+                loadFromPgnText(raw)
+            } catch {
+                statusLine = "PGN import failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    @discardableResult
+    func loadFromPgnText(_ raw: String) -> Bool {
+        var stripped = ""
+        var inBrace = false
+        for line in raw.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") || trimmed.hasPrefix(";") || trimmed.isEmpty { continue }
+            for ch in trimmed {
+                if ch == "{" { inBrace = true }
+                else if ch == "}" { inBrace = false }
+                else if !inBrace { stripped.append(ch) }
+            }
+            stripped.append(" ")
+        }
+        let fresh = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
+        var importedUci: [String] = []
+        var importedZh: [String] = []
+        for rawTok in stripped.split(whereSeparator: { $0.isWhitespace }) {
+            var candidateTok = String(rawTok)
+            if let dotIdx = candidateTok.firstIndex(of: "."),
+               candidateTok[..<dotIdx].allSatisfy({ $0.isASCII && $0.isNumber }) {
+                let afterDots = candidateTok[dotIdx...].drop(while: { $0 == "." })
+                candidateTok = String(afterDots)
+            }
+            let tok = candidateTok.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            if tok.isEmpty || tok.allSatisfy({ $0.isASCII && $0.isNumber }) { continue }
+            if ["1-0", "0-1", "1/2-1/2", "*"].contains(tok) { continue }
+            let prevLegal = (try? fresh.summary())?.legalMovesUci ?? []
+            if let zh = try? fresh.applyMoveToken(token: tok) {
+                let targetHash = (try? fresh.summary())?.positionKeySha256
+                if prevLegal.contains(tok) {
+                    importedUci.append(tok)
+                } else if let targetHash,
+                          let matchedUci = prevLegal.first(where: { cand in
+                              let probe = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
+                              for past in importedUci { _ = try? probe.applyMoveToken(token: past) }
+                              _ = try? probe.applyMoveToken(token: cand)
+                              return (try? probe.summary())?.positionKeySha256 == targetHash
+                          }) {
+                    importedUci.append(matchedUci)
+                } else {
+                    importedUci.append(tok)
+                }
+                importedZh.append(zh)
+            } else {
+                statusLine = "PGN import failed at ply \(importedUci.count + 1) (\(tok)); current game preserved"
+                return false
+            }
+        }
+        guard !importedUci.isEmpty else {
+            statusLine = "PGN import failed: no moves found; current game preserved"
+            return false
+        }
+        session = fresh
+        movesUci = importedUci
+        movesChinese = importedZh
+        offlineStore.clearMoves()
+        for u in importedUci { offlineStore.appendMove(uci: u) }
+        selectedUci = nil
+        legalDestUcis.removeAll()
+        refreshStatus()
+        return true
     }
 
     private func refreshStatus() {

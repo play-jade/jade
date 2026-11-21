@@ -34,6 +34,13 @@ const EXTRA_UI_COPY: Record<string, Record<SupportedLocale, string>> = {
     'zh-Hant-TW': '棋譜檔案',
     'zh-Hant-HK': '棋譜檔案',
   },
+  'clock.5_plus_3': {
+    'en-US': '5 min + 3s / move',
+    'en-GB': '5 min + 3s / move',
+    'zh-Hans-CN': '5分钟 + 每步3秒',
+    'zh-Hant-TW': '5分鐘 + 每步3秒',
+    'zh-Hant-HK': '5分鐘 + 每步3秒',
+  },
   'clock.10_plus_5': {
     'en-US': '10 min + 5s / move',
     'en-GB': '10 min + 5s / move',
@@ -41,12 +48,26 @@ const EXTRA_UI_COPY: Record<string, Record<SupportedLocale, string>> = {
     'zh-Hant-TW': '10分鐘 + 每步5秒',
     'zh-Hant-HK': '10分鐘 + 每步5秒',
   },
+  'clock.15_plus_10': {
+    'en-US': '15 min + 10s / move',
+    'en-GB': '15 min + 10s / move',
+    'zh-Hans-CN': '15分钟 + 每步10秒',
+    'zh-Hant-TW': '15分鐘 + 每步10秒',
+    'zh-Hant-HK': '15分鐘 + 每步10秒',
+  },
   'clock.untimed': {
     'en-US': 'Untimed',
     'en-GB': 'Untimed',
     'zh-Hans-CN': '不限时',
     'zh-Hant-TW': '不限時',
     'zh-Hant-HK': '不限時',
+  },
+  'export.pgn': {
+    'en-US': 'Export PGN',
+    'en-GB': 'Export PGN',
+    'zh-Hans-CN': '导出棋谱 (PGN)',
+    'zh-Hant-TW': '匯出棋譜 (PGN)',
+    'zh-Hant-HK': '匯出棋譜 (PGN)',
   },
   'board.flip': {
     'en-US': 'Flip board',

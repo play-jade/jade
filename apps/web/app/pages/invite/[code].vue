@@ -9,7 +9,7 @@ interface MatchSnapshot {
   match_id: string
   invitation_code: string
   rules_profile: string
-  status: 'waiting' | 'playing' | 'finished'
+  status: 'waiting' | 'playing' | 'finished' | 'interrupted'
   seq: number
   fen: string
   side_to_move: 'red' | 'black'
@@ -21,7 +21,10 @@ interface MatchSnapshot {
   clock_increment_ms: number
   red_remaining_ms: number | null
   black_remaining_ms: number | null
+  is_friendly: boolean
   draw_offered_by: 'red' | 'black' | null
+  takeback_requested_by: 'red' | 'black' | null
+  next_rematch_invitation_code: string | null
   outcome: string | null
   reason_code: string | null
   visibility: 'private' | 'unlisted' | 'public'
@@ -385,24 +388,71 @@ async function resignMatch() {
   })
 }
 
-async function startRematch() {
-  const sess = await ensureGuestSession()
-  const nextSide = assignedSide.value === 'red' ? 'black' : 'red'
-  const resp = await fetch(`${config.public.matchServerUrl}/api/v1/invitations`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${sess.access_token}`,
-      'x-csrf-token': sess.csrf_token,
-    },
-    body: JSON.stringify({
-      preferred_side: nextSide,
-      clock_initial_ms: snapshot.value?.clock_initial_ms ?? 600_000,
-      clock_increment_ms: snapshot.value?.clock_increment_ms ?? 5_000,
-      is_friendly: true,
-    }),
+async function requestTakeback() {
+  if (!snapshot.value) return
+  await sendMatchCommand({
+    type: 'request_takeback',
+    protocol: 1,
+    match_id: snapshot.value.match_id,
+    command_id: `tb_req_${Date.now()}`,
+    expected_seq: snapshot.value.seq,
   })
+}
+
+async function acceptTakeback() {
+  if (!snapshot.value) return
+  await sendMatchCommand({
+    type: 'accept_takeback',
+    protocol: 1,
+    match_id: snapshot.value.match_id,
+    command_id: `tb_acc_${Date.now()}`,
+    expected_seq: snapshot.value.seq,
+  })
+}
+
+async function exportMatchPgn() {
+  if (!snapshot.value || typeof window === 'undefined') return
+  const sess = await ensureGuestSession()
+  const resp = await fetch(
+    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/export.pgn`,
+    {
+      credentials: 'include',
+      headers: {
+        authorization: `Bearer ${sess.access_token}`,
+      },
+    },
+  )
+  if (!resp.ok) return
+  const pgnText = await resp.text()
+  const blob = new Blob([pgnText], { type: 'application/x-chess-pgn;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `jade-${snapshot.value.match_id}.pgn`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+async function startRematch() {
+  if (!snapshot.value) return
+  if (snapshot.value.next_rematch_invitation_code) {
+    await router.push(`/invite/${snapshot.value.next_rematch_invitation_code}`)
+    return
+  }
+  const sess = await ensureGuestSession()
+  const resp = await fetch(
+    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/rematch`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        authorization: `Bearer ${sess.access_token}`,
+        'x-csrf-token': sess.csrf_token,
+      },
+    },
+  )
   if (resp.ok) {
     const created = await resp.json()
     await router.push(`/invite/${created.invitation_code}`)
@@ -558,6 +608,27 @@ onBeforeUnmount(() => {
             {{ t('action.offer_draw') }}
           </button>
 
+          <template v-if="snapshot.is_friendly && snapshot.moves_uci.length > 0">
+            <button
+              v-if="snapshot.takeback_requested_by && snapshot.takeback_requested_by !== assignedSide"
+              type="button"
+              class="jade-btn jade-btn-primary"
+              data-testid="btn-accept-takeback"
+              @click="acceptTakeback"
+            >
+              Accept takeback
+            </button>
+            <button
+              v-else
+              type="button"
+              class="jade-btn"
+              data-testid="btn-request-takeback"
+              @click="requestTakeback"
+            >
+              {{ t('board.undo') }}
+            </button>
+          </template>
+
           <button
             type="button"
             class="jade-btn jade-btn-danger"
@@ -568,15 +639,26 @@ onBeforeUnmount(() => {
           </button>
         </template>
 
-        <template v-if="snapshot?.status === 'finished'">
+        <template v-if="snapshot?.status === 'finished' || snapshot?.status === 'interrupted'">
           <button
             type="button"
             class="jade-btn jade-btn-primary"
             data-testid="btn-rematch"
             @click="startRematch"
           >
-            {{ t('action.rematch') }}
+            {{ snapshot.next_rematch_invitation_code ? 'Join Rematch →' : t('action.rematch') }}
           </button>
+          <button
+            type="button"
+            class="jade-btn"
+            data-testid="btn-export-pgn"
+            @click="exportMatchPgn"
+          >
+            {{ t('export.pgn') }}
+          </button>
+          <NuxtLink :to="`/g/${snapshot.match_id}`" class="jade-btn" data-testid="link-open-replay">
+            Replay &amp; Study
+          </NuxtLink>
         </template>
       </div>
 
