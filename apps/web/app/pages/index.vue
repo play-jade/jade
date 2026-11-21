@@ -361,21 +361,15 @@ const moveRows = computed(() => {
 
       <!-- The only on-board controls: one glass capsule, as on macOS. -->
       <div class="jade-capsule" role="toolbar" aria-label="Board">
-        <button
+        <IconButton
           v-for="a in capsuleActions"
           :key="a.testid"
-          type="button"
-          class="jade-icon-btn"
           :data-testid="a.testid"
-          :aria-label="a.label"
-          :title="a.label"
+          :label="a.label"
+          :paths="a.paths"
           :disabled="a.disabled"
           @click="a.run"
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path v-for="d in a.paths" :key="d" :d="d" />
-          </svg>
-        </button>
+        />
       </div>
 
       <p v-if="moveError" class="error-note">{{ moveError }}</p>
@@ -409,19 +403,15 @@ const moveRows = computed(() => {
         <p v-else class="empty-moves">Your moves will appear here.</p>
 
         <div class="scrub jade-rule" aria-label="Replay">
-          <button
+          <IconButton
             v-for="a in scrubActions"
             :key="a.testid"
-            type="button"
-            class="jade-icon-btn"
             :data-testid="a.testid"
-            :aria-label="a.label"
+            :label="a.label"
+            :paths="a.paths"
+            :size="16"
             @click="a.run"
-          >
-            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path v-for="d in a.paths" :key="d" :d="d" />
-            </svg>
-          </button>
+          />
         </div>
       </section>
 

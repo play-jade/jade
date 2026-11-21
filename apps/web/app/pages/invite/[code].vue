@@ -620,9 +620,7 @@ function showPly(ply: number | null) {
 
       <!-- One glass capsule, as on macOS: flip always, then the actions the room's state allows. -->
       <div class="jade-capsule" role="toolbar" aria-label="Match">
-        <button type="button" class="jade-icon-btn" :aria-label="t('board.flip')" :title="t('board.flip')" @click="redBelow = !redBelow">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3" /></svg>
-        </button>
+        <IconButton :label="t('board.flip')" :paths="['M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3']" @click="redBelow = !redBelow" />
 
         <template v-if="snapshot?.status === 'playing' && assignedSide">
           <button
