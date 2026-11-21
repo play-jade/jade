@@ -387,6 +387,149 @@ body {
   box-shadow: inset 0 0 0 1px var(--jade-hairline);
 }
 
+/* The lamplit table, shared by every page where a game is played: side plates, the board as the lit object,
+   and a quiet ledger of moves. */
+.jade-table {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 720px) minmax(240px, 300px);
+  justify-content: center;
+  gap: 40px;
+  align-items: stretch;
+  min-height: calc(100vh - 110px);
+}
+
+.jade-plates {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 0 72px;
+}
+
+/* The slab fits the window height with the capsule below it, as macOS fits it to the window. */
+.jade-table-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding-top: 8px;
+  min-width: 0;
+  width: 100%;
+  max-width: min(720px, calc((100vh - 170px) / 1.11));
+  justify-self: center;
+}
+
+.jade-capsule {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(29, 36, 33, 0.62);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: inset 0 0 0 1px var(--jade-hairline), 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.jade-capsule .jade-icon-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+}
+
+.jade-capsule .jade-btn {
+  border-radius: 999px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.jade-capsule .jade-btn-primary {
+  background: var(--jade-pale);
+}
+
+.jade-ledger {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 0 72px;
+  min-width: 0;
+}
+
+.jade-move-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.jade-move-row {
+  display: grid;
+  grid-template-columns: 2.2em minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline;
+}
+
+.jade-move-number {
+  font-size: 0.75rem;
+  color: var(--jade-muted);
+}
+
+.jade-move {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: transparent;
+  color: rgba(243, 238, 228, 0.82);
+  font: inherit;
+  font-size: 0.95rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.jade-move:hover:not(:disabled):not(.current) {
+  background: var(--jade-surface-hover);
+}
+
+.jade-move.current {
+  color: var(--jade-paper);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: rgba(220, 227, 206, 0.6);
+  text-underline-offset: 6px;
+}
+
+.jade-move:disabled {
+  cursor: default;
+}
+
+.jade-rule {
+  padding-top: 14px;
+  border-top: 1px solid var(--jade-hairline);
+}
+
+/* Narrow windows: the board stays the main object; plates sit above it and the ledger follows. */
+@media (max-width: 1100px) {
+  .jade-table {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    min-height: 0;
+  }
+
+  .jade-plates {
+    flex-direction: row;
+    padding: 0;
+  }
+
+  .jade-ledger {
+    padding: 0;
+  }
+}
+
 @media (max-width: 640px) {
   .jade-topbar {
     padding: 10px 16px;

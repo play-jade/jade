@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
 import { loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
+import { capturedFaces, plateOrder, sideName, type Side } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -276,52 +277,13 @@ const verdictBanner = computed(() => {
   return `${adj.outcome}: ${adj.detail}`
 })
 
-// Side plates: the large side name, whose turn it is, and the pieces each side has lost (as on macOS).
-type Side = 'red' | 'black'
-const SIDE_NAMES: Record<Side, { en: string; hans: string; hant: string }> = {
-  red: { en: 'Red', hans: '红方', hant: '紅方' },
-  black: { en: 'Black', hans: '黑方', hant: '黑方' },
-}
-function sideName(side: Side): string {
-  const names = SIDE_NAMES[side]
-  if (locale.value === 'zh-Hans-CN') return names.hans
-  if (locale.value.startsWith('zh')) return names.hant
-  return names.en
-}
-
-const STARTING_COUNTS: Record<string, number> = {
-  chariot: 2, horse: 2, cannon: 2, elephant: 2, advisor: 2, soldier: 5, general: 1,
-}
-const FACES: Record<'simplified' | 'traditional', Record<Side, Record<string, string>>> = {
-  simplified: {
-    red: { chariot: '车', horse: '马', cannon: '炮', elephant: '相', advisor: '仕', soldier: '兵', general: '帅' },
-    black: { chariot: '车', horse: '马', cannon: '炮', elephant: '象', advisor: '士', soldier: '卒', general: '将' },
-  },
-  traditional: {
-    red: { chariot: '車', horse: '馬', cannon: '炮', elephant: '相', advisor: '仕', soldier: '兵', general: '帥' },
-    black: { chariot: '車', horse: '馬', cannon: '砲', elephant: '象', advisor: '士', soldier: '卒', general: '將' },
-  },
-}
-
-function capturedFaces(side: Side): string[] {
-  const pieces = boardData.value?.snapshot.pieces ?? []
-  const faces = FACES[traditionalGlyphs.value ? 'traditional' : 'simplified'][side]
-  const out: string[] = []
-  for (const role of Object.keys(STARTING_COUNTS)) {
-    const left = pieces.filter((p) => p.side === side && p.role === role).length
-    for (let i = left; i < STARTING_COUNTS[role]; i++) out.push(faces[role])
-  }
-  return out
-}
-
 const sideToMove = computed<Side>(() => (boardData.value?.snapshot.side_to_move === 'black' ? 'black' : 'red'))
 const plates = computed(() => {
-  const order: Side[] = redBelow.value ? ['black', 'red'] : ['red', 'black']
-  return order.map((side) => ({
+  return plateOrder(redBelow.value).map((side) => ({
     side,
-    name: sideName(side),
+    name: sideName(side, locale.value),
     toMove: side === sideToMove.value && !boardData.value?.snapshot.adjudication,
-    captured: capturedFaces(side),
+    captured: capturedFaces(boardData.value?.snapshot.pieces ?? [], side, traditionalGlyphs.value),
   }))
 })
 
@@ -361,24 +323,26 @@ const moveRows = computed(() => {
 </script>
 
 <template>
-  <div class="table-layout">
-    <aside class="plates" data-testid="board-status-strip" :aria-label="sideToMove === 'black' ? t('turn.black') : t('turn.red')">
-      <div v-for="plate in plates" :key="plate.side" class="plate" :class="{ 'to-move': plate.toMove }">
-        <div class="plate-caption">
-          <span class="plate-dot" aria-hidden="true" />
-          <span>{{ plate.toMove ? (plate.side === 'black' ? t('turn.black') : t('turn.red')) : ' ' }}</span>
-        </div>
-        <div class="plate-name">{{ plate.name }}</div>
-        <div v-if="plate.captured.length" class="plate-captured" :aria-label="`${plate.name}: ${plate.captured.length} captured`">
-          {{ plate.captured.join(' ') }}
-        </div>
-      </div>
+  <div class="jade-table">
+    <aside
+      class="jade-plates"
+      data-testid="board-status-strip"
+      :aria-label="sideToMove === 'black' ? t('turn.black') : t('turn.red')"
+    >
+      <SidePlate
+        v-for="plate in plates"
+        :key="plate.side"
+        :name="plate.name"
+        :caption="plate.toMove ? (plate.side === 'black' ? t('turn.black') : t('turn.red')) : ''"
+        :to-move="plate.toMove"
+        :captured="plate.captured"
+      />
       <span v-if="boardData?.snapshot.in_check_side" class="check-note" data-testid="check-badge">
         {{ t('state.check') }}
       </span>
     </aside>
 
-    <div class="board-stage">
+    <div class="jade-table-stage">
       <div v-if="verdictBanner" class="verdict-banner" data-testid="verdict-banner">
         {{ verdictBanner }}
       </div>
@@ -396,7 +360,7 @@ const moveRows = computed(() => {
       />
 
       <!-- The only on-board controls: one glass capsule, as on macOS. -->
-      <div class="capsule" role="toolbar" aria-label="Board">
+      <div class="jade-capsule" role="toolbar" aria-label="Board">
         <button
           v-for="a in capsuleActions"
           :key="a.testid"
@@ -417,7 +381,7 @@ const moveRows = computed(() => {
       <p v-if="moveError" class="error-note">{{ moveError }}</p>
     </div>
 
-    <aside class="ledger">
+    <aside class="jade-ledger">
       <section class="moves" data-testid="move-list-card" aria-label="Moves">
         <div v-if="branchOriginPly !== null" class="branch-banner" data-testid="branch-banner">
           <span>Trying a line from ply {{ branchOriginPly }}</span>
@@ -426,14 +390,14 @@ const moveRows = computed(() => {
           </button>
         </div>
 
-        <ol v-if="displayedMoves.length > 0" class="move-list" data-testid="move-list">
-          <li v-for="row in moveRows" :key="row.number" class="move-row">
-            <span class="move-number">{{ row.number }}</span>
+        <ol v-if="displayedMoves.length > 0" class="jade-move-list" data-testid="move-list">
+          <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
+            <span class="jade-move-number">{{ row.number }}</span>
             <button
               v-for="m in row.plies"
               :key="`${m.ply}-${m.uci}`"
               type="button"
-              class="move"
+              class="jade-move"
               :class="{ current: m.ply === activeMovesUci.length }"
               :disabled="branchOriginPly !== null"
               @click="stepToPly(m.ply)"
@@ -444,7 +408,7 @@ const moveRows = computed(() => {
         </ol>
         <p v-else class="empty-moves">Your moves will appear here.</p>
 
-        <div class="scrub" aria-label="Replay">
+        <div class="scrub jade-rule" aria-label="Replay">
           <button
             v-for="a in scrubActions"
             :key="a.testid"
@@ -468,9 +432,9 @@ const moveRows = computed(() => {
         @play-engine-move="(uci) => handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
       />
 
-      <section class="invite" data-testid="play-friend-card" aria-label="Play a friend">
+      <section class="invite jade-rule" data-testid="play-friend-card" aria-label="Play a friend">
         <div class="invite-options">
-          <label class="option">
+          <label>
             <span class="sr-only">Clock</span>
             <select v-model="clockPreset" data-testid="invite-clock-select" class="jade-select">
               <option value="5+3">{{ t('clock.5_plus_3') }}</option>
@@ -479,7 +443,7 @@ const moveRows = computed(() => {
               <option value="untimed">{{ t('clock.untimed') }}</option>
             </select>
           </label>
-          <label class="option">
+          <label>
             <span class="sr-only">Your side</span>
             <select v-model="preferredSide" data-testid="invite-side-select" class="jade-select">
               <option value="red">Play Red</option>
@@ -504,108 +468,9 @@ const moveRows = computed(() => {
 </template>
 
 <style scoped>
-/* Lamplit table: side plates, the board as the lit object, and a quiet ledger of moves. */
-.table-layout {
-  display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(0, 720px) minmax(240px, 300px);
-  justify-content: center;
-  gap: 40px;
-  align-items: stretch;
-  min-height: calc(100vh - 110px);
-}
-
-.plates {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 24px 0 72px;
-}
-
-.plate {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.plate-caption {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 0.72rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--jade-muted);
-}
-
-.plate-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 4px;
-  background: var(--jade-hairline);
-  transition: background 180ms ease, box-shadow 180ms ease;
-}
-
-.plate.to-move .plate-caption {
-  color: var(--jade-pale);
-}
-
-.plate.to-move .plate-dot {
-  background: var(--jade-pale);
-  box-shadow: 0 0 12px 2px rgba(220, 227, 206, 0.55);
-}
-
-.plate-name {
-  font-family: var(--jade-display);
-  font-size: clamp(2.6rem, 4.2vw, 3.6rem);
-  line-height: 1;
-  color: var(--jade-muted);
-  transition: color 180ms ease;
-}
-
-.plate.to-move .plate-name {
-  color: var(--jade-paper);
-}
-
-.plate-captured {
-  font-family: 'Noto Serif SC', 'Songti SC', serif;
-  font-size: 1.05rem;
-  letter-spacing: 0.08em;
-  color: var(--jade-muted);
-}
-
 .check-note {
   font-size: 0.8rem;
   color: var(--jade-vermilion-text);
-}
-
-/* The slab fits the window height with the capsule below it, as macOS fits it to the window. */
-.board-stage {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 18px;
-  padding-top: 8px;
-  min-width: 0;
-  width: 100%;
-  max-width: min(720px, calc((100vh - 170px) / 1.11));
-  justify-self: center;
-}
-
-.capsule {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: rgba(29, 36, 33, 0.62);
-  backdrop-filter: blur(24px) saturate(140%);
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
-  box-shadow: inset 0 0 0 1px var(--jade-hairline), 0 10px 30px rgba(0, 0, 0, 0.4);
-}
-
-.capsule .jade-icon-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: 22px;
 }
 
 .verdict-banner {
@@ -613,15 +478,6 @@ const moveRows = computed(() => {
   text-align: center;
   font-family: var(--jade-display);
   font-size: 1.25rem;
-  color: var(--jade-paper);
-}
-
-.ledger {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 24px 0 72px;
-  min-width: 0;
 }
 
 .moves {
@@ -631,56 +487,6 @@ const moveRows = computed(() => {
   justify-content: flex-end;
   gap: 10px;
   min-height: 160px;
-}
-
-.move-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 46vh;
-  overflow-y: auto;
-  font-variant-numeric: tabular-nums;
-}
-
-.move-row {
-  display: grid;
-  grid-template-columns: 2.2em minmax(0, 1fr) minmax(0, 1fr);
-  align-items: baseline;
-}
-
-.move-number {
-  font-size: 0.75rem;
-  color: var(--jade-muted);
-}
-
-.move {
-  appearance: none;
-  border: 0;
-  border-radius: 6px;
-  padding: 6px 8px;
-  background: transparent;
-  color: rgba(243, 238, 228, 0.82);
-  font: inherit;
-  font-size: 0.95rem;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.move:hover:not(:disabled):not(.current) {
-  background: var(--jade-surface-hover);
-}
-
-.move.current {
-  color: var(--jade-paper);
-  font-weight: 600;
-  text-decoration: underline;
-  text-decoration-color: rgba(220, 227, 206, 0.6);
-  text-underline-offset: 6px;
-}
-
-.move:disabled {
-  cursor: default;
 }
 
 .empty-moves {
@@ -693,7 +499,6 @@ const moveRows = computed(() => {
   display: flex;
   gap: 2px;
   padding-top: 8px;
-  border-top: 1px solid var(--jade-hairline);
 }
 
 .branch-banner {
@@ -709,8 +514,6 @@ const moveRows = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-top: 14px;
-  border-top: 1px solid var(--jade-hairline);
 }
 
 .invite-options {
@@ -735,28 +538,7 @@ const moveRows = computed(() => {
   color: var(--jade-vermilion-text);
 }
 
-/* Narrow windows: the board stays the main object; plates sit above and below it and the ledger follows. */
 @media (max-width: 1100px) {
-  .table-layout {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
-    min-height: 0;
-  }
-
-  .plates {
-    flex-direction: row;
-    padding: 0;
-    gap: 16px;
-  }
-
-  .plate-name {
-    font-size: 2rem;
-  }
-
-  .ledger {
-    padding: 0;
-  }
-
   .moves {
     justify-content: flex-start;
     min-height: 0;
