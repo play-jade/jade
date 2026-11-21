@@ -3,12 +3,15 @@
 //! Generates:
 //! 1. `glyph-contact-sheet.png` — All 14 side/role faces in Simplified (`zh-Hans`) and
 //!    Traditional (`zh-Hant`) across `pale-jade`, `boxwood`, and `ivory-stone` on light & dark grounds.
-//! 2. `board-opening-light-dark.png` — Full `9 × 10` Xiangqi opening board in Light (`#F3EEE4`)
-//!    and Dark (`#1D2421`) themes, both Red-below and Black-below orientations, verifying the
+//! 2. `board-opening-light-dark.png` — Full `9 × 10` Xiangqi opening board on the light (`#EDE5D6`)
+//!    and dark (`#222B27`) board surfaces, both Red-below and Black-below orientations, verifying the
 //!    upright-glyph and fixed-key-light orientation invariant.
 //! 3. `board-crowded-phone-360px.png` — Crowded middlegame rendered at the smallest supported
-//!    mobile viewport (`360 × 420` px) with selection ring, legal-move dots, capture brackets,
-//!    last-move markers, and check halo to verify stroke legibility and non-color-only state cues.
+//!    mobile viewport (`360 × 420` px) with selection ring, legal-move dots, capture rings,
+//!    last-move brackets, and dashed check ring to verify stroke legibility and non-color-only state cues.
+//!
+//! Board surfaces and state markers use the values in `docs/rendering.md` §4, which the web and Apple
+//! renderers draw, so these plates show what players see.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapMut, Rect, Stroke,
-    Transform,
+    StrokeDash, Transform,
 };
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
@@ -203,6 +206,45 @@ fn fill_rect_tiled(
             let sidx = ((ty * tile_size + tx) * 4) as usize;
             let didx = ((y * dst_w + x) * 4) as usize;
             dst_data[didx..didx + 4].copy_from_slice(&tile_rgba[sidx..sidx + 4]);
+        }
+    }
+}
+
+/// Light board surface (`docs/rendering.md` §4, Layer 1): `#EDE5D6` under the paper grain at 32%.
+const LIGHT_SURFACE: ([u8; 3], f32) = ([0xED, 0xE5, 0xD6], 0.32);
+/// Dark board surface: `#222B27` under the dark grain at 24%.
+const DARK_SURFACE: ([u8; 3], f32) = ([0x22, 0x2B, 0x27], 0.24);
+
+/// Fills a rectangle with a board surface: the solid base color with the grain tile laid over it
+/// at `surface.1` opacity, as the web and Apple renderers draw it.
+#[allow(clippy::too_many_arguments)]
+fn fill_rect_surface(
+    dst: &mut PixmapMut<'_>,
+    tile_rgba: &[u8],
+    tile_size: u32,
+    x0: u32,
+    y0: u32,
+    w: u32,
+    h: u32,
+    surface: ([u8; 3], f32),
+) {
+    let (base, alpha) = surface;
+    let x1 = (x0 + w).min(dst.width());
+    let y1 = (y0 + h).min(dst.height());
+    let dst_w = dst.width();
+    let dst_data = dst.data_mut();
+    for y in y0..y1 {
+        let ty = y % tile_size;
+        for x in x0..x1 {
+            let tx = x % tile_size;
+            let sidx = ((ty * tile_size + tx) * 4) as usize;
+            let didx = ((y * dst_w + x) * 4) as usize;
+            for c in 0..3 {
+                let grain = f32::from(tile_rgba[sidx + c]);
+                let mixed = f32::from(base[c]) * (1.0 - alpha) + grain * alpha;
+                dst_data[didx + c] = mixed.round().clamp(0.0, 255.0) as u8;
+            }
+            dst_data[didx + 3] = 255;
         }
     }
 }
@@ -775,10 +817,19 @@ fn render_opening_boards(
 
     {
         let mut pm = pixmap.as_mut();
-        // Left half: Warm Paper `#F3EEE4`; Right half: Dark Slate `#1D2421`
+        // Left half: light board surface `#EDE5D6`; right half: dark board surface `#222B27`
         let half_w = width / 2;
-        fill_rect_tiled(&mut pm, paper_tile, TILE_SIZE, 0, 0, half_w, height);
-        fill_rect_tiled(
+        fill_rect_surface(
+            &mut pm,
+            paper_tile,
+            TILE_SIZE,
+            0,
+            0,
+            half_w,
+            height,
+            LIGHT_SURFACE,
+        );
+        fill_rect_surface(
             &mut pm,
             dark_tile,
             TILE_SIZE,
@@ -786,6 +837,7 @@ fn render_opening_boards(
             0,
             width - half_w,
             height,
+            DARK_SURFACE,
         );
 
         let charcoal = color_hex(0x25, 0x2A, 0x25, 255);
@@ -812,7 +864,7 @@ fn render_opening_boards(
                 red_below: true,
                 set_id: GlyphSetId::SimplifiedPrototypeV1,
                 material: MaterialFamily::PaleJade,
-                title: "Light (#F3EEE4) — Red Below (Simplified, Pale Jade)",
+                title: "Light (#EDE5D6) — Red Below (Simplified, Pale Jade)",
                 subtitle: "Canonical y=0 at bottom; top-left key light & upright glyphs",
             },
             OpeningPanel {
@@ -822,7 +874,7 @@ fn render_opening_boards(
                 red_below: true,
                 set_id: GlyphSetId::SimplifiedPrototypeV1,
                 material: MaterialFamily::PaleJade,
-                title: "Dark (#1D2421) — Red Below (Simplified, Pale Jade)",
+                title: "Dark (#222B27) — Red Below (Simplified, Pale Jade)",
                 subtitle: "High-contrast pale-jade linework & shared contact shadow",
             },
             OpeningPanel {
@@ -832,7 +884,7 @@ fn render_opening_boards(
                 red_below: false,
                 set_id: GlyphSetId::TraditionalPrototypeV1,
                 material: MaterialFamily::PaleJade,
-                title: "Light (#F3EEE4) — Black Below (Traditional, Flipped)",
+                title: "Light (#EDE5D6) — Black Below (Traditional, Flipped)",
                 subtitle: "Flipped orientation: Black y=9 at bottom; glyphs & light stay upright",
             },
             OpeningPanel {
@@ -842,7 +894,7 @@ fn render_opening_boards(
                 red_below: false,
                 set_id: GlyphSetId::TraditionalPrototypeV1,
                 material: MaterialFamily::Boxwood,
-                title: "Dark (#1D2421) — Black Below (Traditional, Boxwood)",
+                title: "Dark (#222B27) — Black Below (Traditional, Boxwood)",
                 subtitle: "Alternative Boxwood material set under flipped orientation",
             },
         ];
@@ -926,7 +978,7 @@ fn render_opening_boards(
         abs_path,
         width,
         height,
-        description: "Full 9x10 Xiangqi opening position across Light (#F3EEE4) and Dark (#1D2421) themes and Red-below / Black-below orientations.".to_string(),
+        description: "Full 9x10 Xiangqi opening position on the light (#EDE5D6) and dark (#222B27) board surfaces and Red-below / Black-below orientations.".to_string(),
     })
 }
 
@@ -993,45 +1045,21 @@ fn draw_corner_brackets(
     }
 }
 
-/// Draws a 12-point notched starburst/octagon check badge underneath a checked General
-/// so check is unmistakable by shape alone without relying solely on vermilion color.
-fn draw_check_halo(dst: &mut PixmapMut<'_>, cx: f32, cy: f32, r_outer: f32) {
+/// Draws the check indicator: a dashed vermilion ring around the checked General, told from the
+/// solid selection ring by its dashes (`docs/rendering.md` §4 and §8).
+fn draw_check_ring(dst: &mut PixmapMut<'_>, cx: f32, cy: f32, r: f32) {
     let mut pb = PathBuilder::new();
-    let spikes = 12;
-    let r_inner = r_outer * 0.84;
-    for i in 0..(spikes * 2) {
-        let angle = (i as f32) * std::f32::consts::PI / (spikes as f32);
-        let r = if i % 2 == 0 { r_outer } else { r_inner };
-        let x = cx + r * angle.cos();
-        let y = cy + r * angle.sin();
-        if i == 0 {
-            pb.move_to(x, y);
-        } else {
-            pb.line_to(x, y);
-        }
-    }
-    pb.close();
+    pb.push_circle(cx, cy, r);
     if let Some(path) = pb.finish() {
-        let mut fill_paint = Paint::default();
-        fill_paint.set_color(color_hex(0xA5, 0x48, 0x37, 72));
-        fill_paint.anti_alias = true;
-        dst.fill_path(
-            &path,
-            &fill_paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
-
-        let mut stroke_paint = Paint::default();
-        stroke_paint.set_color(color_hex(0xA5, 0x48, 0x37, 238));
-        stroke_paint.anti_alias = true;
+        let mut paint = Paint::default();
+        paint.set_color(color_hex(0xA5, 0x48, 0x37, 255));
+        paint.anti_alias = true;
         let stroke = Stroke {
-            width: 1.8,
-            line_join: LineJoin::Round,
+            width: 2.6,
+            dash: StrokeDash::new(vec![5.0, 3.0], 0.0),
             ..Stroke::default()
         };
-        dst.stroke_path(&path, &stroke_paint, &stroke, Transform::identity(), None);
+        dst.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
 
@@ -1051,12 +1079,20 @@ fn render_crowded_phone_360(
 
     {
         let mut pm = pixmap.as_mut();
-        fill_rect_tiled(&mut pm, paper_tile, TILE_SIZE, 0, 0, width, height);
+        fill_rect_surface(
+            &mut pm,
+            paper_tile,
+            TILE_SIZE,
+            0,
+            0,
+            width,
+            height,
+            LIGHT_SURFACE,
+        );
 
         let charcoal = color_hex(0x25, 0x2A, 0x25, 255);
         let deep_jade = color_hex(0x41, 0x54, 0x47, 255);
         let vermilion = color_hex(0xA5, 0x48, 0x37, 255);
-        let warm_paper = color_hex(0xF3, 0xEE, 0xE4, 245);
 
         draw_text(
             &mut pm,
@@ -1112,40 +1148,26 @@ fn render_crowded_phone_360(
             (5, 6, PieceSide::Black, PieceRole::Soldier),
         ];
 
-        // Layer 2: Under-piece state indicators
-        // 2a. Last-move origin `(1, 8)` and destination `(4, 8)` square brackets
-        let (lm_ox, lm_oy) = geom.screen_xy(1, 8);
-        fill_circle(
-            &mut pm,
-            lm_ox,
-            lm_oy,
-            geom.s * 0.14,
-            color_hex(0x41, 0x54, 0x47, 175),
-        );
-        draw_corner_brackets(
-            &mut pm,
-            lm_ox,
-            lm_oy,
-            geom.s * 0.34,
-            geom.s * 0.12,
-            1.6,
-            deep_jade,
-        );
+        // Layer 2: Under-piece state indicators, at the shared values of `docs/rendering.md` §4
+        // (`d = 0.88 * s` is the piece diameter).
+        let d = geom.s * 0.88;
+        // 2a. Last-move corner brackets at the origin `(1, 8)` and the destination `(4, 8)`
+        for (lx, ly) in [(1u8, 8u8), (4, 8)] {
+            let (bx, by) = geom.screen_xy(lx, ly);
+            draw_corner_brackets(
+                &mut pm,
+                bx,
+                by,
+                d * 0.52,
+                (geom.s * 0.16).max(5.0),
+                2.0,
+                deep_jade,
+            );
+        }
 
-        let (lm_dx, lm_dy) = geom.screen_xy(4, 8);
-        draw_corner_brackets(
-            &mut pm,
-            lm_dx,
-            lm_dy,
-            geom.s * 0.47,
-            geom.s * 0.15,
-            1.8,
-            deep_jade,
-        );
-
-        // 2b. Check indicator under Red General `(4, 0)` (12-notch starburst halo)
+        // 2b. Dashed check ring around the Red General `(4, 0)`
         let (chk_x, chk_y) = geom.screen_xy(4, 0);
-        draw_check_halo(&mut pm, chk_x, chk_y, geom.s * 0.51);
+        draw_check_ring(&mut pm, chk_x, chk_y, d * 0.58);
 
         // Layer 3: Contact shadows
         for &(fx, fy, _, _) in pieces {
@@ -1167,38 +1189,33 @@ fn render_crowded_phone_360(
             blit_sprite_area(&mut pm, sprite, sx, sy, geom.s, 1.0);
         }
 
-        // Layer 6: Foreground selection, legal-move dots, and legal-capture target brackets
-        // 6a. Selected piece `(4, 4)` double high-contrast selection ring
+        // Layer 6: Foreground selection, legal-move dots, and legal-capture rings
+        // 6a. Selected piece `(4, 4)`: solid deep-jade ring
         let (sel_x, sel_y) = geom.screen_xy(4, 4);
-        stroke_circle(&mut pm, sel_x, sel_y, geom.s * 0.465, 3.2, warm_paper);
-        stroke_circle(&mut pm, sel_x, sel_y, geom.s * 0.465, 1.8, deep_jade);
+        stroke_circle(&mut pm, sel_x, sel_y, d * 0.54, 2.5, deep_jade);
 
         // 6b. Exact legal quiet destinations for screen Chariot `(4, 4)` (moving off file 4 resolves Cannon check)
         for (qx, qy) in [(3u8, 4u8), (2, 4), (5, 4), (6, 4)] {
             let (dx, dy) = geom.screen_xy(qx, qy);
-            fill_circle(&mut pm, dx, dy, geom.s * 0.15, warm_paper);
-            fill_circle(&mut pm, dx, dy, geom.s * 0.115, deep_jade);
+            fill_circle(
+                &mut pm,
+                dx,
+                dy,
+                (geom.s * 0.13).max(4.5),
+                color_hex(0x41, 0x54, 0x47, 199),
+            );
         }
 
         // 6c. Exact legal capture targets `(1, 4)` (Soldier), `(7, 4)` (Horse), & `(4, 8)` (checking Cannon)
         for (cx_file, cy_rank) in [(1u8, 4u8), (7, 4), (4, 8)] {
             let (tx, ty) = geom.screen_xy(cx_file, cy_rank);
-            stroke_circle(&mut pm, tx, ty, geom.s * 0.46, 2.4, warm_paper);
-            draw_corner_brackets(
-                &mut pm,
-                tx,
-                ty,
-                geom.s * 0.47,
-                geom.s * 0.16,
-                2.0,
-                vermilion,
-            );
+            stroke_circle(&mut pm, tx, ty, d * 0.53, 2.5, vermilion);
         }
 
         draw_text(
             &mut pm,
             sans_face,
-            "Ring: selected | Dots: quiet moves | Red brackets: captures | Star halo: check",
+            "Ring: selected | Dots: quiet moves | Red rings: captures | Dashed ring: check",
             180.0,
             413.0,
             8.0,
