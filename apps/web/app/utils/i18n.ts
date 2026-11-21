@@ -3,16 +3,7 @@ import glossaryData from '../../../../data/fixtures/i18n/glossary.json'
 export type SupportedLocale = 'en-US' | 'en-GB' | 'zh-Hans-CN' | 'zh-Hant-TW' | 'zh-Hant-HK'
 export type PieceScriptMode = 'auto' | 'simplified' | 'traditional'
 export type MaterialFamilyId = 'pale-jade' | 'boxwood' | 'ivory-stone'
-/** The reader's choice; `auto` follows the locale. */
 export type NotationDisplayMode = 'auto' | 'chinese' | 'wxf' | 'uci'
-/** The notation actually shown. */
-export type NotationDialect = 'chinese' | 'wxf' | 'uci'
-
-/** Chinese locales read Chinese notation; every other locale reads WXF unless the reader picks otherwise. */
-export function resolveNotationDialect(locale: SupportedLocale, mode: NotationDisplayMode): NotationDialect {
-  if (mode !== 'auto') return mode
-  return locale.startsWith('zh') ? 'chinese' : 'wxf'
-}
 
 export const SUPPORTED_LOCALES: { id: SupportedLocale; label: string }[] = [
   { id: 'en-US', label: 'English (US)' },
@@ -140,4 +131,13 @@ const termsMap = glossaryData.terms as Record<string, Record<SupportedLocale, st
 
 export function tTerm(key: string, locale: SupportedLocale): string {
   return termsMap[key]?.[locale] ?? EXTRA_UI_COPY[key]?.[locale] ?? key
+}
+
+/** The notation actually shown; `NotationDisplayMode` is the reader's choice, where `auto` follows the locale. */
+export type NotationDialect = 'chinese' | 'wxf' | 'uci'
+
+/** Chinese locales read Chinese notation; every other locale reads WXF unless the reader picks otherwise. */
+export function resolveNotationDialect(locale: SupportedLocale, mode: NotationDisplayMode): NotationDialect {
+  if (mode !== 'auto') return mode
+  return locale.startsWith('zh') ? 'chinese' : 'wxf'
 }
