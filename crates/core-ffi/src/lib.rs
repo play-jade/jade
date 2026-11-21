@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 use xiangqi_core::{
     ADOPTED_RULES_PROFILE, BoardViewSnapshot, BoardViewport, GameState, Move, Orientation,
-    PresentationPrefsSnapshot, Square, format_chinese_move, parse_move_token,
+    PresentationPrefsSnapshot, Square, format_chinese_move, format_wxf_move, parse_move_token,
 };
 
 uniffi::setup_scaffolding!();
@@ -104,6 +104,20 @@ impl FfiGameSession {
         let zh = format_chinese_move(guard.board(), mv, false).unwrap_or_else(|_| mv.to_uci());
         guard.apply_move(mv)?;
         Ok(zh)
+    }
+
+    /// Notates a legal move token for the current position without applying it: WXF (`C2=5`)
+    /// when `wxf` is true, otherwise Chinese (`炮二平五`), so clients can follow the reader's locale.
+    pub fn notate_move_token(&self, token: String, wxf: bool) -> Result<String, FfiError> {
+        let guard = self.inner.lock().map_err(|_| FfiError::Core {
+            detail: "mutex poisoned".to_string(),
+        })?;
+        let mv = parse_move_token(guard.board(), &token, guard.ply_count())?;
+        if wxf {
+            Ok(format_wxf_move(guard.board(), mv)?)
+        } else {
+            Ok(format_chinese_move(guard.board(), mv, false)?)
+        }
     }
 
     pub fn undo(&self) -> Result<String, FfiError> {

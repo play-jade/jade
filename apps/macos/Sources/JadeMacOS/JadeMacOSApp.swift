@@ -50,55 +50,17 @@ struct JadeMacOSGuiApp: App {
     @StateObject private var controller = MacBoardController()
 
     var body: some Scene {
-        WindowGroup("Jade — Xiangqi · 玉枰象棋") {
-            HSplitView {
-                MacCoreGraphicsBoardRepresentable(controller: controller)
-                    .frame(minWidth: 500, minHeight: 560)
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Jade · 玉枰象棋")
-                        .font(.title2.weight(.semibold))
-                    Text(controller.statusLine)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Button("New Game") { controller.resetOfflineGame() }
-                        Button("Flip") { controller.redBelow.toggle() }
-                        Button("Undo") { controller.undo() }
-                    }
-                    HStack {
-                        Button("Export PGN…") { controller.exportPgnInteractive() }
-                            .disabled(controller.movesUci.isEmpty)
-                        Button("Open PGN…") { controller.importPgnInteractive() }
-                    }
-                    HStack {
-                        Button(controller.engineThinking ? "Engine thinking…" : "Engine Move") {
-                            controller.requestEngineMove()
-                        }
-                        .disabled(controller.engineThinking)
-                        Toggle("Play vs Engine (Black)", isOn: $controller.autoEngineBlack)
-                    }
-                    Picker("Material", selection: $controller.materialId) {
-                        Text("Pale Jade").tag("pale-jade")
-                        Text("Honey Boxwood").tag("boxwood")
-                        Text("Ivory Stone").tag("ivory-stone")
-                    }
-                    Toggle("Traditional Faces (繁體)", isOn: $controller.traditionalGlyphs)
-                    Toggle("Dark Surface", isOn: $controller.darkSurface)
-                    Toggle("Stone Sound", isOn: $controller.soundEnabled)
-                    Divider()
-                    Text("Recorded Moves (\(controller.movesChinese.count) plies)")
-                        .font(.headline)
-                    List(Array(controller.movesChinese.enumerated()), id: \.offset) { idx, mv in
-                        Text("\(idx + 1). \(mv)")
-                            .font(.system(.body, design: .monospaced))
-                    }
-                }
-                .padding(16)
-                .frame(minWidth: 300, maxWidth: 360)
-            }
-            .frame(minWidth: 840, minHeight: 600)
+        WindowGroup("Jade") {
+            LamplitTableView(controller: controller)
+                .frame(minWidth: 960, minHeight: 680)
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1440, height: 900)
         .commands {
+            CommandGroup(after: .toolbar) {
+                Toggle("Sound", isOn: $controller.soundEnabled)
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+            }
             CommandMenu("Board") {
                 Button("New Offline Game") { controller.resetOfflineGame() }
                     .keyboardShortcut("n", modifiers: [.command])
@@ -115,6 +77,265 @@ struct JadeMacOSGuiApp: App {
                     .keyboardShortcut("s", modifiers: [.command])
             }
         }
+
+        Settings {
+            JadeSettingsView(controller: controller)
+        }
+    }
+}
+
+/// Lamplit-table visual tokens: the board is a lit object on a dark ground, and the window
+/// chrome recedes. One place for these values so piece-set, board and palette theming can
+/// replace them later.
+enum LamplitTheme {
+    static let ground = Color(red: 0x1D / 255.0, green: 0x24 / 255.0, blue: 0x21 / 255.0)
+    static let paper = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0)
+    static let paleJade = Color(red: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0)
+    static let vermilionOnDark = Color(red: 0xC4 / 255.0, green: 0x5A / 255.0, blue: 0x45 / 255.0)
+    static let mutedText = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0).opacity(0.62)
+    static let hairline = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0).opacity(0.12)
+
+    static func display(_ size: CGFloat) -> Font {
+        NSFont(name: "NotoSerifDisplay-Regular", size: size) != nil
+            ? .custom("NotoSerifDisplay-Regular", size: size)
+            : .system(size: size, weight: .regular, design: .serif)
+    }
+
+    /// Registers the brand display face from the repository's brand sources for this process only.
+    static func registerFonts(repoRoot: String) {
+        let url = URL(fileURLWithPath: repoRoot)
+            .appendingPathComponent("assets/brand/source/fonts/NotoSerifDisplay-Regular.ttf")
+        if FileManager.default.fileExists(atPath: url.path) {
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        }
+    }
+}
+
+struct LamplitTableView: View {
+    @ObservedObject var controller: MacBoardController
+
+    var body: some View {
+        ZStack {
+            LamplitGround(repoRoot: controller.repoRoot)
+            HStack(spacing: 0) {
+                PlayersColumn(controller: controller)
+                    .frame(width: 260)
+                MacCoreGraphicsBoardRepresentable(controller: controller)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                MovesColumn(controller: controller)
+                    .frame(width: 280)
+            }
+            VStack {
+                Spacer()
+                ControlCapsule(controller: controller)
+                    .padding(.bottom, 22)
+            }
+        }
+        .ignoresSafeArea()
+        .environment(\.colorScheme, .dark)
+        .foregroundStyle(LamplitTheme.paper)
+    }
+}
+
+/// Dark ground with a warm pool of key light from the upper left (the studio light of
+/// docs/rendering.md §5) and a soft vignette, so the board reads as an object on a table.
+struct LamplitGround: View {
+    let repoRoot: String
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                LamplitTheme.ground
+                if let grain = NSImage(contentsOfFile: (repoRoot as NSString)
+                    .appendingPathComponent("assets/board/materials/dark-grain.png")) {
+                    Image(nsImage: grain)
+                        .resizable(resizingMode: .tile)
+                        .opacity(0.9)
+                }
+                RadialGradient(
+                    colors: [LamplitTheme.paper.opacity(0.09), LamplitTheme.paper.opacity(0)],
+                    center: UnitPoint(x: 0.40, y: 0.34),
+                    startRadius: 0,
+                    endRadius: max(geo.size.width, geo.size.height) * 0.55
+                )
+                RadialGradient(
+                    colors: [Color.black.opacity(0), Color.black.opacity(0.55)],
+                    center: .center,
+                    startRadius: min(geo.size.width, geo.size.height) * 0.45,
+                    endRadius: max(geo.size.width, geo.size.height) * 0.85
+                )
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+struct PlayersColumn: View {
+    @ObservedObject var controller: MacBoardController
+
+    var body: some View {
+        let top = controller.redBelow ? "black" : "red"
+        let bottom = controller.redBelow ? "red" : "black"
+        VStack(alignment: .leading) {
+            SidePlate(controller: controller, side: top)
+            Spacer()
+            SidePlate(controller: controller, side: bottom)
+        }
+        .padding(.leading, 56)
+        .padding(.vertical, 64)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct SidePlate: View {
+    @ObservedObject var controller: MacBoardController
+    let side: String
+
+    var body: some View {
+        let toMove = controller.sideToMove == side && controller.outcomeText == nil
+        let isEngine = side == "black" && controller.autoEngineBlack
+        let title = side == "red" ? "Red" : "Black"
+        let who = isEngine ? "Engine" : "This Mac"
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(toMove ? LamplitTheme.paleJade : LamplitTheme.hairline)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: toMove ? LamplitTheme.paleJade.opacity(0.6) : .clear, radius: 6)
+                Text("\(who)\(toMove ? " · to move" : "")".uppercased())
+                    .font(.system(size: 11, weight: .medium))
+                    .tracking(1.8)
+                    .foregroundStyle(toMove ? LamplitTheme.paleJade : LamplitTheme.mutedText)
+            }
+            Text(title)
+                .font(LamplitTheme.display(56))
+                .foregroundStyle(toMove ? LamplitTheme.paper : LamplitTheme.mutedText)
+            if isEngine && controller.engineThinking {
+                Text("Thinking…")
+                    .font(.system(size: 13))
+                    .foregroundStyle(LamplitTheme.mutedText)
+            }
+            let taken = controller.capturedGlyphs(ownedBy: side)
+            if !taken.isEmpty {
+                Text(taken.joined(separator: " "))
+                    .font(.system(size: 17, weight: .semibold, design: .serif))
+                    .foregroundStyle(LamplitTheme.mutedText)
+                    .accessibilityLabel("\(title) has lost \(taken.count) pieces")
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: toMove)
+    }
+}
+
+struct MovesColumn: View {
+    @ObservedObject var controller: MacBoardController
+
+    var body: some View {
+        let rows = stride(from: 0, to: controller.movesNotated.count, by: 2).map { i in
+            (number: i / 2 + 1,
+             red: controller.movesNotated[i],
+             black: i + 1 < controller.movesNotated.count ? controller.movesNotated[i + 1] : "")
+        }
+        let lastPly = controller.movesNotated.count - 1
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 64)
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(rows, id: \.number) { row in
+                            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                                Text("\(row.number)")
+                                    .font(.system(size: 12).monospacedDigit())
+                                    .foregroundStyle(LamplitTheme.mutedText)
+                                    .frame(width: 32, alignment: .leading)
+                                moveText(row.red, current: (row.number - 1) * 2 == lastPly)
+                                moveText(row.black, current: (row.number - 1) * 2 + 1 == lastPly)
+                            }
+                            .padding(.vertical, 6)
+                            .id(row.number)
+                        }
+                    }
+                }
+                .defaultScrollAnchor(.bottom)
+                .onChange(of: controller.movesNotated.count) {
+                    if let last = rows.last { proxy.scrollTo(last.number, anchor: .bottom) }
+                }
+            }
+            Rectangle().fill(LamplitTheme.hairline).frame(height: 1).padding(.vertical, 14)
+            Text(controller.outcomeText ?? (controller.inCheck ? "Check" : "Offline · Untimed"))
+                .font(.system(size: 12))
+                .foregroundStyle(controller.inCheck || controller.outcomeText != nil
+                    ? LamplitTheme.vermilionOnDark : LamplitTheme.mutedText)
+        }
+        .padding(.trailing, 56)
+        .padding(.bottom, 96)
+    }
+
+    private func moveText(_ text: String, current: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 15, weight: current ? .semibold : .regular).monospacedDigit())
+            .foregroundStyle(current ? LamplitTheme.paper : LamplitTheme.paper.opacity(0.78))
+            .underline(current, color: LamplitTheme.paleJade.opacity(0.6))
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Floating glass capsule: the only on-canvas controls. Everything else lives in menus and Settings.
+struct ControlCapsule: View {
+    @ObservedObject var controller: MacBoardController
+
+    var body: some View {
+        HStack(spacing: 4) {
+            capsuleButton("arrow.up.arrow.down", "Flip board (⌘F)") { controller.redBelow.toggle() }
+            capsuleButton("arrow.uturn.backward", "Take back (⌘Z)") { controller.undo() }
+                .disabled(controller.movesUci.isEmpty || controller.engineThinking)
+            capsuleButton("cpu", "Engine move (⌘E)") { controller.requestEngineMove() }
+                .disabled(controller.engineThinking || controller.outcomeText != nil)
+            capsuleButton("arrow.counterclockwise", "New game (⌘N)") { controller.resetOfflineGame() }
+            capsuleButton(controller.soundEnabled ? "speaker.wave.2" : "speaker.slash",
+                          controller.soundEnabled ? "Sound on" : "Sound off") {
+                controller.soundEnabled.toggle()
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(LamplitTheme.hairline))
+        .shadow(color: .black.opacity(0.4), radius: 18, y: 10)
+    }
+
+    private func capsuleButton(_ symbol: String, _ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .regular))
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(LamplitTheme.paper.opacity(0.82))
+        .help(label)
+        .accessibilityLabel(label)
+    }
+}
+
+struct JadeSettingsView: View {
+    @ObservedObject var controller: MacBoardController
+
+    var body: some View {
+        Form {
+            Picker("Piece set", selection: $controller.materialId) {
+                Text("Pale Jade").tag("pale-jade")
+                Text("Honey Boxwood").tag("boxwood")
+                Text("Ivory Stone").tag("ivory-stone")
+            }
+            Toggle("Traditional faces (繁體)", isOn: $controller.traditionalGlyphs)
+            Toggle("Dark board surface", isOn: $controller.darkSurface)
+            Toggle("Engine plays Black", isOn: $controller.autoEngineBlack)
+            Toggle("Piece sounds", isOn: $controller.soundEnabled)
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .padding(.vertical, 8)
     }
 }
 
@@ -132,6 +353,18 @@ final class MacBoardController: ObservableObject {
     @Published var movesUci: [String] = []
     @Published var movesChinese: [String] = []
     @Published var statusLine: String = "Red to move · program-2023.11-v1"
+    /// Moves in the reader's notation: Chinese when the first preferred language is Chinese, WXF otherwise.
+    @Published var movesNotated: [String] = []
+    @Published var sideToMove: String = "red"
+    @Published var inCheck: Bool = false
+    @Published var outcomeText: String? = nil
+    @Published private(set) var pieceCounts: [String: Int] = [:]
+
+    private let notateWxf = !(Locale.preferredLanguages.first ?? "en").hasPrefix("zh")
+    private static let startingCounts: [String: Int] = [
+        "general": 1, "advisor": 2, "elephant": 2, "horse": 2, "chariot": 2, "cannon": 2, "soldier": 5,
+    ]
+    private static let roleOrder = ["chariot", "horse", "cannon", "elephant", "advisor", "soldier", "general"]
 
     let repoRoot: String
     private(set) var session: FfiGameSession
@@ -144,6 +377,7 @@ final class MacBoardController: ObservableObject {
     init() {
         let root = resolveJadeRepoRoot()
         self.repoRoot = root
+        LamplitTheme.registerFonts(repoRoot: root)
         self.audio = MacPieceAudioEngine(repoRoot: root)
         self.session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
         for uci in offlineStore.loadMoves() {
@@ -381,13 +615,52 @@ final class MacBoardController: ObservableObject {
 
     private func refreshStatus() {
         if let sum = try? session.summary() {
+            sideToMove = sum.sideToMove
+            inCheck = sum.inCheck
             if let outcome = sum.outcome {
+                let reason = (sum.reason ?? "").replacingOccurrences(of: "_", with: " ")
+                outcomeText = "\(outcome.replacingOccurrences(of: "_", with: " ").capitalized) · \(reason)"
                 statusLine = "Finished: \(outcome) (\(sum.reason ?? ""))"
             } else {
+                outcomeText = nil
                 let checkNote = sum.inCheck ? " · CHECK!" : ""
                 statusLine = "\(sum.sideToMove.capitalized) to move · \(sum.plyCount) plies\(checkNote)"
             }
         }
+        var counts: [String: Int] = [:]
+        for p in (try? session.pieces(traditionalGlyphs: traditionalGlyphs)) ?? [] {
+            counts["\(p.side)-\(p.role)", default: 0] += 1
+        }
+        pieceCounts = counts
+        rebuildNotation()
+    }
+
+    /// Replays the recorded moves on a scratch session, notating each one before it is applied.
+    private func rebuildNotation() {
+        guard let replay = try? FfiGameSession(rulesProfile: "program-2023.11-v1") else { return }
+        var out: [String] = []
+        for (idx, uci) in movesUci.enumerated() {
+            let fallback = idx < movesChinese.count ? movesChinese[idx] : uci
+            out.append((try? replay.notateMoveToken(token: uci, wxf: notateWxf)) ?? fallback)
+            _ = try? replay.applyMoveToken(token: uci)
+        }
+        movesNotated = out
+    }
+
+    /// Faces of the pieces `side` has lost, most valuable first.
+    func capturedGlyphs(ownedBy side: String) -> [String] {
+        let faces: [String: (red: String, black: String)] = traditionalGlyphs
+            ? ["general": ("帥", "將"), "advisor": ("仕", "士"), "elephant": ("相", "象"), "horse": ("馬", "馬"),
+               "chariot": ("車", "車"), "cannon": ("炮", "砲"), "soldier": ("兵", "卒")]
+            : ["general": ("帅", "将"), "advisor": ("仕", "士"), "elephant": ("相", "象"), "horse": ("马", "马"),
+               "chariot": ("车", "车"), "cannon": ("炮", "炮"), "soldier": ("兵", "卒")]
+        var out: [String] = []
+        for role in Self.roleOrder {
+            let missing = (Self.startingCounts[role] ?? 0) - (pieceCounts["\(side)-\(role)"] ?? 0)
+            guard missing > 0, let face = faces[role] else { continue }
+            out.append(contentsOf: Array(repeating: side == "red" ? face.red : face.black, count: missing))
+        }
+        return out
     }
 }
 
@@ -470,39 +743,92 @@ final class MacCoreGraphicsBoardNSView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+
+    /// The board slab: the 8×9 grid plus a 0.75-spacing margin on every side, fitted into the
+    /// view with room for the controls capsule below. Within the slab the painter's padding is
+    /// 0.25 spacing, because its viewport already reserves half a spacing around the outer lines.
+    private func slabGeometry() -> (rect: CGRect, padding: CGFloat)? {
+        let avail = CGRect(x: bounds.minX + 24, y: bounds.minY + 56,
+                           width: bounds.width - 48, height: bounds.height - 56 - 92)
+        let s = floor(min(avail.width / 9.5, avail.height / 10.5))
+        guard s > 0 else { return nil }
+        let w = 9.5 * s
+        let h = 10.5 * s
+        let rect = CGRect(x: avail.midX - w / 2, y: avail.minY + (avail.height - h) / 2, width: w, height: h)
+        return (rect.integral, 0.25 * s)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext,
               let ctrl = controller,
-              let pieces = try? ctrl.session.pieces(traditionalGlyphs: ctrl.traditionalGlyphs) else {
+              let (slab, padding) = slabGeometry(),
+              let model = try? ctrl.session.renderModel(traditionalGlyphs: ctrl.traditionalGlyphs, selectedUci: nil) else {
             return
         }
+        let shape = CGPath(roundedRect: slab, cornerWidth: 6, cornerHeight: 6, transform: nil)
+        let surface = ctrl.darkSurface
+            ? CGColor(srgbRed: 0x1D / 255.0, green: 0x24 / 255.0, blue: 0x21 / 255.0, alpha: 1)
+            : CGColor(srgbRed: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0, alpha: 1)
+
+        // Cast shadows fall to the lower right, away from the upper-left key light. Offsets are in
+        // the unflipped base space, so a negative y moves the shadow down the screen.
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 26, height: -38), blur: 80, color: CGColor(gray: 0, alpha: 0.55))
+        ctx.addPath(shape); ctx.setFillColor(surface); ctx.fillPath()
+        ctx.restoreGState()
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 8, height: -12), blur: 22, color: CGColor(gray: 0, alpha: 0.38))
+        ctx.addPath(shape); ctx.setFillColor(surface); ctx.fillPath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.addPath(shape)
+        ctx.clip()
+        ctx.translateBy(x: slab.minX, y: slab.minY)
         CoreGraphicsBoardPainter.paint(
             ctx: ctx,
-            width: bounds.width,
-            height: bounds.height,
+            width: slab.width,
+            height: slab.height,
+            padding: padding,
             redBelow: ctrl.redBelow,
             darkSurface: ctrl.darkSurface,
             materialId: ctrl.materialId,
             traditionalGlyphs: ctrl.traditionalGlyphs,
-            pieces: pieces,
+            pieces: model.pieces,
             selectedUci: ctrl.selectedUci,
             legalDestUcis: ctrl.legalDestUcis,
+            lastMoveFromUci: model.lastMoveFromUci,
+            lastMoveToUci: model.lastMoveToUci,
+            checkUci: model.checkUci,
             repoRoot: ctrl.repoRoot
         )
+        ctx.restoreGState()
+
+        // A fine top-left highlight and edge line give the slab a physical rim.
+        ctx.saveGState()
+        ctx.addPath(shape)
+        ctx.setStrokeColor(CGColor(gray: 0, alpha: 0.35))
+        ctx.setLineWidth(1)
+        ctx.strokePath()
+        ctx.move(to: CGPoint(x: slab.minX + 6, y: slab.minY + 0.5))
+        ctx.addLine(to: CGPoint(x: slab.maxX - 6, y: slab.minY + 0.5))
+        ctx.setStrokeColor(CGColor(gray: 1, alpha: ctrl.darkSurface ? 0.08 : 0.6))
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let loc = convert(event.locationInWindow, from: nil)
-        guard let ctrl = controller else { return }
+        guard let ctrl = controller, let (slab, padding) = slabGeometry() else { return }
         if let hit = ffiHitTest(
-            width: Double(bounds.width),
-            height: Double(bounds.height),
-            padding: 24.0,
+            width: Double(slab.width),
+            height: Double(slab.height),
+            padding: Double(padding),
             redBelow: ctrl.redBelow,
-            px: Double(loc.x),
-            py: Double(loc.y)
+            px: Double(loc.x - slab.minX),
+            py: Double(loc.y - slab.minY)
         ) {
             ctrl.activateSquare(file: Int(hit.file), rank: Int(hit.rank))
         } else {
