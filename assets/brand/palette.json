@@ -1,0 +1,51 @@
+{
+  "brand": "Jade",
+  "color_space": "sRGB",
+  "colors": {
+    "pale-jade": "#DCE3CE",
+    "deep-jade": "#415447",
+    "charcoal": "#252A25",
+    "vermilion": "#A54837",
+    "warm-paper": "#F3EEE4",
+    "dark-ground": "#1D2421"
+  },
+  "calculated_flat_token_contrast": [
+    {
+      "foreground": "charcoal",
+      "background": "warm-paper",
+      "ratio": 12.64
+    },
+    {
+      "foreground": "vermilion",
+      "background": "warm-paper",
+      "ratio": 5.07
+    },
+    {
+      "foreground": "charcoal",
+      "background": "pale-jade",
+      "ratio": 11.08
+    },
+    {
+      "foreground": "vermilion",
+      "background": "pale-jade",
+      "ratio": 4.45
+    },
+    {
+      "foreground": "warm-paper",
+      "background": "dark-ground",
+      "ratio": 13.69
+    },
+    {
+      "foreground": "pale-jade",
+      "background": "deep-jade",
+      "ratio": 6.16
+    }
+  ],
+  "usage": {
+    "body_text_light": "charcoal on warm-paper",
+    "body_text_dark": "warm-paper on dark-ground",
+    "small_labels_on_jade": "charcoal",
+    "vermilion_on_pale_jade": "Large graphic accents; calculated ratio is below 4.5:1.",
+    "material": "Palette tokens describe flat UI colors. The generated mineral image varies locally."
+  }
+}

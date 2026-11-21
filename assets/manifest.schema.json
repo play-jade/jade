@@ -1,0 +1,353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/play-jade/jade/blob/main/assets/manifest.schema.json",
+  "title": "Jade Public Asset Manifest",
+  "description": "Deterministic inventory, geometry, optical/acoustic parameters, licensing provenance, and SHA-256 checksums for all public assets in play-jade/jade.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "generator",
+    "build_command",
+    "bundles",
+    "assets"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "const": "./manifest.schema.json"
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "generator": {
+      "type": "string",
+      "minLength": 1
+    },
+    "build_command": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/bundleBudget"
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/assetRecord"
+      }
+    }
+  },
+  "$defs": {
+    "sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bundleBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle_id",
+        "material_family",
+        "glyph_set",
+        "density",
+        "file_count",
+        "total_bytes",
+        "limit_bytes",
+        "within_budget"
+      ],
+      "properties": {
+        "bundle_id": { "type": "string", "minLength": 1 },
+        "material_family": {
+          "type": "string",
+          "enum": ["pale-jade", "boxwood", "ivory-stone"]
+        },
+        "glyph_set": {
+          "type": "string",
+          "enum": ["simplified-prototype-v1", "traditional-prototype-v1"]
+        },
+        "density": {
+          "type": "string",
+          "enum": ["1x", "2x"]
+        },
+        "file_count": { "type": "integer", "minimum": 1 },
+        "total_bytes": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "limit_bytes": { "type": "integer", "const": 1000000 },
+        "within_budget": { "type": "boolean", "const": true }
+      }
+    },
+    "densityVariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["density", "width", "height", "path"],
+      "properties": {
+        "density": { "type": "string", "enum": ["1x", "2x"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_width",
+        "logical_height",
+        "pixel_width",
+        "pixel_height",
+        "scale_factor",
+        "density_variants"
+      ],
+      "properties": {
+        "logical_width": { "type": "integer", "minimum": 1 },
+        "logical_height": { "type": "integer", "minimum": 1 },
+        "pixel_width": { "type": "integer", "minimum": 1 },
+        "pixel_height": { "type": "integer", "minimum": 1 },
+        "scale_factor": { "type": "integer", "minimum": 1 },
+        "density_variants": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/densityVariant" }
+        }
+      }
+    },
+    "pivot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "logical_x", "logical_y"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "y": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "logical_x": { "type": "number", "minimum": 0.0 },
+        "logical_y": { "type": "number", "minimum": 0.0 }
+      }
+    },
+    "boundsBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height", "units"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0.0 },
+        "height": { "type": "number", "minimum": 0.0 },
+        "units": { "type": "string", "enum": ["logical_px", "viewbox_units", "pixel"] }
+      }
+    },
+    "shadowBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height", "offset_x", "offset_y", "units"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0.0 },
+        "height": { "type": "number", "minimum": 0.0 },
+        "offset_x": { "type": "number" },
+        "offset_y": { "type": "number" },
+        "units": { "type": "string", "enum": ["logical_px"] }
+      }
+    },
+    "cameraLight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projection",
+        "key_light_azimuth_deg",
+        "key_light_elevation_deg",
+        "ambient_intensity",
+        "orientation_invariant"
+      ],
+      "properties": {
+        "projection": { "type": "string", "const": "orthographic-top-down" },
+        "key_light_azimuth_deg": { "type": "number" },
+        "key_light_elevation_deg": { "type": "number" },
+        "ambient_intensity": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "orientation_invariant": { "type": "boolean", "const": true }
+      }
+    },
+    "engravingSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "carve_depth_norm",
+        "ink_hex",
+        "inner_wall_shadow",
+        "lower_right_catchlight"
+      ],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "carve_depth_norm": { "type": "number", "minimum": 0.0 },
+        "ink_hex": { "type": "string", "pattern": "^#[0-9A-F]{6}$" },
+        "inner_wall_shadow": { "type": "boolean" },
+        "lower_right_catchlight": { "type": "boolean" }
+      }
+    },
+    "glyphIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "glyph_id",
+        "set_id",
+        "locale",
+        "side",
+        "role",
+        "character",
+        "codepoint",
+        "review_status"
+      ],
+      "properties": {
+        "glyph_id": { "type": "string", "minLength": 1 },
+        "set_id": { "type": "string", "minLength": 1 },
+        "locale": { "type": "string", "minLength": 1 },
+        "side": { "type": "string", "enum": ["red", "black", "shared"] },
+        "role": { "type": "string", "minLength": 1 },
+        "character": { "type": "string", "minLength": 1 },
+        "codepoint": { "type": "string", "pattern": "^U\\+[0-9A-F]{4,6}$" },
+        "review_status": { "type": "string", "minLength": 1 }
+      }
+    },
+    "audioSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_rate_hz", "channels", "bits_per_sample", "duration_ms", "peak_amplitude"],
+      "properties": {
+        "sample_rate_hz": { "type": "integer", "const": 44100 },
+        "channels": { "type": "integer", "const": 1 },
+        "bits_per_sample": { "type": "integer", "const": 16 },
+        "duration_ms": { "type": "number", "minimum": 65.0, "maximum": 140.0 },
+        "peak_amplitude": { "type": "number", "minimum": 0.1, "maximum": 0.99 }
+      }
+    },
+    "assetRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "version",
+        "kind",
+        "path",
+        "bytes",
+        "sha256",
+        "source_file",
+        "derivation_command",
+        "author_or_origin",
+        "license",
+        "reuse_notes",
+        "reviewer",
+        "dimensions",
+        "pivot",
+        "visible_bounds",
+        "shadow_bounds",
+        "camera_light",
+        "engraving",
+        "color_space",
+        "alpha_convention",
+        "material_family",
+        "glyph_identity",
+        "audio_spec"
+      ],
+      "properties": {
+        "asset_id": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "board-glyph-manifest",
+            "board-glyph-svg",
+            "board-piece",
+            "board-disc",
+            "board-shadow",
+            "board-surface",
+            "board-audio",
+            "brand-asset",
+            "visual-reference"
+          ]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256Hex" },
+        "source_file": { "type": "string", "minLength": 1 },
+        "derivation_command": { "type": "string", "minLength": 1 },
+        "author_or_origin": { "type": "string", "minLength": 1 },
+        "license": { "type": "string", "minLength": 1 },
+        "reuse_notes": { "type": "string", "minLength": 1 },
+        "reviewer": { "type": "string", "minLength": 1 },
+        "dimensions": {
+          "anyOf": [{ "$ref": "#/$defs/dimensions" }, { "type": "null" }]
+        },
+        "pivot": {
+          "anyOf": [{ "$ref": "#/$defs/pivot" }, { "type": "null" }]
+        },
+        "visible_bounds": {
+          "anyOf": [{ "$ref": "#/$defs/boundsBox" }, { "type": "null" }]
+        },
+        "shadow_bounds": {
+          "anyOf": [{ "$ref": "#/$defs/shadowBounds" }, { "type": "null" }]
+        },
+        "camera_light": {
+          "anyOf": [{ "$ref": "#/$defs/cameraLight" }, { "type": "null" }]
+        },
+        "engraving": {
+          "anyOf": [{ "$ref": "#/$defs/engravingSpec" }, { "type": "null" }]
+        },
+        "color_space": {
+          "type": ["string", "null"],
+          "enum": ["sRGB", null]
+        },
+        "alpha_convention": {
+          "type": ["string", "null"],
+          "enum": ["straight", "premultiplied", null]
+        },
+        "material_family": {
+          "type": ["string", "null"],
+          "enum": ["pale-jade", "boxwood", "ivory-stone", null]
+        },
+        "glyph_identity": {
+          "anyOf": [{ "$ref": "#/$defs/glyphIdentity" }, { "type": "null" }]
+        },
+        "audio_spec": {
+          "anyOf": [{ "$ref": "#/$defs/audioSpec" }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "board-piece" } }
+          },
+          "then": {
+            "properties": {
+              "dimensions": { "$ref": "#/$defs/dimensions" },
+              "pivot": { "$ref": "#/$defs/pivot" },
+              "visible_bounds": { "$ref": "#/$defs/boundsBox" },
+              "shadow_bounds": { "$ref": "#/$defs/shadowBounds" },
+              "camera_light": { "$ref": "#/$defs/cameraLight" },
+              "engraving": { "$ref": "#/$defs/engravingSpec" },
+              "color_space": { "const": "sRGB" },
+              "alpha_convention": { "const": "straight" },
+              "material_family": { "type": "string" },
+              "glyph_identity": { "$ref": "#/$defs/glyphIdentity" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "board-audio" } }
+          },
+          "then": {
+            "properties": {
+              "audio_spec": { "$ref": "#/$defs/audioSpec" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

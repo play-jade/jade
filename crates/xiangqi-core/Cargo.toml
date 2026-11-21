@@ -1,0 +1,18 @@
+[package]
+name = "xiangqi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+description = "Deterministic Xiangqi coordinates, rules, notation, replay, BoardView geometry, and program-2023.11-v1 adjudication"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

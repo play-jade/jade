@@ -1,0 +1,43 @@
+# Build outputs
+/target/
+**/node_modules/
+**/.nuxt/
+**/.output/
+**/.nitro/
+**/.cache/
+**/dist/
+apps/web/public/wasm/
+apps/android/app/src/main/java/uniffi/
+apps/android/app/src/main/jniLibs/
+packages/apple/Artifacts/*.a
+packages/apple/Artifacts/*.dylib
+packages/apple/Sources/JadeCoreBindings/core_ffi.swift
+packages/apple/Sources/core_ffiFFI/include/core_ffiFFI.h
+packages/apple/Sources/core_ffiFFI/include/module.modulemap
+**/.build/
+**/DerivedData/
+**/build/
+apps/windows/**/bin/
+apps/windows/**/obj/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Local databases, runtime state, and secrets
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+
+# Worktrees and editor/agent local dirs
+.claude/
+.bosun/
+.DS_Store
+Thumbs.db
+*.log
+playwright-report/
+test-results/

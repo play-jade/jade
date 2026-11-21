@@ -1,0 +1,20 @@
+[package]
+name = "jade-linux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+description = "Native Linux GTK 4 + libadwaita + Cairo Xiangqi client linking xiangqi-core directly"
+
+[features]
+default = ["gtk-ui"]
+gtk-ui = ["dep:gtk4", "dep:libadwaita"]
+
+[dependencies]
+xiangqi-core = { path = "../../crates/xiangqi-core" }
+archive-client = { path = "../../crates/archive-client" }
+jade-uci-host = { path = "../../engines/uci-host" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+gtk4 = { version = "0.9", optional = true }
+libadwaita = { version = "0.7", features = ["v1_5"], optional = true }

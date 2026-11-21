@@ -1,0 +1,60 @@
+version: "3"
+
+tasks:
+  core:test:
+    desc: Run deterministic Rust rules, notation, geometry, and adjudication tests
+    cmds:
+      - cargo test -p xiangqi-core -p archive-client -p jade-inference
+
+  assets:build:
+    desc: Generate and verify board glyphs, baked materials, audio samples, and reference gallery
+    cmds:
+      - cargo run --release -p jade-asset-pipeline -- --verify
+
+  bindings:wasm:
+    desc: Compile core-wasm for browser targets
+    cmds:
+      - cargo build --release -p core-wasm --target wasm32-unknown-unknown
+
+  bindings:ffi:
+    desc: Compile core-ffi shared/static libraries and generate UniFFI Swift/Kotlin bindings
+    cmds:
+      - cargo build --release -p core-ffi
+
+  server:test:
+    desc: Run match-server and UCI engine host integration tests
+    cmds:
+      - cargo test -p jade-match-server -p jade-uci-host
+
+  server:dev:
+    desc: Start local authoritative Axum match server with SQLite development storage
+    cmds:
+      - cargo run -p jade-match-server
+
+  web:dev:
+    desc: Start Nuxt 4 web application against local match server and sample archive
+    dir: apps/web
+    cmds:
+      - pnpm dev
+
+  web:test:
+    desc: Run web unit, WASM fixture, and Playwright browser acceptance tests
+    dir: apps/web
+    cmds:
+      - pnpm test
+
+  macos:demo:
+    desc: Build and launch the native macOS SwiftUI/AppKit + Core Graphics + C++26 engine demo app
+    cmds:
+      - ./dev/run-macos.sh
+
+  macos:build:
+    desc: Build native macOS SwiftUI/AppKit client with Core Graphics board renderer
+    cmds:
+      - ./dev/run-macos.sh --build-only
+
+  macos:test:
+    desc: Run Swift UniFFI binding and macOS client tests
+    dir: packages/apple
+    cmds:
+      - swift test

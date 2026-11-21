@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "locales": ["en-US", "en-GB", "zh-Hans-CN", "zh-Hant-TW", "zh-Hant-HK"],
+  "notes": "Canonical Xiangqi glossary reviewed prior to screen translation (Section 6). In Xiangqi, having no legal moves without check (困毙 / 困斃) is a loss for the side to move, never a draw; English strings make this loss outcome explicit rather than calling it an unqualified stalemate.",
+  "terms": {
+    "product.title": {
+      "en-US": "Jade — Xiangqi",
+      "en-GB": "Jade — Xiangqi",
+      "zh-Hans-CN": "玉枰象棋 · Jade",
+      "zh-Hant-TW": "玉枰象棋 · Jade",
+      "zh-Hant-HK": "玉枰象棋 · Jade"
+    },
+    "product.tagline": {
+      "en-US": "Jade is a beautiful place to play and explore Xiangqi.",
+      "en-GB": "Jade is a beautiful place to play and explore Xiangqi.",
+      "zh-Hans-CN": "静雅对弈与棋谱探索之所。",
+      "zh-Hant-TW": "靜雅對弈與棋譜探索之所。",
+      "zh-Hant-HK": "靜雅對弈與棋譜探索之所。"
+    },
+    "action.play_friend": {
+      "en-US": "Play a friend",
+      "en-GB": "Play a friend",
+      "zh-Hans-CN": "邀请好友对局",
+      "zh-Hant-TW": "邀請好友對局",
+      "zh-Hant-HK": "邀請好友對局"
+    },
+    "action.play_offline": {
+      "en-US": "Offline board",
+      "en-GB": "Offline board",
+      "zh-Hans-CN": "本地离线对局",
+      "zh-Hant-TW": "本機離線對局",
+      "zh-Hant-HK": "本機離線對局"
+    },
+    "action.explore_games": {
+      "en-US": "Explore games",
+      "en-GB": "Explore games",
+      "zh-Hans-CN": "浏览棋谱档案",
+      "zh-Hant-TW": "瀏覽棋譜檔案",
+      "zh-Hant-HK": "瀏覽棋譜檔案"
+    },
+    "piece.red.general": {
+      "en-US": "Red General",
+      "en-GB": "Red General",
+      "zh-Hans-CN": "红帅",
+      "zh-Hant-TW": "紅帥",
+      "zh-Hant-HK": "紅帥"
+    },
+    "piece.black.general": {
+      "en-US": "Black General",
+      "en-GB": "Black General",
+      "zh-Hans-CN": "黑将",
+      "zh-Hant-TW": "黑將",
+      "zh-Hant-HK": "黑將"
+    },
+    "piece.red.advisor": {
+      "en-US": "Red Advisor",
+      "en-GB": "Red Advisor",
+      "zh-Hans-CN": "红仕",
+      "zh-Hant-TW": "紅仕",
+      "zh-Hant-HK": "紅仕"
+    },
+    "piece.black.advisor": {
+      "en-US": "Black Advisor",
+      "en-GB": "Black Advisor",
+      "zh-Hans-CN": "黑士",
+      "zh-Hant-TW": "黑士",
+      "zh-Hant-HK": "黑士"
+    },
+    "piece.red.elephant": {
+      "en-US": "Red Elephant",
+      "en-GB": "Red Elephant",
+      "zh-Hans-CN": "红相",
+      "zh-Hant-TW": "紅相",
+      "zh-Hant-HK": "紅相"
+    },
+    "piece.black.elephant": {
+      "en-US": "Black Elephant",
+      "en-GB": "Black Elephant",
+      "zh-Hans-CN": "黑象",
+      "zh-Hant-TW": "黑象",
+      "zh-Hant-HK": "黑象"
+    },
+    "piece.red.chariot": {
+      "en-US": "Red Chariot",
+      "en-GB": "Red Chariot",
+      "zh-Hans-CN": "红车",
+      "zh-Hant-TW": "紅車",
+      "zh-Hant-HK": "紅車"
+    },
+    "piece.black.chariot": {
+      "en-US": "Black Chariot",
+      "en-GB": "Black Chariot",
+      "zh-Hans-CN": "黑车",
+      "zh-Hant-TW": "黑車",
+      "zh-Hant-HK": "黑車"
+    },
+    "piece.red.horse": {
+      "en-US": "Red Horse",
+      "en-GB": "Red Horse",
+      "zh-Hans-CN": "红马",
+      "zh-Hant-TW": "紅馬",
+      "zh-Hant-HK": "紅馬"
+    },
+    "piece.black.horse": {
+      "en-US": "Black Horse",
+      "en-GB": "Black Horse",
+      "zh-Hans-CN": "黑马",
+      "zh-Hant-TW": "黑馬",
+      "zh-Hant-HK": "黑馬"
+    },
+    "piece.red.cannon": {
+      "en-US": "Red Cannon",
+      "en-GB": "Red Cannon",
+      "zh-Hans-CN": "红炮",
+      "zh-Hant-TW": "紅炮",
+      "zh-Hant-HK": "紅炮"
+    },
+    "piece.black.cannon": {
+      "en-US": "Black Cannon",
+      "en-GB": "Black Cannon",
+      "zh-Hans-CN": "黑炮",
+      "zh-Hant-TW": "黑砲",
+      "zh-Hant-HK": "黑砲"
+    },
+    "piece.red.soldier": {
+      "en-US": "Red Soldier",
+      "en-GB": "Red Soldier",
+      "zh-Hans-CN": "红兵",
+      "zh-Hant-TW": "紅兵",
+      "zh-Hant-HK": "紅兵"
+    },
+    "piece.black.soldier": {
+      "en-US": "Black Soldier",
+      "en-GB": "Black Soldier",
+      "zh-Hans-CN": "黑卒",
+      "zh-Hant-TW": "黑卒",
+      "zh-Hant-HK": "黑卒"
+    },
+    "state.check": {
+      "en-US": "Check",
+      "en-GB": "Check",
+      "zh-Hans-CN": "将军",
+      "zh-Hant-TW": "將軍",
+      "zh-Hant-HK": "將軍"
+    },
+    "outcome.checkmate": {
+      "en-US": "Checkmate",
+      "en-GB": "Checkmate",
+      "zh-Hans-CN": "绝杀（将死）",
+      "zh-Hant-TW": "絕殺（將死）",
+      "zh-Hant-HK": "絕殺（將死）"
+    },
+    "outcome.no_legal_moves_loss": {
+      "en-US": "Loss — no legal moves (困毙)",
+      "en-GB": "Loss — no legal moves (困毙)",
+      "zh-Hans-CN": "困毙判负",
+      "zh-Hant-TW": "困斃判負",
+      "zh-Hant-HK": "困斃判負"
+    },
+    "outcome.perpetual_check_loss": {
+      "en-US": "Loss — perpetual check",
+      "en-GB": "Loss — perpetual check",
+      "zh-Hans-CN": "长将判负",
+      "zh-Hant-TW": "長將判負",
+      "zh-Hant-HK": "長將判負"
+    },
+    "outcome.perpetual_chase_loss": {
+      "en-US": "Loss — perpetual chase",
+      "en-GB": "Loss — perpetual chase",
+      "zh-Hans-CN": "长捉判负",
+      "zh-Hant-TW": "長捉判負",
+      "zh-Hant-HK": "長捉判負"
+    },
+    "outcome.draw": {
+      "en-US": "Draw",
+      "en-GB": "Draw",
+      "zh-Hans-CN": "和棋",
+      "zh-Hant-TW": "和棋",
+      "zh-Hant-HK": "和棋"
+    },
+    "action.resign": {
+      "en-US": "Resign",
+      "en-GB": "Resign",
+      "zh-Hans-CN": "认输",
+      "zh-Hant-TW": "認輸",
+      "zh-Hant-HK": "認輸"
+    },
+    "action.offer_draw": {
+      "en-US": "Offer draw",
+      "en-GB": "Offer draw",
+      "zh-Hans-CN": "提和",
+      "zh-Hant-TW": "提和",
+      "zh-Hant-HK": "提和"
+    },
+    "action.rematch": {
+      "en-US": "Rematch",
+      "en-GB": "Rematch",
+      "zh-Hans-CN": "再来一局",
+      "zh-Hant-TW": "再來一局",
+      "zh-Hant-HK": "再來一局"
+    },
+    "board.file": {
+      "en-US": "File",
+      "en-GB": "File",
+      "zh-Hans-CN": "路（竖线）",
+      "zh-Hant-TW": "路（直線）",
+      "zh-Hant-HK": "路（直線）"
+    },
+    "board.rank": {
+      "en-US": "Rank",
+      "en-GB": "Rank",
+      "zh-Hans-CN": "横线",
+      "zh-Hant-TW": "橫線",
+      "zh-Hant-HK": "橫線"
+    },
+    "game.move": {
+      "en-US": "Move",
+      "en-GB": "Move",
+      "zh-Hans-CN": "回合",
+      "zh-Hant-TW": "回合",
+      "zh-Hant-HK": "回合"
+    },
+    "game.ply": {
+      "en-US": "Ply",
+      "en-GB": "Ply",
+      "zh-Hans-CN": "步（半回合）",
+      "zh-Hant-TW": "步（半回合）",
+      "zh-Hant-HK": "步（半回合）"
+    },
+    "study.title": {
+      "en-US": "Study",
+      "en-GB": "Study",
+      "zh-Hans-CN": "拆棋研究",
+      "zh-Hant-TW": "拆棋研究",
+      "zh-Hant-HK": "拆棋研究"
+    },
+    "archive.opening": {
+      "en-US": "Opening",
+      "en-GB": "Opening",
+      "zh-Hans-CN": "布局",
+      "zh-Hant-TW": "佈局",
+      "zh-Hant-HK": "佈局"
+    },
+    "archive.identity_correction": {
+      "en-US": "Suggest identity or record correction",
+      "en-GB": "Suggest identity or record correction",
+      "zh-Hans-CN": "提交棋手身份或棋谱勘误",
+      "zh-Hant-TW": "提交棋手身份或棋譜勘誤",
+      "zh-Hant-HK": "提交棋手身份或棋譜勘誤"
+    },
+    "settings.colour_scheme": {
+      "en-US": "Color appearance",
+      "en-GB": "Colour appearance",
+      "zh-Hans-CN": "界面色调",
+      "zh-Hant-TW": "介面色調",
+      "zh-Hant-HK": "介面色調"
+    }
+  }
+}

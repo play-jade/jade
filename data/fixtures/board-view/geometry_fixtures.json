@@ -1,0 +1,1816 @@
+{
+  "centers": [
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 43.0,
+      "screen_y": 495.0,
+      "square": "a0"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 93.0,
+      "screen_y": 495.0,
+      "square": "b0"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 143.0,
+      "screen_y": 495.0,
+      "square": "c0"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 193.0,
+      "screen_y": 495.0,
+      "square": "d0"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 243.0,
+      "screen_y": 495.0,
+      "square": "e0"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 293.0,
+      "screen_y": 495.0,
+      "square": "f0"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 343.0,
+      "screen_y": 495.0,
+      "square": "g0"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 393.0,
+      "screen_y": 495.0,
+      "square": "h0"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 0,
+      "screen_x": 443.0,
+      "screen_y": 495.0,
+      "square": "i0"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 43.0,
+      "screen_y": 445.0,
+      "square": "a1"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 93.0,
+      "screen_y": 445.0,
+      "square": "b1"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 143.0,
+      "screen_y": 445.0,
+      "square": "c1"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 193.0,
+      "screen_y": 445.0,
+      "square": "d1"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 243.0,
+      "screen_y": 445.0,
+      "square": "e1"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 293.0,
+      "screen_y": 445.0,
+      "square": "f1"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 343.0,
+      "screen_y": 445.0,
+      "square": "g1"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 393.0,
+      "screen_y": 445.0,
+      "square": "h1"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 1,
+      "screen_x": 443.0,
+      "screen_y": 445.0,
+      "square": "i1"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 43.0,
+      "screen_y": 395.0,
+      "square": "a2"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 93.0,
+      "screen_y": 395.0,
+      "square": "b2"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 143.0,
+      "screen_y": 395.0,
+      "square": "c2"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 193.0,
+      "screen_y": 395.0,
+      "square": "d2"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 243.0,
+      "screen_y": 395.0,
+      "square": "e2"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 293.0,
+      "screen_y": 395.0,
+      "square": "f2"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 343.0,
+      "screen_y": 395.0,
+      "square": "g2"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 393.0,
+      "screen_y": 395.0,
+      "square": "h2"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 2,
+      "screen_x": 443.0,
+      "screen_y": 395.0,
+      "square": "i2"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 43.0,
+      "screen_y": 345.0,
+      "square": "a3"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 93.0,
+      "screen_y": 345.0,
+      "square": "b3"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 143.0,
+      "screen_y": 345.0,
+      "square": "c3"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 193.0,
+      "screen_y": 345.0,
+      "square": "d3"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 243.0,
+      "screen_y": 345.0,
+      "square": "e3"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 293.0,
+      "screen_y": 345.0,
+      "square": "f3"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 343.0,
+      "screen_y": 345.0,
+      "square": "g3"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 393.0,
+      "screen_y": 345.0,
+      "square": "h3"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 3,
+      "screen_x": 443.0,
+      "screen_y": 345.0,
+      "square": "i3"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 43.0,
+      "screen_y": 295.0,
+      "square": "a4"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 93.0,
+      "screen_y": 295.0,
+      "square": "b4"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 143.0,
+      "screen_y": 295.0,
+      "square": "c4"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 193.0,
+      "screen_y": 295.0,
+      "square": "d4"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 243.0,
+      "screen_y": 295.0,
+      "square": "e4"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 293.0,
+      "screen_y": 295.0,
+      "square": "f4"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 343.0,
+      "screen_y": 295.0,
+      "square": "g4"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 393.0,
+      "screen_y": 295.0,
+      "square": "h4"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 4,
+      "screen_x": 443.0,
+      "screen_y": 295.0,
+      "square": "i4"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 43.0,
+      "screen_y": 245.0,
+      "square": "a5"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 93.0,
+      "screen_y": 245.0,
+      "square": "b5"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 143.0,
+      "screen_y": 245.0,
+      "square": "c5"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 193.0,
+      "screen_y": 245.0,
+      "square": "d5"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 243.0,
+      "screen_y": 245.0,
+      "square": "e5"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 293.0,
+      "screen_y": 245.0,
+      "square": "f5"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 343.0,
+      "screen_y": 245.0,
+      "square": "g5"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 393.0,
+      "screen_y": 245.0,
+      "square": "h5"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 5,
+      "screen_x": 443.0,
+      "screen_y": 245.0,
+      "square": "i5"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 43.0,
+      "screen_y": 195.0,
+      "square": "a6"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 93.0,
+      "screen_y": 195.0,
+      "square": "b6"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 143.0,
+      "screen_y": 195.0,
+      "square": "c6"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 193.0,
+      "screen_y": 195.0,
+      "square": "d6"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 243.0,
+      "screen_y": 195.0,
+      "square": "e6"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 293.0,
+      "screen_y": 195.0,
+      "square": "f6"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 343.0,
+      "screen_y": 195.0,
+      "square": "g6"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 393.0,
+      "screen_y": 195.0,
+      "square": "h6"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 6,
+      "screen_x": 443.0,
+      "screen_y": 195.0,
+      "square": "i6"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 43.0,
+      "screen_y": 145.0,
+      "square": "a7"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 93.0,
+      "screen_y": 145.0,
+      "square": "b7"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 143.0,
+      "screen_y": 145.0,
+      "square": "c7"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 193.0,
+      "screen_y": 145.0,
+      "square": "d7"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 243.0,
+      "screen_y": 145.0,
+      "square": "e7"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 293.0,
+      "screen_y": 145.0,
+      "square": "f7"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 343.0,
+      "screen_y": 145.0,
+      "square": "g7"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 393.0,
+      "screen_y": 145.0,
+      "square": "h7"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 7,
+      "screen_x": 443.0,
+      "screen_y": 145.0,
+      "square": "i7"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 43.0,
+      "screen_y": 95.0,
+      "square": "a8"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 93.0,
+      "screen_y": 95.0,
+      "square": "b8"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 143.0,
+      "screen_y": 95.0,
+      "square": "c8"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 193.0,
+      "screen_y": 95.0,
+      "square": "d8"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 243.0,
+      "screen_y": 95.0,
+      "square": "e8"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 293.0,
+      "screen_y": 95.0,
+      "square": "f8"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 343.0,
+      "screen_y": 95.0,
+      "square": "g8"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 393.0,
+      "screen_y": 95.0,
+      "square": "h8"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 8,
+      "screen_x": 443.0,
+      "screen_y": 95.0,
+      "square": "i8"
+    },
+    {
+      "file": 0,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 43.0,
+      "screen_y": 45.0,
+      "square": "a9"
+    },
+    {
+      "file": 1,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 93.0,
+      "screen_y": 45.0,
+      "square": "b9"
+    },
+    {
+      "file": 2,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 143.0,
+      "screen_y": 45.0,
+      "square": "c9"
+    },
+    {
+      "file": 3,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 193.0,
+      "screen_y": 45.0,
+      "square": "d9"
+    },
+    {
+      "file": 4,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 243.0,
+      "screen_y": 45.0,
+      "square": "e9"
+    },
+    {
+      "file": 5,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 293.0,
+      "screen_y": 45.0,
+      "square": "f9"
+    },
+    {
+      "file": 6,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 343.0,
+      "screen_y": 45.0,
+      "square": "g9"
+    },
+    {
+      "file": 7,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 393.0,
+      "screen_y": 45.0,
+      "square": "h9"
+    },
+    {
+      "file": 8,
+      "orientation": "redbelow",
+      "rank": 9,
+      "screen_x": 443.0,
+      "screen_y": 45.0,
+      "square": "i9"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 443.0,
+      "screen_y": 45.0,
+      "square": "a0"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 393.0,
+      "screen_y": 45.0,
+      "square": "b0"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 343.0,
+      "screen_y": 45.0,
+      "square": "c0"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 293.0,
+      "screen_y": 45.0,
+      "square": "d0"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 243.0,
+      "screen_y": 45.0,
+      "square": "e0"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 193.0,
+      "screen_y": 45.0,
+      "square": "f0"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 143.0,
+      "screen_y": 45.0,
+      "square": "g0"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 93.0,
+      "screen_y": 45.0,
+      "square": "h0"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 0,
+      "screen_x": 43.0,
+      "screen_y": 45.0,
+      "square": "i0"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 443.0,
+      "screen_y": 95.0,
+      "square": "a1"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 393.0,
+      "screen_y": 95.0,
+      "square": "b1"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 343.0,
+      "screen_y": 95.0,
+      "square": "c1"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 293.0,
+      "screen_y": 95.0,
+      "square": "d1"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 243.0,
+      "screen_y": 95.0,
+      "square": "e1"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 193.0,
+      "screen_y": 95.0,
+      "square": "f1"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 143.0,
+      "screen_y": 95.0,
+      "square": "g1"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 93.0,
+      "screen_y": 95.0,
+      "square": "h1"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 1,
+      "screen_x": 43.0,
+      "screen_y": 95.0,
+      "square": "i1"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 443.0,
+      "screen_y": 145.0,
+      "square": "a2"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 393.0,
+      "screen_y": 145.0,
+      "square": "b2"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 343.0,
+      "screen_y": 145.0,
+      "square": "c2"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 293.0,
+      "screen_y": 145.0,
+      "square": "d2"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 243.0,
+      "screen_y": 145.0,
+      "square": "e2"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 193.0,
+      "screen_y": 145.0,
+      "square": "f2"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 143.0,
+      "screen_y": 145.0,
+      "square": "g2"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 93.0,
+      "screen_y": 145.0,
+      "square": "h2"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 2,
+      "screen_x": 43.0,
+      "screen_y": 145.0,
+      "square": "i2"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 443.0,
+      "screen_y": 195.0,
+      "square": "a3"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 393.0,
+      "screen_y": 195.0,
+      "square": "b3"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 343.0,
+      "screen_y": 195.0,
+      "square": "c3"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 293.0,
+      "screen_y": 195.0,
+      "square": "d3"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 243.0,
+      "screen_y": 195.0,
+      "square": "e3"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 193.0,
+      "screen_y": 195.0,
+      "square": "f3"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 143.0,
+      "screen_y": 195.0,
+      "square": "g3"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 93.0,
+      "screen_y": 195.0,
+      "square": "h3"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 3,
+      "screen_x": 43.0,
+      "screen_y": 195.0,
+      "square": "i3"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 443.0,
+      "screen_y": 245.0,
+      "square": "a4"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 393.0,
+      "screen_y": 245.0,
+      "square": "b4"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 343.0,
+      "screen_y": 245.0,
+      "square": "c4"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 293.0,
+      "screen_y": 245.0,
+      "square": "d4"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 243.0,
+      "screen_y": 245.0,
+      "square": "e4"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 193.0,
+      "screen_y": 245.0,
+      "square": "f4"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 143.0,
+      "screen_y": 245.0,
+      "square": "g4"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 93.0,
+      "screen_y": 245.0,
+      "square": "h4"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 4,
+      "screen_x": 43.0,
+      "screen_y": 245.0,
+      "square": "i4"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 443.0,
+      "screen_y": 295.0,
+      "square": "a5"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 393.0,
+      "screen_y": 295.0,
+      "square": "b5"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 343.0,
+      "screen_y": 295.0,
+      "square": "c5"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 293.0,
+      "screen_y": 295.0,
+      "square": "d5"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 243.0,
+      "screen_y": 295.0,
+      "square": "e5"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 193.0,
+      "screen_y": 295.0,
+      "square": "f5"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 143.0,
+      "screen_y": 295.0,
+      "square": "g5"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 93.0,
+      "screen_y": 295.0,
+      "square": "h5"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 5,
+      "screen_x": 43.0,
+      "screen_y": 295.0,
+      "square": "i5"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 443.0,
+      "screen_y": 345.0,
+      "square": "a6"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 393.0,
+      "screen_y": 345.0,
+      "square": "b6"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 343.0,
+      "screen_y": 345.0,
+      "square": "c6"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 293.0,
+      "screen_y": 345.0,
+      "square": "d6"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 243.0,
+      "screen_y": 345.0,
+      "square": "e6"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 193.0,
+      "screen_y": 345.0,
+      "square": "f6"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 143.0,
+      "screen_y": 345.0,
+      "square": "g6"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 93.0,
+      "screen_y": 345.0,
+      "square": "h6"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 6,
+      "screen_x": 43.0,
+      "screen_y": 345.0,
+      "square": "i6"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 443.0,
+      "screen_y": 395.0,
+      "square": "a7"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 393.0,
+      "screen_y": 395.0,
+      "square": "b7"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 343.0,
+      "screen_y": 395.0,
+      "square": "c7"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 293.0,
+      "screen_y": 395.0,
+      "square": "d7"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 243.0,
+      "screen_y": 395.0,
+      "square": "e7"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 193.0,
+      "screen_y": 395.0,
+      "square": "f7"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 143.0,
+      "screen_y": 395.0,
+      "square": "g7"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 93.0,
+      "screen_y": 395.0,
+      "square": "h7"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 7,
+      "screen_x": 43.0,
+      "screen_y": 395.0,
+      "square": "i7"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 443.0,
+      "screen_y": 445.0,
+      "square": "a8"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 393.0,
+      "screen_y": 445.0,
+      "square": "b8"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 343.0,
+      "screen_y": 445.0,
+      "square": "c8"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 293.0,
+      "screen_y": 445.0,
+      "square": "d8"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 243.0,
+      "screen_y": 445.0,
+      "square": "e8"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 193.0,
+      "screen_y": 445.0,
+      "square": "f8"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 143.0,
+      "screen_y": 445.0,
+      "square": "g8"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 93.0,
+      "screen_y": 445.0,
+      "square": "h8"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 8,
+      "screen_x": 43.0,
+      "screen_y": 445.0,
+      "square": "i8"
+    },
+    {
+      "file": 0,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 443.0,
+      "screen_y": 495.0,
+      "square": "a9"
+    },
+    {
+      "file": 1,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 393.0,
+      "screen_y": 495.0,
+      "square": "b9"
+    },
+    {
+      "file": 2,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 343.0,
+      "screen_y": 495.0,
+      "square": "c9"
+    },
+    {
+      "file": 3,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 293.0,
+      "screen_y": 495.0,
+      "square": "d9"
+    },
+    {
+      "file": 4,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 243.0,
+      "screen_y": 495.0,
+      "square": "e9"
+    },
+    {
+      "file": 5,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 193.0,
+      "screen_y": 495.0,
+      "square": "f9"
+    },
+    {
+      "file": 6,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 143.0,
+      "screen_y": 495.0,
+      "square": "g9"
+    },
+    {
+      "file": 7,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 93.0,
+      "screen_y": 495.0,
+      "square": "h9"
+    },
+    {
+      "file": 8,
+      "orientation": "blackbelow",
+      "rank": 9,
+      "screen_x": 43.0,
+      "screen_y": 495.0,
+      "square": "i9"
+    }
+  ],
+  "sample_snapshot": {
+    "adjudication": null,
+    "annotations": [],
+    "check_square": null,
+    "contract_version": 1,
+    "last_move": null,
+    "legal_destinations": [
+      34,
+      43,
+      52,
+      61,
+      88,
+      16,
+      26,
+      24,
+      23,
+      22,
+      21,
+      20
+    ],
+    "orientation": "redbelow",
+    "pieces": [
+      {
+        "file": 0,
+        "glyph": "车",
+        "piece_id": 23,
+        "rank": 0,
+        "role": "chariot",
+        "side": "red",
+        "square": "a0",
+        "visual_token": "piece-23"
+      },
+      {
+        "file": 1,
+        "glyph": "马",
+        "piece_id": 24,
+        "rank": 0,
+        "role": "horse",
+        "side": "red",
+        "square": "b0",
+        "visual_token": "piece-24"
+      },
+      {
+        "file": 2,
+        "glyph": "相",
+        "piece_id": 25,
+        "rank": 0,
+        "role": "elephant",
+        "side": "red",
+        "square": "c0",
+        "visual_token": "piece-25"
+      },
+      {
+        "file": 3,
+        "glyph": "仕",
+        "piece_id": 26,
+        "rank": 0,
+        "role": "advisor",
+        "side": "red",
+        "square": "d0",
+        "visual_token": "piece-26"
+      },
+      {
+        "file": 4,
+        "glyph": "帅",
+        "piece_id": 27,
+        "rank": 0,
+        "role": "general",
+        "side": "red",
+        "square": "e0",
+        "visual_token": "piece-27"
+      },
+      {
+        "file": 5,
+        "glyph": "仕",
+        "piece_id": 28,
+        "rank": 0,
+        "role": "advisor",
+        "side": "red",
+        "square": "f0",
+        "visual_token": "piece-28"
+      },
+      {
+        "file": 6,
+        "glyph": "相",
+        "piece_id": 29,
+        "rank": 0,
+        "role": "elephant",
+        "side": "red",
+        "square": "g0",
+        "visual_token": "piece-29"
+      },
+      {
+        "file": 7,
+        "glyph": "马",
+        "piece_id": 30,
+        "rank": 0,
+        "role": "horse",
+        "side": "red",
+        "square": "h0",
+        "visual_token": "piece-30"
+      },
+      {
+        "file": 8,
+        "glyph": "车",
+        "piece_id": 31,
+        "rank": 0,
+        "role": "chariot",
+        "side": "red",
+        "square": "i0",
+        "visual_token": "piece-31"
+      },
+      {
+        "file": 1,
+        "glyph": "炮",
+        "piece_id": 21,
+        "rank": 2,
+        "role": "cannon",
+        "side": "red",
+        "square": "b2",
+        "visual_token": "piece-21"
+      },
+      {
+        "file": 7,
+        "glyph": "炮",
+        "piece_id": 22,
+        "rank": 2,
+        "role": "cannon",
+        "side": "red",
+        "square": "h2",
+        "visual_token": "piece-22"
+      },
+      {
+        "file": 0,
+        "glyph": "兵",
+        "piece_id": 16,
+        "rank": 3,
+        "role": "soldier",
+        "side": "red",
+        "square": "a3",
+        "visual_token": "piece-16"
+      },
+      {
+        "file": 2,
+        "glyph": "兵",
+        "piece_id": 17,
+        "rank": 3,
+        "role": "soldier",
+        "side": "red",
+        "square": "c3",
+        "visual_token": "piece-17"
+      },
+      {
+        "file": 4,
+        "glyph": "兵",
+        "piece_id": 18,
+        "rank": 3,
+        "role": "soldier",
+        "side": "red",
+        "square": "e3",
+        "visual_token": "piece-18"
+      },
+      {
+        "file": 6,
+        "glyph": "兵",
+        "piece_id": 19,
+        "rank": 3,
+        "role": "soldier",
+        "side": "red",
+        "square": "g3",
+        "visual_token": "piece-19"
+      },
+      {
+        "file": 8,
+        "glyph": "兵",
+        "piece_id": 20,
+        "rank": 3,
+        "role": "soldier",
+        "side": "red",
+        "square": "i3",
+        "visual_token": "piece-20"
+      },
+      {
+        "file": 0,
+        "glyph": "卒",
+        "piece_id": 11,
+        "rank": 6,
+        "role": "soldier",
+        "side": "black",
+        "square": "a6",
+        "visual_token": "piece-11"
+      },
+      {
+        "file": 2,
+        "glyph": "卒",
+        "piece_id": 12,
+        "rank": 6,
+        "role": "soldier",
+        "side": "black",
+        "square": "c6",
+        "visual_token": "piece-12"
+      },
+      {
+        "file": 4,
+        "glyph": "卒",
+        "piece_id": 13,
+        "rank": 6,
+        "role": "soldier",
+        "side": "black",
+        "square": "e6",
+        "visual_token": "piece-13"
+      },
+      {
+        "file": 6,
+        "glyph": "卒",
+        "piece_id": 14,
+        "rank": 6,
+        "role": "soldier",
+        "side": "black",
+        "square": "g6",
+        "visual_token": "piece-14"
+      },
+      {
+        "file": 8,
+        "glyph": "卒",
+        "piece_id": 15,
+        "rank": 6,
+        "role": "soldier",
+        "side": "black",
+        "square": "i6",
+        "visual_token": "piece-15"
+      },
+      {
+        "file": 1,
+        "glyph": "炮",
+        "piece_id": 9,
+        "rank": 7,
+        "role": "cannon",
+        "side": "black",
+        "square": "b7",
+        "visual_token": "piece-9"
+      },
+      {
+        "file": 7,
+        "glyph": "炮",
+        "piece_id": 10,
+        "rank": 7,
+        "role": "cannon",
+        "side": "black",
+        "square": "h7",
+        "visual_token": "piece-10"
+      },
+      {
+        "file": 0,
+        "glyph": "车",
+        "piece_id": 0,
+        "rank": 9,
+        "role": "chariot",
+        "side": "black",
+        "square": "a9",
+        "visual_token": "piece-0"
+      },
+      {
+        "file": 1,
+        "glyph": "马",
+        "piece_id": 1,
+        "rank": 9,
+        "role": "horse",
+        "side": "black",
+        "square": "b9",
+        "visual_token": "piece-1"
+      },
+      {
+        "file": 2,
+        "glyph": "象",
+        "piece_id": 2,
+        "rank": 9,
+        "role": "elephant",
+        "side": "black",
+        "square": "c9",
+        "visual_token": "piece-2"
+      },
+      {
+        "file": 3,
+        "glyph": "士",
+        "piece_id": 3,
+        "rank": 9,
+        "role": "advisor",
+        "side": "black",
+        "square": "d9",
+        "visual_token": "piece-3"
+      },
+      {
+        "file": 4,
+        "glyph": "将",
+        "piece_id": 4,
+        "rank": 9,
+        "role": "general",
+        "side": "black",
+        "square": "e9",
+        "visual_token": "piece-4"
+      },
+      {
+        "file": 5,
+        "glyph": "士",
+        "piece_id": 5,
+        "rank": 9,
+        "role": "advisor",
+        "side": "black",
+        "square": "f9",
+        "visual_token": "piece-5"
+      },
+      {
+        "file": 6,
+        "glyph": "象",
+        "piece_id": 6,
+        "rank": 9,
+        "role": "elephant",
+        "side": "black",
+        "square": "g9",
+        "visual_token": "piece-6"
+      },
+      {
+        "file": 7,
+        "glyph": "马",
+        "piece_id": 7,
+        "rank": 9,
+        "role": "horse",
+        "side": "black",
+        "square": "h9",
+        "visual_token": "piece-7"
+      },
+      {
+        "file": 8,
+        "glyph": "车",
+        "piece_id": 8,
+        "rank": 9,
+        "role": "chariot",
+        "side": "black",
+        "square": "i9",
+        "visual_token": "piece-8"
+      }
+    ],
+    "preferences": {
+      "dark_surface": false,
+      "glyph_set_id": "simplified-prototype-v1",
+      "material_id": "pale-jade",
+      "reduced_motion": false
+    },
+    "presentation_revision": 1,
+    "selection": 25,
+    "side_to_move": "red",
+    "source_revision": 1,
+    "state_id": "41062ac972a1d4bb7c428d85734e1da2cf64e0dd93037b624ec0d7922a3ce6db",
+    "viewport": {
+      "cell_size": 50.0,
+      "height": 540.0,
+      "origin_x": 43.0,
+      "origin_y": 45.0,
+      "padding": 18.0,
+      "width": 486.0
+    }
+  },
+  "schema_version": 1,
+  "viewport": {
+    "cell_size": 50.0,
+    "height": 540.0,
+    "origin_x": 43.0,
+    "origin_y": 45.0,
+    "padding": 18.0,
+    "width": 486.0
+  }
+}

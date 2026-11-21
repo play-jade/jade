@@ -1,0 +1,14 @@
+[
+  {
+    "name": "dark",
+    "prompt": "Edit only the background of the attached Jade Xiangqi avatar to a deep, quiet jade-green charcoal near #1D2421. Preserve the complete pale celadon nephrite disc exactly: same shape, same centered position and scale, same correct engraved Chinese 象 character and charcoal infill, same milky subtle mineral texture, same lighting direction and soft narrow bevel. Preserve the stroke forms and proportions without reinterpretation. Recalculate only the short soft contact shadow naturally for the new dark ground. Produce a single square opaque avatar, 2048x2048, clean full-bleed deep jade background with no border, no wordmark, no extra text, no watermark. This is the dark background variant of the same identity, not a different carving.",
+    "tool": "built-in image generation edit",
+    "date": "2026-11-18"
+  },
+  {
+    "name": "paper",
+    "prompt": "Edit only the background of the attached Jade Xiangqi avatar to clean warm paper ivory near #F3EEE4. Preserve the complete pale celadon nephrite disc exactly: same shape, same centered position and scale, same correct engraved Chinese 象 character and charcoal infill, same milky subtle mineral texture, same lighting direction and soft narrow bevel. Preserve the stroke forms and proportions without reinterpretation. Recalculate only the short soft contact shadow naturally for the new light paper ground, so the pale jade disc has a refined clear edge. Produce a single square opaque avatar, 2048x2048, clean full-bleed warm ivory background with no border, no wordmark, no extra text, no watermark. This is the light background variant of the same identity, not a different carving.",
+    "tool": "built-in image generation edit",
+    "date": "2026-11-18"
+  }
+]

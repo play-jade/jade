@@ -1,0 +1,93 @@
+{
+  "limit_bytes": 1000000,
+  "options": {
+    "Vermilion": {
+      "500": {
+        "file": "Jade_Organization_Avatar.png",
+        "dimensions": [
+          500,
+          500
+        ],
+        "bytes": 289864,
+        "sha256": "a41c7bb08974f03bcab54a7ee0396e00f17a5e5c5646c37f57c4c97ef6b17255",
+        "below_1000000_bytes": true
+      },
+      "256": {
+        "file": "exports/Jade_Avatar_256.png",
+        "dimensions": [
+          256,
+          256
+        ],
+        "bytes": 81604,
+        "sha256": "ca1d6d399bd6af2e14221bdecc845db41912999a36719762f3c5603e4c9b2f96",
+        "below_1000000_bytes": true
+      }
+    },
+    "Dark": {
+      "500": {
+        "file": "Jade_Organization_Avatar_Dark_500.png",
+        "dimensions": [
+          500,
+          500
+        ],
+        "bytes": 277228,
+        "sha256": "c2b9c7a68ccab03e1f5e6cb56d8ba397c1f051930b197a0cfbe41b37a2c2d941",
+        "below_1000000_bytes": true
+      },
+      "256": {
+        "file": "exports/Jade_Avatar_Dark_256.png",
+        "dimensions": [
+          256,
+          256
+        ],
+        "bytes": 79006,
+        "sha256": "31dc86de600b499c2887a9446dd76dd195beb46bf1a266a93899344651c10cec",
+        "below_1000000_bytes": true
+      }
+    },
+    "Paper": {
+      "500": {
+        "file": "Jade_Organization_Avatar_Paper_500.png",
+        "dimensions": [
+          500,
+          500
+        ],
+        "bytes": 284993,
+        "sha256": "f356d23c83f1e52a4854b798b68e094e5ea6e8de93197209507c806ece8de832",
+        "below_1000000_bytes": true
+      },
+      "256": {
+        "file": "exports/Jade_Avatar_Paper_256.png",
+        "dimensions": [
+          256,
+          256
+        ],
+        "bytes": 80645,
+        "sha256": "00bba27f8e0957b01280bcd3440f940096cbfdfe379dc8b4fdee200eb65b5ee9",
+        "below_1000000_bytes": true
+      }
+    },
+    "Flat": {
+      "500": {
+        "file": "Jade_Organization_Avatar_Flat_500.png",
+        "dimensions": [
+          500,
+          500
+        ],
+        "bytes": 28163,
+        "sha256": "aca8d311d5e75c03a86cc1bea8bcaff38fe7e0161c51c9f4997f760f7a6d99c5",
+        "below_1000000_bytes": true
+      },
+      "256": {
+        "file": "exports/Jade_Avatar_Flat_256.png",
+        "dimensions": [
+          256,
+          256
+        ],
+        "bytes": 13828,
+        "sha256": "ffb42c0c94ff42a04e7466faf9a64847280eb25744aeed41936c359b54ac97b0",
+        "below_1000000_bytes": true
+      }
+    }
+  }
+}

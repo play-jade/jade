@@ -1,0 +1,18 @@
+{
+  "insufficient_material_case": {
+    "expected_outcome": "draw",
+    "expected_reason": "insufficient_material_draw",
+    "fen": "4k4/4a4/4b4/9/9/9/9/4B4/4A4/4K4 w - - 0 1",
+    "move_uci": "e2c4"
+  },
+  "kunbi_loss_case": {
+    "expected_outcome": "red_win",
+    "expected_reason": "no_legal_moves_loss",
+    "fen": "3k5/R8/9/9/9/9/9/9/9/P3RK3 w - - 0 1",
+    "move_uci": "a0a1"
+  },
+  "opening_legal_move_count": 44,
+  "rules_profile": "program-2023.11-v1",
+  "schema_version": 1,
+  "starting_fen": "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+}

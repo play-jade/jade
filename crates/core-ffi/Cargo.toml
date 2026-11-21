@@ -1,0 +1,24 @@
+[package]
+name = "core-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+description = "UniFFI Swift/Kotlin bindings and narrow panic-safe C ABI for Windows .NET LibraryImport"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+name = "core_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+xiangqi-core.workspace = true
+archive-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uniffi.workspace = true

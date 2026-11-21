@@ -1,0 +1,16 @@
+[package]
+name = "jade-inference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+description = "Reusable observation/action encoding (8100 labels) and released-model inference contracts for Jade"
+
+[dependencies]
+xiangqi-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true

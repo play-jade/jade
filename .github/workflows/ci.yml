@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-linux-and-gtk:
+    name: Rust Core, Server, Asset Pipeline & Linux GTK4
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK 4, libadwaita, and Cairo development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libcairo2-dev pkg-config xvfb clang
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - name: Check formatting and Clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Verify deterministic board assets and manifests
+        run: cargo run --release -p jade-asset-pipeline -- --verify
+      - name: Build and test C++ UCI and mobile engine bridges
+        run: ./dev/build-engines.sh
+      - name: Run Rust workspace and WASM compilation checks
+        run: |
+          cargo test --workspace
+          cargo build --release -p core-wasm --target wasm32-unknown-unknown
+      - name: Build and test Linux GTK4 + libadwaita native client
+        run: |
+          cargo test --manifest-path apps/linux/Cargo.toml
+          cargo build --release --manifest-path apps/linux/Cargo.toml
+
+  web-nuxt-and-playwright:
+    name: Web (Nuxt 4 + WASM + Playwright)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+      - name: Build core-wasm WebAssembly module
+        run: ./dev/build-wasm.sh
+      - name: Build match-server, install web dependencies, and run unit + SSR + Playwright tests
+        run: |
+          cargo build -p jade-match-server
+          pnpm install --frozen-lockfile
+          pnpm --dir apps/web test:unit
+          pnpm --dir apps/web build
+          pnpm --dir apps/web exec playwright install --with-deps chromium
+          pnpm --dir apps/web test:e2e
+
+  apple-macos-and-ios:
+    name: Apple (macOS AppKit/SwiftUI & iOS/iPadOS UIKit/SwiftUI)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
+      - name: Build core-ffi, UniFFI Swift bindings, and C++ mobile engine library
+        run: |
+          ./dev/build-engines.sh
+          ./dev/build-apple-ffi.sh
+      - name: Test shared Apple UniFFI package and build both macOS and iOS native app bundles
+        run: |
+          (cd packages/apple && swift run JadeCoreBindingsTests)
+          ./dev/run-macos.sh --build-only
+          chmod +x ./dev/build-ios-sim.sh
+          ./dev/build-ios-sim.sh
+
+  android-compose-and-uniffi:
+    name: Android (Kotlin + Jetpack Compose + UniFFI)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Enable KVM and configure Android SDK 35, NDK 27, and API 34 ATD emulator
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+            ls -la /dev/kvm
+          fi
+          SDKMGR="$(ls /usr/local/lib/android/sdk/cmdline-tools/*/bin/sdkmanager | sort -V | tail -n 1)"
+          yes | "$SDKMGR" --sdk_root=/usr/local/lib/android/sdk --licenses >/dev/null || true
+          "$SDKMGR" --sdk_root=/usr/local/lib/android/sdk \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018" \
+            "emulator" \
+            "system-images;android-34;aosp_atd;x86_64"
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$HOME/.android/avd" >> "$GITHUB_ENV"
+          echo "/usr/local/lib/android/sdk/platform-tools" >> "$GITHUB_PATH"
+          echo "/usr/local/lib/android/sdk/emulator" >> "$GITHUB_PATH"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - name: Build arm64-v8a & x86_64 Rust JNI libraries, assemble APK, verify packaged ABIs, and run JVM tests
+        run: |
+          chmod +x ./dev/build-android-ffi.sh
+          ./dev/build-android-ffi.sh
+          gradle -p apps/android assembleDebug assembleDebugAndroidTest testDebugUnitTest --no-daemon
+          APK_PATH="apps/android/app/build/outputs/apk/debug/app-debug.apk"
+          unzip -l "$APK_PATH" | grep -F "lib/arm64-v8a/libcore_ffi.so"
+          unzip -l "$APK_PATH" | grep -F "lib/x86_64/libcore_ffi.so"
+          unzip -l "$APK_PATH" | grep -F "lib/arm64-v8a/libjnidispatch.so"
+          unzip -l "$APK_PATH" | grep -F "lib/x86_64/libjnidispatch.so"
+      - name: Boot Android x86_64 emulator, launch packaged APK, and verify initial board and move
+        run: |
+          cleanup_android() {
+            rc=$?
+            if [ "$rc" -ne 0 ] && [ -f /tmp/jade-emulator.log ]; then
+              echo "=== /tmp/jade-emulator.log ==="
+              cat /tmp/jade-emulator.log || true
+            fi
+            adb emu kill >/dev/null 2>&1 || true
+            if [ -n "${EMU_PID:-}" ]; then
+              kill -9 "$EMU_PID" >/dev/null 2>&1 || true
+            fi
+            adb kill-server >/dev/null 2>&1 || true
+          }
+          trap cleanup_android EXIT
+          mkdir -p "$HOME/.android/avd"
+          adb start-server </dev/null >/dev/null 2>&1
+          AVDMGR="$(ls /usr/local/lib/android/sdk/cmdline-tools/*/bin/avdmanager | sort -V | tail -n 1)"
+          echo "no" | "$AVDMGR" create avd --force --name jade_api34 --package "system-images;android-34;aosp_atd;x86_64" --abi x86_64
+          emulator -avd jade_api34 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 2048 </dev/null >/tmp/jade-emulator.log 2>&1 &
+          EMU_PID=$!
+          BOOTED=0
+          for _ in $(seq 1 90); do
+            if ! kill -0 "$EMU_PID" 2>/dev/null; then
+              echo "Android emulator exited prematurely"
+              exit 1
+            fi
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              BOOTED=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$BOOTED" -ne 1 ]; then
+            echo "Timed out waiting for sys.boot_completed=1"
+            exit 1
+          fi
+          adb shell settings put global window_animation_scale 0 || true
+          adb shell settings put global transition_animation_scale 0 || true
+          adb shell settings put global animator_duration_scale 0 || true
+          adb shell input keyevent 82 || true
+          timeout 300 gradle -p apps/android connectedDebugAndroidTest --no-daemon
+
+  windows-winui-and-c-abi:
+    name: Windows (WinUI 3 / .NET LibraryImport + SafeHandle C ABI)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build core-ffi DLL, run .NET SafeHandle fixture tests, and build WinUI 3 Jade.App
+        shell: bash
+        run: |
+          cargo build --release -p core-ffi
+          dotnet build apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release
+          cp target/release/core_ffi.dll apps/windows/Jade.CoreBridge.Tests/bin/Release/net8.0/core_ffi.dll
+          dotnet test apps/windows/Jade.CoreBridge.Tests/Jade.CoreBridge.Tests.csproj -c Release --no-build
+          msbuild.exe apps/windows/Jade.App/Jade.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64

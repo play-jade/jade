@@ -1,0 +1,7 @@
+packages:
+  - "apps/web"
+  - "engines/wasm-worker"
+  - "protocol"
+
+allowBuilds:
+  esbuild: true

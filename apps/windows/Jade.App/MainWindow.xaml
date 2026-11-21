@@ -1,0 +1,49 @@
+<Window
+    x:Class="Jade.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
+    Title="Jade — Xiangqi · 玉枰象棋">
+
+    <Grid Background="#F3EEE4" x:Name="RootGrid" Padding="24" ColumnSpacing="24">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" MinWidth="360" />
+            <ColumnDefinition Width="340" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0" CornerRadius="12" BorderBrush="#415447" BorderThickness="1" Padding="12">
+            <canvas:CanvasControl
+                x:Name="BoardCanvas"
+                Draw="OnBoardDraw"
+                PointerPressed="OnBoardPointerPressed"
+                KeyDown="OnBoardKeyDown"
+                IsTabStop="True"
+                AutomationProperties.Name="Jade Xiangqi Board (9 files by 10 ranks)"
+                AutomationProperties.LandmarkType="Main" />
+        </Border>
+
+        <StackPanel Grid.Column="1" Spacing="12">
+            <TextBlock Text="Jade · 玉枰象棋" FontSize="24" FontWeight="SemiBold" Foreground="#252A25" />
+            <TextBlock x:Name="StatusText" Text="Red to move · program-2023.11-v1" Foreground="#415447" TextWrapping="Wrap" />
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="New Offline Game" Click="OnNewOfflineGameClick" />
+                <Button Content="Flip Board" Click="OnFlipBoardClick" />
+                <Button Content="Undo" Click="OnUndoClick" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="EngineToggleButton" Content="Analyze Position (UCI)" Click="OnToggleEngineClick" />
+                <ComboBox x:Name="MaterialSelector" SelectedIndex="0" SelectionChanged="OnMaterialChanged">
+                    <ComboBoxItem Content="Pale Jade" Tag="pale-jade" />
+                    <ComboBoxItem Content="Honey Boxwood" Tag="boxwood" />
+                    <ComboBoxItem Content="Ivory Stone" Tag="ivory-stone" />
+                </ComboBox>
+            </StackPanel>
+
+            <TextBlock Text="Moves" FontWeight="SemiBold" Foreground="#252A25" />
+            <ListView x:Name="MoveListView" Height="320" AutomationProperties.Name="Recorded game moves" />
+            <TextBlock x:Name="EngineOutputText" FontFamily="Consolas" FontSize="12" Foreground="#252A25" TextWrapping="Wrap" />
+        </StackPanel>
+    </Grid>
+</Window>

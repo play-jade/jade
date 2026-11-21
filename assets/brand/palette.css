@@ -1,0 +1,11 @@
+:root {
+  --jade-pale-jade: #DCE3CE;
+  --jade-deep-jade: #415447;
+  --jade-charcoal: #252A25;
+  --jade-vermilion: #A54837;
+  --jade-warm-paper: #F3EEE4;
+  --jade-dark-ground: #1D2421;
+}
+
+/* Use charcoal for small labels on pale jade. Vermilion on pale jade
+   is reserved for large graphic accents (4.45:1 flat-token contrast). */

@@ -1,0 +1,16 @@
+[package]
+name = "archive-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license = "Apache-2.0"
+description = "Versioned Jade public archive, game, study, and privacy contracts with a standalone sample fixture provider"
+
+[dependencies]
+xiangqi-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true

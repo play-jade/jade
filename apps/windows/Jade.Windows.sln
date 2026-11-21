@@ -1,0 +1,18 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.12.35527.113
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Jade.CoreBridge", "Jade.CoreBridge\Jade.CoreBridge.csproj", "{8B8D92A0-4B1E-4D1F-A811-100000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Jade.CoreBridge.Tests", "Jade.CoreBridge.Tests\Jade.CoreBridge.Tests.csproj", "{8B8D92A0-4B1E-4D1F-A811-100000000002}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Jade.App", "Jade.App\Jade.App.csproj", "{8B8D92A0-4B1E-4D1F-A811-100000000003}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|ARM64 = Debug|ARM64
+		Release|x64 = Release|x64
+		Release|ARM64 = Release|ARM64
+	EndGlobalSection
+EndGlobal
