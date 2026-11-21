@@ -277,15 +277,20 @@ fn default_material() -> String {
     "pale-jade".to_string()
 }
 
+/// The game at a request's starting position: its FEN, or the standard opening when it names none.
+fn start_game(initial_fen: Option<&str>) -> Result<GameState, String> {
+    let start = initial_fen
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(STARTING_FEN);
+    GameState::from_fen(start, ADOPTED_RULES_PROFILE).map_err(|e| e.to_string())
+}
+
 fn replay_game(
     initial_fen: Option<&str>,
     moves_uci: &[String],
     traditional: bool,
 ) -> Result<(GameState, Vec<String>), String> {
-    let start = initial_fen
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(STARTING_FEN);
-    let mut game = GameState::from_fen(start, ADOPTED_RULES_PROFILE).map_err(|e| e.to_string())?;
+    let mut game = start_game(initial_fen)?;
     let mut zh_moves = Vec::with_capacity(moves_uci.len());
     for (ply, tok) in moves_uci.iter().enumerate() {
         let mv = parse_move_token(game.board(), tok, ply).map_err(|e| e.to_string())?;
@@ -304,10 +309,7 @@ fn notate_moves(
     wxf: bool,
     traditional: bool,
 ) -> Result<serde_json::Value, String> {
-    let start = initial_fen
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(STARTING_FEN);
-    let mut game = GameState::from_fen(start, ADOPTED_RULES_PROFILE).map_err(|e| e.to_string())?;
+    let mut game = start_game(initial_fen)?;
     let mut notations = Vec::with_capacity(moves_uci.len());
     for (ply, tok) in moves_uci.iter().enumerate() {
         let step = parse_move_token(game.board(), tok, ply).and_then(|mv| {
