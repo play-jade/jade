@@ -325,6 +325,30 @@ const plates = computed(() => {
   }))
 })
 
+interface IconAction {
+  testid: string
+  label: string
+  /** SVG path data on a 20 × 20 grid. */
+  paths: string[]
+  disabled?: boolean
+  run: () => void
+}
+
+/** The glass capsule's controls, as on macOS. */
+const capsuleActions = computed<IconAction[]>(() => [
+  { testid: 'btn-flip', label: t('board.flip'), paths: ['M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3'], run: () => (redBelow.value = !redBelow.value) },
+  { testid: 'btn-undo', label: t('board.undo'), paths: ['M7 5 3.5 8.5 7 12', 'M3.5 8.5H12a4.5 4.5 0 0 1 0 9H9'], disabled: activeMovesUci.value.length === 0, run: handleUndo },
+  { testid: 'btn-reset', label: t('board.new_local'), paths: ['M4 10a6 6 0 1 0 1.8-4.3', 'M4 3.5v3h3'], disabled: mainlineMovesUci.value.length === 0 && branchOriginPly.value === null, run: handleReset },
+  { testid: 'btn-export-offline-pgn', label: t('export.pgn'), paths: ['M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14.5v2h12v-2'], disabled: activeMovesUci.value.length === 0, run: exportOfflinePgn },
+])
+
+const scrubActions = computed<IconAction[]>(() => [
+  { testid: 'scrub-start', label: 'First move', paths: ['M5 4v12M15 4l-7 6 7 6'], run: () => stepToPly(0) },
+  { testid: 'scrub-prev', label: 'Previous move', paths: ['M12.5 4 6.5 10l6 6'], run: () => stepToPly(cursorPly.value - 1) },
+  { testid: 'scrub-next', label: 'Next move', paths: ['m7.5 4 6 6-6 6'], run: () => stepToPly(cursorPly.value + 1) },
+  { testid: 'scrub-end', label: 'Last move', paths: ['M15 4v12M5 4l7 6-7 6'], run: () => stepToPly(mainlineMovesUci.value.length) },
+])
+
 /** Moves paired by move number, Red's ply then Black's. */
 const moveRows = computed(() => {
   const rows: { number: number; plies: typeof displayedMoves.value }[] = []
@@ -373,41 +397,20 @@ const moveRows = computed(() => {
 
       <!-- The only on-board controls: one glass capsule, as on macOS. -->
       <div class="capsule" role="toolbar" aria-label="Board">
-        <button type="button" class="jade-icon-btn" data-testid="btn-flip" :aria-label="t('board.flip')" :title="t('board.flip')" @click="redBelow = !redBelow">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3" /></svg>
-        </button>
         <button
+          v-for="a in capsuleActions"
+          :key="a.testid"
           type="button"
           class="jade-icon-btn"
-          data-testid="btn-undo"
-          :aria-label="t('board.undo')"
-          :title="t('board.undo')"
-          :disabled="activeMovesUci.length === 0"
-          @click="handleUndo"
+          :data-testid="a.testid"
+          :aria-label="a.label"
+          :title="a.label"
+          :disabled="a.disabled"
+          @click="a.run"
         >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 5 3.5 8.5 7 12" /><path d="M3.5 8.5H12a4.5 4.5 0 0 1 0 9H9" /></svg>
-        </button>
-        <button
-          type="button"
-          class="jade-icon-btn"
-          data-testid="btn-reset"
-          :aria-label="t('board.new_local')"
-          :title="t('board.new_local')"
-          :disabled="mainlineMovesUci.length === 0 && branchOriginPly === null"
-          @click="handleReset"
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a6 6 0 1 0 1.8-4.3" /><path d="M4 3.5v3h3" /></svg>
-        </button>
-        <button
-          type="button"
-          class="jade-icon-btn"
-          data-testid="btn-export-offline-pgn"
-          :aria-label="t('export.pgn')"
-          :title="t('export.pgn')"
-          :disabled="activeMovesUci.length === 0"
-          @click="exportOfflinePgn"
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14.5v2h12v-2" /></svg>
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path v-for="d in a.paths" :key="d" :d="d" />
+          </svg>
         </button>
       </div>
 
@@ -442,17 +445,18 @@ const moveRows = computed(() => {
         <p v-else class="empty-moves">Your moves will appear here.</p>
 
         <div class="scrub" aria-label="Replay">
-          <button type="button" class="jade-icon-btn" data-testid="scrub-start" aria-label="First move" @click="stepToPly(0)">
-            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v12M15 4l-7 6 7 6" /></svg>
-          </button>
-          <button type="button" class="jade-icon-btn" data-testid="scrub-prev" aria-label="Previous move" @click="stepToPly(cursorPly - 1)">
-            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 4 6.5 10l6 6" /></svg>
-          </button>
-          <button type="button" class="jade-icon-btn" data-testid="scrub-next" aria-label="Next move" @click="stepToPly(cursorPly + 1)">
-            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7.5 4 6 6-6 6" /></svg>
-          </button>
-          <button type="button" class="jade-icon-btn" data-testid="scrub-end" aria-label="Last move" @click="stepToPly(mainlineMovesUci.length)">
-            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4v12M5 4l7 6-7 6" /></svg>
+          <button
+            v-for="a in scrubActions"
+            :key="a.testid"
+            type="button"
+            class="jade-icon-btn"
+            :data-testid="a.testid"
+            :aria-label="a.label"
+            @click="a.run"
+          >
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path v-for="d in a.paths" :key="d" :d="d" />
+            </svg>
           </button>
         </div>
       </section>
