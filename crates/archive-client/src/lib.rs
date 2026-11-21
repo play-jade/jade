@@ -374,6 +374,32 @@ mod tests {
     }
 
     #[test]
+    fn sample_games_marked_complete_replay_every_recorded_move() {
+        let provider = SampleArchiveProvider::new_embedded();
+        for game in &provider.manifest().games {
+            if game.replay_validity != "valid_prefix_complete" {
+                continue;
+            }
+            let mut state = GameState::from_fen(&game.initial_fen, ADOPTED_RULES_PROFILE).unwrap();
+            for (ply, uci) in game.moves_uci.iter().enumerate() {
+                let mv = Move::from_uci_or_iccs(uci).unwrap();
+                assert!(
+                    state.apply_move(mv).is_ok(),
+                    "{} ply {} ({uci}) does not replay",
+                    game.game_id,
+                    ply + 1
+                );
+            }
+            assert_eq!(
+                game.moves_uci.len(),
+                game.moves_chinese.len(),
+                "{}",
+                game.game_id
+            );
+        }
+    }
+
+    #[test]
     fn sample_provider_counts_deduplicated_first_continuations() {
         let provider = SampleArchiveProvider::new_embedded();
         let resp = provider.query_position(STARTING_FEN).unwrap();

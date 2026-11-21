@@ -370,6 +370,29 @@ export async function hitTestBoard(params: {
   return res.square
 }
 
+export interface NotatedMoves {
+  /** Notation for each move that replays, in order. */
+  notations: string[]
+  /** Zero-based index of the first move that does not replay, or null when the whole record replays. */
+  invalid_ply: number | null
+  invalid_reason: string | null
+}
+
+export function notateMoves(params: {
+  fen?: string
+  movesUci: string[]
+  wxf: boolean
+  traditionalGlyphs?: boolean
+}): Promise<NotatedMoves> {
+  return callCoreJson<NotatedMoves>({
+    op: 'notate_moves',
+    fen: params.fen,
+    moves_uci: params.movesUci,
+    wxf: params.wxf,
+    traditional_glyphs: params.traditionalGlyphs ?? false,
+  })
+}
+
 export function searchSampleArchive(query = ''): Promise<ArchiveSearchResult> {
   return callCoreJson<ArchiveSearchResult>({ op: 'archive_search', query })
 }

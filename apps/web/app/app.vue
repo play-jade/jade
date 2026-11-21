@@ -31,7 +31,8 @@ useHead(() => ({
             height="30"
             class="jade-signet"
           />
-          <span class="jade-brand-title">{{ t('product.title') }}</span>
+          <!-- The brand name; the glossary's product.title is the descriptive title for metadata. -->
+          <span class="jade-brand-title">Jade</span>
         </NuxtLink>
 
         <nav class="jade-nav" aria-label="Primary">
@@ -75,6 +76,8 @@ useHead(() => ({
         <label class="jade-pref-field">
           <span class="sr-only">Notation</span>
           <select v-model="notationMode" data-testid="pref-notation" class="jade-select">
+            <option value="auto">Notation: Auto</option>
+            <option value="wxf">WXF</option>
             <option value="chinese">中文纵线</option>
             <option value="uci">Coord (UCI)</option>
           </select>

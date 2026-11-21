@@ -1,5 +1,6 @@
 import { computed, onMounted, watch } from 'vue'
 import {
+  resolveNotationDialect,
   resolveTraditionalScript,
   tTerm,
   type MaterialFamilyId,
@@ -15,11 +16,12 @@ export function usePreferences() {
   const pieceScript = useState<PieceScriptMode>('jade.pieceScript', () => 'auto')
   const material = useState<MaterialFamilyId>('jade.material', () => 'pale-jade')
   const darkSurface = useState<boolean>('jade.darkSurface', () => false)
-  const notationMode = useState<NotationDisplayMode>('jade.notationMode', () => 'chinese')
+  const notationMode = useState<NotationDisplayMode>('jade.notationMode', () => 'auto')
   const soundEnabled = useState<boolean>('jade.soundEnabled', () => true)
   const reducedMotion = useState<boolean>('jade.reducedMotion', () => false)
 
   const traditionalGlyphs = computed(() => resolveTraditionalScript(locale.value, pieceScript.value))
+  const notationDialect = computed(() => resolveNotationDialect(locale.value, notationMode.value))
   const t = (key: string) => tTerm(key, locale.value)
 
   onMounted(() => {
@@ -31,7 +33,8 @@ export function usePreferences() {
         if (parsed.pieceScript) pieceScript.value = parsed.pieceScript
         if (parsed.material) material.value = parsed.material
         if (typeof parsed.darkSurface === 'boolean') darkSurface.value = parsed.darkSurface
-        if (parsed.notationMode) notationMode.value = parsed.notationMode
+        // `notation` replaces `notationMode`, which every visitor stored as `chinese` by default before `auto` existed.
+        if (parsed.notation) notationMode.value = parsed.notation
         if (typeof parsed.soundEnabled === 'boolean') soundEnabled.value = parsed.soundEnabled
       }
       if (typeof window !== 'undefined' && window.matchMedia) {
@@ -52,7 +55,7 @@ export function usePreferences() {
               pieceScript: pieceScript.value,
               material: material.value,
               darkSurface: darkSurface.value,
-              notationMode: notationMode.value,
+              notation: notationMode.value,
               soundEnabled: soundEnabled.value,
             }),
           )
@@ -72,6 +75,7 @@ export function usePreferences() {
     notationMode,
     soundEnabled,
     reducedMotion,
+    notationDialect,
     traditionalGlyphs,
     t,
   }

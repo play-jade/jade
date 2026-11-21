@@ -27,7 +27,6 @@ const {
   locale,
   material,
   darkSurface,
-  notationMode,
   reducedMotion,
   traditionalGlyphs,
   t,
@@ -35,6 +34,7 @@ const {
 
 const matchId = computed(() => String(route.params.id || ''))
 const snapshot = ref<MatchSnapshot | null>(null)
+const { labels: moveLabels } = useNotatedMoves(computed(() => snapshot.value?.moves_uci ?? []))
 const accessDenied = ref(false)
 const loadError = ref<string | null>(null)
 
@@ -232,7 +232,7 @@ async function exportMatchPgn() {
               :class="{ current: branchOriginPly === null && cursorPly === i + 1 }"
               @click="stepToPly(i + 1)"
             >
-              {{ i + 1 }}. {{ notationMode === 'chinese' ? snapshot.moves_chinese[i] || u : u }}
+              {{ i + 1 }}. {{ moveLabels[i] ?? u }}
             </li>
           </ol>
           <div class="links-row">
