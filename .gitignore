@@ -29,6 +29,7 @@ apps/windows/**/obj/
 *.db-wal
 *.sqlite
 *.sqlite3
+*.owner.lock
 .env
 .env.*
 !.env.example
