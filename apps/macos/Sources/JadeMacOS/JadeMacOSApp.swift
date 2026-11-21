@@ -91,7 +91,8 @@ enum LamplitTheme {
     static let ground = Color(red: 0x1D / 255.0, green: 0x24 / 255.0, blue: 0x21 / 255.0)
     static let paper = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0)
     static let paleJade = Color(red: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0)
-    static let vermilionOnDark = Color(red: 0xC4 / 255.0, green: 0x5A / 255.0, blue: 0x45 / 255.0)
+    /// Vermilion lightened for small text on the dark ground; the web uses the same `#E69383`.
+    static let vermilionOnDark = Color(red: 0xE6 / 255.0, green: 0x93 / 255.0, blue: 0x83 / 255.0)
     static let mutedText = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0).opacity(0.62)
     static let hairline = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0).opacity(0.12)
 
@@ -191,22 +192,17 @@ struct SidePlate: View {
     @ObservedObject var controller: MacBoardController
     let side: String
 
-    var body: some View {
-        let toMove = controller.sideToMove == side && controller.outcomeText == nil
-        let isEngine = side == "black" && controller.autoEngineBlack
-        let title = side == "red" ? "Red" : "Black"
+    private var toMove: Bool { controller.sideToMove == side && controller.outcomeText == nil }
+    private var isEngine: Bool { side == "black" && controller.autoEngineBlack }
+    private var title: String { side == "red" ? "Red" : "Black" }
+    private var caption: String {
         let who = isEngine ? "Engine" : "This Mac"
+        return (toMove ? "\(who) · to move" : who).uppercased()
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(toMove ? LamplitTheme.paleJade : LamplitTheme.hairline)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: toMove ? LamplitTheme.paleJade.opacity(0.6) : .clear, radius: 6)
-                Text("\(who)\(toMove ? " · to move" : "")".uppercased())
-                    .font(.system(size: 11, weight: .medium))
-                    .tracking(1.8)
-                    .foregroundStyle(toMove ? LamplitTheme.paleJade : LamplitTheme.mutedText)
-            }
+            captionRow
             Text(title)
                 .font(LamplitTheme.display(56))
                 .foregroundStyle(toMove ? LamplitTheme.paper : LamplitTheme.mutedText)
@@ -215,66 +211,135 @@ struct SidePlate: View {
                     .font(.system(size: 13))
                     .foregroundStyle(LamplitTheme.mutedText)
             }
-            let taken = controller.capturedGlyphs(ownedBy: side)
-            if !taken.isEmpty {
-                Text(taken.joined(separator: " "))
-                    .font(.system(size: 17, weight: .semibold, design: .serif))
-                    .foregroundStyle(LamplitTheme.mutedText)
-                    .accessibilityLabel("\(title) has lost \(taken.count) pieces")
-            }
+            capturedRow
         }
         .animation(.easeOut(duration: 0.18), value: toMove)
     }
+
+    private var captionRow: some View {
+        let dot: Color = toMove ? LamplitTheme.paleJade : LamplitTheme.hairline
+        let glow: Color = toMove ? LamplitTheme.paleJade.opacity(0.6) : .clear
+        let ink: Color = toMove ? LamplitTheme.paleJade : LamplitTheme.mutedText
+        return HStack(spacing: 10) {
+            Circle()
+                .fill(dot)
+                .frame(width: 8, height: 8)
+                .shadow(color: glow, radius: 6)
+            Text(caption)
+                .font(.system(size: 11, weight: .medium))
+                .tracking(1.8)
+                .foregroundStyle(ink)
+        }
+    }
+
+    @ViewBuilder
+    private var capturedRow: some View {
+        let taken = controller.capturedGlyphs(ownedBy: side)
+        if !taken.isEmpty {
+            Text(taken.joined(separator: " "))
+                .font(.system(size: 17, weight: .semibold, design: .serif))
+                .foregroundStyle(LamplitTheme.mutedText)
+                .accessibilityLabel("\(title) has lost \(taken.count) pieces")
+        }
+    }
+}
+
+/// One move number's Red and Black plies, and which of them is the latest.
+struct MoveRow: Identifiable {
+    let number: Int
+    let red: String
+    let black: String
+    let redIsLatest: Bool
+    let blackIsLatest: Bool
+    var id: Int { number }
 }
 
 struct MovesColumn: View {
     @ObservedObject var controller: MacBoardController
 
-    var body: some View {
-        let rows = stride(from: 0, to: controller.movesNotated.count, by: 2).map { i in
-            (number: i / 2 + 1,
-             red: controller.movesNotated[i],
-             black: i + 1 < controller.movesNotated.count ? controller.movesNotated[i + 1] : "")
+    /// Built outside `body` and typed explicitly, so the view body stays small enough for every Swift type checker.
+    private var rows: [MoveRow] {
+        let moves = controller.movesNotated
+        let lastPly = moves.count - 1
+        var out: [MoveRow] = []
+        var i = 0
+        while i < moves.count {
+            let black = i + 1 < moves.count ? moves[i + 1] : ""
+            out.append(MoveRow(number: i / 2 + 1, red: moves[i], black: black,
+                               redIsLatest: i == lastPly, blackIsLatest: i + 1 == lastPly))
+            i += 2
         }
-        let lastPly = controller.movesNotated.count - 1
+        return out
+    }
+
+    private var footerText: String {
+        if let outcome = controller.outcomeText { return outcome }
+        return controller.inCheck ? "Check" : "Offline · Untimed"
+    }
+
+    private var footerColor: Color {
+        let alert = controller.inCheck || controller.outcomeText != nil
+        return alert ? LamplitTheme.vermilionOnDark : LamplitTheme.mutedText
+    }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer(minLength: 64)
-            ScrollViewReader { proxy in
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(rows, id: \.number) { row in
-                            HStack(alignment: .firstTextBaseline, spacing: 0) {
-                                Text("\(row.number)")
-                                    .font(.system(size: 12).monospacedDigit())
-                                    .foregroundStyle(LamplitTheme.mutedText)
-                                    .frame(width: 32, alignment: .leading)
-                                moveText(row.red, current: (row.number - 1) * 2 == lastPly)
-                                moveText(row.black, current: (row.number - 1) * 2 + 1 == lastPly)
-                            }
-                            .padding(.vertical, 6)
-                            .id(row.number)
-                        }
-                    }
-                }
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: controller.movesNotated.count) {
-                    if let last = rows.last { proxy.scrollTo(last.number, anchor: .bottom) }
-                }
-            }
+            movesList
             Rectangle().fill(LamplitTheme.hairline).frame(height: 1).padding(.vertical, 14)
-            Text(controller.outcomeText ?? (controller.inCheck ? "Check" : "Offline · Untimed"))
+            Text(footerText)
                 .font(.system(size: 12))
-                .foregroundStyle(controller.inCheck || controller.outcomeText != nil
-                    ? LamplitTheme.vermilionOnDark : LamplitTheme.mutedText)
+                .foregroundStyle(footerColor)
         }
         .padding(.trailing, 56)
         .padding(.bottom, 96)
     }
 
-    private func moveText(_ text: String, current: Bool) -> some View {
+    private var movesList: some View {
+        let rows = self.rows
+        return ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in
+                        MoveRowView(row: row)
+                    }
+                }
+            }
+            .defaultScrollAnchor(.bottom)
+            .onChange(of: controller.movesNotated.count) {
+                if let last = rows.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+        }
+    }
+}
+
+struct MoveRowView: View {
+    let row: MoveRow
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text("\(row.number)")
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(LamplitTheme.mutedText)
+                .frame(width: 32, alignment: .leading)
+            MoveText(text: row.red, current: row.redIsLatest)
+            MoveText(text: row.black, current: row.blackIsLatest)
+        }
+        .padding(.vertical, 6)
+        .id(row.id)
+    }
+}
+
+struct MoveText: View {
+    let text: String
+    let current: Bool
+
+    var body: some View {
+        let weight: Font.Weight = current ? .semibold : .regular
+        let color: Color = current ? LamplitTheme.paper : LamplitTheme.paper.opacity(0.78)
         Text(text)
-            .font(.system(size: 15, weight: current ? .semibold : .regular).monospacedDigit())
-            .foregroundStyle(current ? LamplitTheme.paper : LamplitTheme.paper.opacity(0.78))
+            .font(.system(size: 15, weight: weight).monospacedDigit())
+            .foregroundStyle(color)
             .underline(current, color: LamplitTheme.paleJade.opacity(0.6))
             .frame(maxWidth: .infinity, alignment: .leading)
     }
