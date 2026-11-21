@@ -26,7 +26,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
   <key>CFBundleDisplayName</key>
-  <string>Jade — 玉枰象棋</string>
+  <string>Jade</string>
   <key>CFBundleExecutable</key>
   <string>JadeMacOS</string>
   <key>CFBundleIdentifier</key>
