@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
+import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -165,33 +166,67 @@ async function exportMatchPgn() {
   link.remove()
   URL.revokeObjectURL(url)
 }
+
+// The replay table: side plates, the capsule's replay controls, and paired moves, as on the home page.
+const plates = computed(() => {
+  const pieces = boardData.value?.snapshot.pieces ?? []
+  const toMove = boardData.value?.snapshot.side_to_move
+  return plateOrder(redBelow.value).map((side) => ({
+    side,
+    name: sideName(side, locale.value),
+    toMove: branchOriginPly.value === null && toMove === side && cursorPly.value < (snapshot.value?.moves_uci.length ?? 0),
+    captured: capturedFaces(pieces, side, traditionalGlyphs.value),
+  }))
+})
+
+const replayActions = computed(() => {
+  const end = snapshot.value?.moves_uci.length ?? 0
+  return [
+    { key: 'first', label: 'First move', paths: ['M5 4v12M15 4l-7 6 7 6'], ply: 0 },
+    { key: 'prev', label: 'Previous move', paths: ['M12.5 4 6.5 10l6 6'], ply: cursorPly.value - 1 },
+    { key: 'next', label: 'Next move', paths: ['m7.5 4 6 6-6 6'], ply: cursorPly.value + 1 },
+    { key: 'last', label: 'Last move', paths: ['M15 4v12M5 4l7 6-7 6'], ply: end },
+  ]
+})
+
+const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveLabels.value))
 </script>
 
 <template>
   <div class="replay-wrap" data-testid="match-replay-page">
-    <section v-if="accessDenied" class="jade-card">
-      <h1>Private Match Record · {{ matchId }}</h1>
+    <section v-if="accessDenied" class="notice">
+      <h1 class="notice-title">This game is private</h1>
       <p>
-        Personal games are private by default. Creating or copying a position link does not alter access;
-        both participants must opt into unlisted or public sharing before others can view this replay.
+        Personal games are private by default. Copying a position link does not change that; both players must
+        choose unlisted or public sharing before others can view this replay.
       </p>
-      <NuxtLink to="/" class="jade-btn">Return to Board</NuxtLink>
+      <NuxtLink to="/" class="jade-btn">Back to the board</NuxtLink>
     </section>
 
-    <section v-else-if="loadError" class="jade-card">
-      <h1>Match Replay</h1>
+    <section v-else-if="loadError" class="notice">
+      <h1 class="notice-title">This replay could not load</h1>
       <p>{{ loadError }}</p>
-      <NuxtLink to="/" class="jade-btn">Return to Board</NuxtLink>
+      <NuxtLink to="/" class="jade-btn">Back to the board</NuxtLink>
     </section>
 
-    <div v-else-if="snapshot" class="replay-grid">
-      <div class="board-col">
-        <div class="status-row">
-          <strong>{{ snapshot.outcome || snapshot.status }}</strong>
-          <span v-if="snapshot.reason_code">({{ snapshot.reason_code }})</span>
-          <span class="vis-pill">Visibility: {{ snapshot.visibility }}</span>
-        </div>
+    <div v-else-if="snapshot" class="jade-table">
+      <aside class="jade-plates">
+        <template v-for="(plate, i) in plates" :key="plate.side">
+          <SidePlate
+            :name="plate.name"
+            :caption="plate.toMove ? (plate.side === 'black' ? t('turn.black') : t('turn.red')) : ''"
+            :to-move="plate.toMove"
+            :captured="plate.captured"
+          />
+          <div v-if="i === 0" class="result">
+            <span>{{ snapshot.outcome || snapshot.status }}</span>
+            <span v-if="snapshot.reason_code"> · {{ snapshot.reason_code.replace(/_/g, ' ') }}</span>
+            <span class="visibility"> · {{ snapshot.visibility }}</span>
+          </div>
+        </template>
+      </aside>
 
+      <div class="jade-table-stage">
         <XiangqiBoard
           v-if="boardData"
           :snapshot="boardData.snapshot"
@@ -204,42 +239,56 @@ async function exportMatchPgn() {
           @play-move="handleTryMove"
         />
 
-        <div class="toolbar">
-          <button type="button" class="jade-btn" @click="redBelow = !redBelow">{{ t('board.flip') }}</button>
-          <button type="button" class="jade-btn" @click="stepToPly(0)">|&lt;</button>
-          <button type="button" class="jade-btn" @click="stepToPly(cursorPly - 1)">&lt;</button>
-          <button type="button" class="jade-btn" @click="stepToPly(cursorPly + 1)">&gt;</button>
-          <button type="button" class="jade-btn" @click="stepToPly(snapshot.moves_uci.length)">&gt;|</button>
-          <button type="button" class="jade-btn" data-testid="btn-export-match-pgn" @click="exportMatchPgn">
-            {{ t('export.pgn') }}
-          </button>
+        <div class="jade-capsule" role="toolbar" aria-label="Replay">
+          <IconButton :label="t('board.flip')" :paths="['M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3']" @click="redBelow = !redBelow" />
+          <IconButton
+            v-for="a in replayActions.slice(0, 2)"
+            :key="a.key"
+            :label="a.label"
+            :paths="a.paths"
+            @click="stepToPly(a.ply)"
+          />
+          <span class="ply-indicator">{{ cursorPly }} / {{ snapshot.moves_uci.length }}</span>
+          <IconButton
+            v-for="a in replayActions.slice(2)"
+            :key="a.key"
+            :label="a.label"
+            :paths="a.paths"
+            @click="stepToPly(a.ply)"
+          />
+          <IconButton
+            data-testid="btn-export-match-pgn"
+            :label="t('export.pgn')"
+            :paths="['M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14.5v2h12v-2']"
+            @click="exportMatchPgn"
+          />
         </div>
       </div>
 
-      <aside class="side-col">
-        <section class="jade-card">
-          <h2>Move List · Ply {{ cursorPly }} / {{ snapshot.moves_uci.length }}</h2>
+      <aside class="jade-ledger">
+        <section class="moves" aria-label="Moves">
           <div v-if="branchOriginPly !== null" class="branch-note">
-            <span>Exploring variation from ply {{ branchOriginPly }} ({{ branchMovesUci.join(' ') }})</span>
-            <button type="button" class="jade-pill-btn" @click="stepToPly(branchOriginPly)">
-              Restore original line
-            </button>
+            <span>Trying a line from ply {{ branchOriginPly }}</span>
+            <button type="button" class="jade-pill-btn" @click="stepToPly(branchOriginPly)">Back to the game</button>
           </div>
-          <ol class="moves">
-            <li
-              v-for="(u, i) in snapshot.moves_uci"
-              :key="`${i}-${u}`"
-              :class="{ current: branchOriginPly === null && cursorPly === i + 1 }"
-              @click="stepToPly(i + 1)"
-            >
-              {{ i + 1 }}. {{ moveLabels[i] ?? u }}
+          <ol class="jade-move-list">
+            <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
+              <span class="jade-move-number">{{ row.number }}.</span>
+              <button
+                v-for="m in row.plies"
+                :key="m.ply"
+                type="button"
+                class="jade-move"
+                :class="{ current: branchOriginPly === null && cursorPly === m.ply }"
+                @click="stepToPly(m.ply)"
+              >
+                {{ m.label }}
+              </button>
             </li>
           </ol>
-          <div class="links-row">
-            <NuxtLink :to="`/invite/${snapshot.invitation_code}`" class="jade-btn">
-              Open Room / Rematch
-            </NuxtLink>
-          </div>
+          <NuxtLink :to="`/invite/${snapshot.invitation_code}`" class="jade-btn room-link">
+            Open the room · Rematch
+          </NuxtLink>
         </section>
 
         <EngineAnalysisCard
@@ -254,39 +303,47 @@ async function exportMatchPgn() {
 </template>
 
 <style scoped>
-.replay-grid {
-  display: grid;
-  grid-template-columns: minmax(300px, 540px) minmax(290px, 1fr);
-  gap: 24px;
-  align-items: start;
-}
-
-@media (max-width: 880px) {
-  .replay-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.board-col,
-.side-col {
-  min-width: 0;
+.notice {
+  max-width: 560px;
+  margin: 48px auto;
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 12px;
+  color: var(--jade-muted);
 }
 
-.status-row,
-.toolbar,
-.links-row {
+.notice-title {
+  margin: 0;
+  font-family: var(--jade-display);
+  font-weight: 400;
+  font-size: 2.2rem;
+  color: var(--jade-paper);
+}
+
+.result {
+  font-size: 0.85rem;
+  color: var(--jade-paper);
+  text-transform: capitalize;
+}
+
+.visibility {
+  color: var(--jade-muted);
+}
+
+.ply-indicator {
+  padding: 0 8px;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--jade-muted);
+}
+
+.moves {
+  flex: 1;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.vis-pill {
-  font-size: 0.8rem;
-  opacity: 0.75;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .branch-note {
@@ -294,32 +351,12 @@ async function exportMatchPgn() {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(65, 84, 71, 0.14);
-  font-size: 0.82rem;
-  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: var(--jade-pale);
 }
 
-.moves {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.moves li {
-  padding: 4px 8px;
-  border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-
-.moves li.current {
-  background: #415447;
-  color: #F3EEE4;
+.room-link {
+  align-self: flex-start;
+  text-decoration: none;
 }
 </style>

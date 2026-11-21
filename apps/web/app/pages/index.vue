@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
 import { loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
+import { capturedFaces, plateOrder, sideName, type Side } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -275,21 +276,73 @@ const verdictBanner = computed(() => {
   if (adj.reason === 'perpetual_chase') return `${t('outcome.perpetual_chase_loss')} — ${adj.detail}`
   return `${adj.outcome}: ${adj.detail}`
 })
+
+const sideToMove = computed<Side>(() => (boardData.value?.snapshot.side_to_move === 'black' ? 'black' : 'red'))
+const plates = computed(() => {
+  return plateOrder(redBelow.value).map((side) => ({
+    side,
+    name: sideName(side, locale.value),
+    toMove: side === sideToMove.value && !boardData.value?.snapshot.adjudication,
+    captured: capturedFaces(boardData.value?.snapshot.pieces ?? [], side, traditionalGlyphs.value),
+  }))
+})
+
+interface IconAction {
+  testid: string
+  label: string
+  /** SVG path data on a 20 × 20 grid. */
+  paths: string[]
+  disabled?: boolean
+  run: () => void
+}
+
+/** The glass capsule's controls, as on macOS. */
+const capsuleActions = computed<IconAction[]>(() => [
+  { testid: 'btn-flip', label: t('board.flip'), paths: ['M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3'], run: () => (redBelow.value = !redBelow.value) },
+  { testid: 'btn-undo', label: t('board.undo'), paths: ['M7 5 3.5 8.5 7 12', 'M3.5 8.5H12a4.5 4.5 0 0 1 0 9H9'], disabled: activeMovesUci.value.length === 0, run: handleUndo },
+  { testid: 'btn-reset', label: t('board.new_local'), paths: ['M4 10a6 6 0 1 0 1.8-4.3', 'M4 3.5v3h3'], disabled: mainlineMovesUci.value.length === 0 && branchOriginPly.value === null, run: handleReset },
+  { testid: 'btn-export-offline-pgn', label: t('export.pgn'), paths: ['M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14.5v2h12v-2'], disabled: activeMovesUci.value.length === 0, run: exportOfflinePgn },
+])
+
+const scrubActions = computed<IconAction[]>(() => [
+  { testid: 'scrub-start', label: 'First move', paths: ['M5 4v12M15 4l-7 6 7 6'], run: () => stepToPly(0) },
+  { testid: 'scrub-prev', label: 'Previous move', paths: ['M12.5 4 6.5 10l6 6'], run: () => stepToPly(cursorPly.value - 1) },
+  { testid: 'scrub-next', label: 'Next move', paths: ['m7.5 4 6 6-6 6'], run: () => stepToPly(cursorPly.value + 1) },
+  { testid: 'scrub-end', label: 'Last move', paths: ['M15 4v12M5 4l7 6-7 6'], run: () => stepToPly(mainlineMovesUci.value.length) },
+])
+
+/** Moves paired by move number, Red's ply then Black's. */
+const moveRows = computed(() => {
+  const rows: { number: number; plies: typeof displayedMoves.value }[] = []
+  displayedMoves.value.forEach((m, idx) => {
+    if (idx % 2 === 0) rows.push({ number: idx / 2 + 1, plies: [] })
+    rows[rows.length - 1].plies.push(m)
+  })
+  return rows
+})
 </script>
 
 <template>
-  <div class="home-grid">
-    <div class="board-column">
-      <div class="board-status-strip" data-testid="board-status-strip">
-        <span class="turn-indicator" :class="`side-${boardData?.snapshot.side_to_move}`">
-          {{ boardData?.snapshot.side_to_move === 'black' ? t('turn.black') : t('turn.red') }}
-        </span>
-        <span v-if="boardData?.snapshot.in_check_side" class="check-pill" data-testid="check-badge">
-          {{ t('state.check') }}
-        </span>
-        <span class="rules-pill">Rules: {{ config.public.rulesProfile }}</span>
-      </div>
+  <div class="jade-table">
+    <aside
+      class="jade-plates"
+      data-testid="board-status-strip"
+      :aria-label="sideToMove === 'black' ? t('turn.black') : t('turn.red')"
+    >
+      <SidePlate
+        v-for="plate in plates"
+        :key="plate.side"
+        :name="plate.name"
+        :caption="plate.toMove ? (plate.side === 'black' ? t('turn.black') : t('turn.red')) : ''"
+        :to-move="plate.toMove"
+        :captured="plate.captured"
+      />
+      <span v-if="boardData?.snapshot.in_check_side" class="check-note" data-testid="check-badge">
+        {{ t('state.check') }}
+      </span>
+    </aside>
 
+    <div class="jade-table-stage">
       <div v-if="verdictBanner" class="verdict-banner" data-testid="verdict-banner">
         {{ verdictBanner }}
       </div>
@@ -306,51 +359,73 @@ const verdictBanner = computed(() => {
         @play-move="handlePlayMove"
       />
 
-      <div class="board-toolbar">
-        <button type="button" class="jade-btn" data-testid="btn-flip" @click="redBelow = !redBelow">
-          {{ t('board.flip') }}
-        </button>
-        <button
-          type="button"
-          class="jade-btn"
-          data-testid="btn-undo"
-          :disabled="activeMovesUci.length === 0"
-          @click="handleUndo"
-        >
-          {{ t('board.undo') }}
-        </button>
-        <button
-          type="button"
-          class="jade-btn"
-          data-testid="btn-reset"
-          :disabled="mainlineMovesUci.length === 0 && branchOriginPly === null"
-          @click="handleReset"
-        >
-          {{ t('board.new_local') }}
-        </button>
-        <button
-          type="button"
-          class="jade-btn"
-          data-testid="btn-export-offline-pgn"
-          :disabled="activeMovesUci.length === 0"
-          @click="exportOfflinePgn"
-        >
-          {{ t('export.pgn') }}
-        </button>
+      <!-- The only on-board controls: one glass capsule, as on macOS. -->
+      <div class="jade-capsule" role="toolbar" aria-label="Board">
+        <IconButton
+          v-for="a in capsuleActions"
+          :key="a.testid"
+          :data-testid="a.testid"
+          :label="a.label"
+          :paths="a.paths"
+          :disabled="a.disabled"
+          @click="a.run"
+        />
       </div>
 
       <p v-if="moveError" class="error-note">{{ moveError }}</p>
     </div>
 
-    <aside class="side-column">
-      <!-- Friendly Online Match Invitation Card -->
-      <section class="jade-card invite-card" data-testid="play-friend-card">
-        <h2 class="section-heading">{{ t('action.play_friend') }}</h2>
-        <p class="section-sub">{{ t('product.tagline') }}</p>
+    <aside class="jade-ledger">
+      <section class="moves" data-testid="move-list-card" aria-label="Moves">
+        <div v-if="branchOriginPly !== null" class="branch-banner" data-testid="branch-banner">
+          <span>Trying a line from ply {{ branchOriginPly }}</span>
+          <button type="button" class="jade-pill-btn" data-testid="exit-branch-btn" @click="exitBranch">
+            Return to main line
+          </button>
+        </div>
 
+        <ol v-if="displayedMoves.length > 0" class="jade-move-list" data-testid="move-list">
+          <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
+            <span class="jade-move-number">{{ row.number }}</span>
+            <button
+              v-for="m in row.plies"
+              :key="`${m.ply}-${m.uci}`"
+              type="button"
+              class="jade-move"
+              :class="{ current: m.ply === activeMovesUci.length }"
+              :disabled="branchOriginPly !== null"
+              @click="stepToPly(m.ply)"
+            >
+              {{ m.label }}
+            </button>
+          </li>
+        </ol>
+        <p v-else class="empty-moves">Your moves will appear here.</p>
+
+        <div class="scrub jade-rule" aria-label="Replay">
+          <IconButton
+            v-for="a in scrubActions"
+            :key="a.testid"
+            :data-testid="a.testid"
+            :label="a.label"
+            :paths="a.paths"
+            :size="16"
+            @click="a.run"
+          />
+        </div>
+      </section>
+
+      <EngineAnalysisCard
+        :fen="STARTING_FEN"
+        :moves-uci="activeMovesUci"
+        :state-id="`home:${activeMovesUci.join(',')}`"
+        @play-engine-move="(uci) => handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
+      />
+
+      <section class="invite jade-rule" data-testid="play-friend-card" aria-label="Play a friend">
         <div class="invite-options">
-          <label class="option-row">
-            <span>Clock</span>
+          <label>
+            <span class="sr-only">Clock</span>
             <select v-model="clockPreset" data-testid="invite-clock-select" class="jade-select">
               <option value="5+3">{{ t('clock.5_plus_3') }}</option>
               <option value="10+5">{{ t('clock.10_plus_5') }}</option>
@@ -358,213 +433,62 @@ const verdictBanner = computed(() => {
               <option value="untimed">{{ t('clock.untimed') }}</option>
             </select>
           </label>
-
-          <label class="option-row">
-            <span>Your seat</span>
+          <label>
+            <span class="sr-only">Your side</span>
             <select v-model="preferredSide" data-testid="invite-side-select" class="jade-select">
-              <option value="red">Red (红方先手)</option>
-              <option value="black">Black (黑方后手)</option>
-              <option value="random">Random (随机先后手)</option>
+              <option value="red">Play Red</option>
+              <option value="black">Play Black</option>
+              <option value="random">Random side</option>
             </select>
           </label>
         </div>
-
         <button
           type="button"
-          class="jade-btn jade-btn-primary full-width-btn"
+          class="jade-btn jade-btn-primary invite-btn"
           data-testid="create-invite-btn"
           :disabled="creatingInvite"
           @click="createFriendlyInvitation"
         >
-          {{ creatingInvite ? 'Creating link…' : `${t('action.play_friend')} →` }}
+          {{ creatingInvite ? 'Creating link…' : t('action.play_friend') }}
         </button>
         <p v-if="inviteError" class="error-note">{{ inviteError }}</p>
       </section>
-
-      <!-- Move Record, Replay Scrub & Variation Tryout -->
-      <section class="jade-card moves-card" data-testid="move-list-card">
-        <div class="moves-header">
-          <h2 class="section-heading">{{ t('study.title') }} · Offline Board</h2>
-          <div class="scrub-controls">
-            <button type="button" class="jade-pill-btn" data-testid="scrub-start" @click="stepToPly(0)">
-              |&lt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="scrub-prev"
-              @click="stepToPly(cursorPly - 1)"
-            >
-              &lt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="scrub-next"
-              @click="stepToPly(cursorPly + 1)"
-            >
-              &gt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="scrub-end"
-              @click="stepToPly(mainlineMovesUci.length)"
-            >
-              &gt;|
-            </button>
-          </div>
-        </div>
-
-        <div v-if="branchOriginPly !== null" class="branch-banner" data-testid="branch-banner">
-          <span>Exploring alternative line from ply {{ branchOriginPly }}</span>
-          <button type="button" class="jade-pill-btn" data-testid="exit-branch-btn" @click="exitBranch">
-            Return to main line
-          </button>
-        </div>
-
-        <ol v-if="displayedMoves.length > 0" class="move-list" data-testid="move-list">
-          <li
-            v-for="m in displayedMoves"
-            :key="`${m.ply}-${m.uci}`"
-            class="move-chip"
-            @click="branchOriginPly === null && stepToPly(m.ply)"
-          >
-            <span class="ply-num">{{ m.ply }}.</span>
-            <span>{{ m.label }}</span>
-          </li>
-        </ol>
-        <p v-else class="empty-moves">
-          Tap or drag any Red piece to play same-device or offline. Progress saves locally on this device.
-        </p>
-      </section>
-
-      <!-- Local Browser Web Worker Engine Analysis -->
-      <EngineAnalysisCard
-        :fen="STARTING_FEN"
-        :moves-uci="activeMovesUci"
-        :state-id="`home:${activeMovesUci.join(',')}`"
-        @play-engine-move="(uci) => handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
-      />
     </aside>
   </div>
 </template>
 
 <style scoped>
-.home-grid {
-  display: grid;
-  grid-template-columns: minmax(300px, 540px) minmax(290px, 1fr);
-  gap: 24px;
-  align-items: start;
-}
-
-@media (max-width: 880px) {
-  .home-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.board-column {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.board-status-strip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.9rem;
-}
-
-.turn-indicator {
-  font-weight: 650;
-}
-
-.turn-indicator.side-red {
-  color: #A54837;
-}
-
-.check-pill {
-  background: #A54837;
-  color: #F3EEE4;
-  padding: 2px 9px;
-  border-radius: 999px;
+.check-note {
   font-size: 0.8rem;
-  font-weight: 650;
-}
-
-.rules-pill {
-  font-size: 0.78rem;
-  opacity: 0.72;
+  color: var(--jade-vermilion-text);
 }
 
 .verdict-banner {
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: rgba(165, 72, 55, 0.14);
-  border: 1px solid rgba(165, 72, 55, 0.45);
-  font-weight: 600;
+  align-self: stretch;
+  text-align: center;
+  font-family: var(--jade-display);
+  font-size: 1.25rem;
 }
 
-.board-toolbar {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.side-column {
-  min-width: 0;
+.moves {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 160px;
 }
 
-.section-heading {
+.empty-moves {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 0.85rem;
+  color: var(--jade-muted);
 }
 
-.section-sub {
-  margin: 4px 0 12px;
-  font-size: 0.88rem;
-  opacity: 0.8;
-}
-
-.invite-options {
+.scrub {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.option-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.88rem;
-}
-
-.full-width-btn {
-  width: 100%;
-  padding: 9px 14px;
-}
-
-.moves-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.scrub-controls {
-  display: inline-flex;
-  gap: 4px;
+  gap: 2px;
+  padding-top: 8px;
 }
 
 .branch-banner {
@@ -572,46 +496,42 @@ const verdictBanner = computed(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
-  margin-bottom: 8px;
-  border-radius: 6px;
-  background: rgba(65, 84, 71, 0.14);
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  color: var(--jade-pale);
 }
 
-.move-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
+.invite {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 190px;
-  overflow-y: auto;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.move-chip {
-  padding: 4px 8px;
-  border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
-  font-size: 0.85rem;
-  cursor: pointer;
+.invite-options {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 8px;
 }
 
-.ply-num {
-  opacity: 0.65;
-  margin-right: 4px;
+.invite-options .jade-select {
+  width: 100%;
 }
 
-.empty-moves {
-  margin: 0;
-  font-size: 0.85rem;
-  opacity: 0.75;
+.invite-btn {
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 0.95rem;
 }
 
 .error-note {
-  margin: 6px 0 0;
+  margin: 0;
   font-size: 0.82rem;
-  color: #A54837;
+  color: var(--jade-vermilion-text);
+}
+
+@media (max-width: 1100px) {
+  .moves {
+    justify-content: flex-start;
+    min-height: 0;
+  }
 }
 </style>

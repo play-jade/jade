@@ -101,12 +101,23 @@ async function applyContinuation(uci: string) {
     replayPly.value += 1
   }
 }
+
+/** Replay controls for the glass capsule, as on the home page. */
+const scrubActions = computed(() => {
+  const end = archiveData.value?.replayable ?? 0
+  return [
+    { testid: 'archive-first', label: 'First move', paths: ['M5 4v12M15 4l-7 6 7 6'], ply: 0 },
+    { testid: 'archive-prev', label: 'Previous move', paths: ['M12.5 4 6.5 10l6 6'], ply: replayPly.value - 1 },
+    { testid: 'archive-next', label: 'Next move', paths: ['m7.5 4 6 6-6 6'], ply: replayPly.value + 1 },
+    { testid: 'archive-last', label: 'Last move', paths: ['M15 4v12M5 4l7 6-7 6'], ply: end },
+  ]
+})
 </script>
 
 <template>
   <div
     v-if="archiveData"
-    class="archive-page"
+    class="jade-table archive-page"
     :class="{ 'has-banner': archiveData.directory.is_synthetic_fixture }"
   >
     <!-- Explicit Synthetic Fixture Provenance Banner (Section 9), overlaid so it never moves the page -->
@@ -131,53 +142,88 @@ async function applyContinuation(uci: string) {
       </button>
     </div>
 
-    <div class="archive-grid">
-      <div class="archive-board-col">
-        <header class="game-header">
-          <span class="opening-tag">{{ t('archive.opening') }}: {{ archiveData.game.opening_label }}</span>
-          <h1 class="game-title">{{ archiveData.game.event_name }} ({{ archiveData.game.date_display }})</h1>
-        </header>
+    <!-- The game's identity, where the play table shows the side plates. -->
+    <aside class="jade-plates game-side">
+      <header class="game-header">
+        <span v-if="archiveData.game.opening_label" class="opening-tag">
+          {{ t('archive.opening') }} · {{ archiveData.game.opening_label }}
+        </span>
+        <h1 class="game-title">{{ archiveData.game.event_name }}</h1>
+        <span class="game-date">{{ archiveData.game.date_display }}</span>
+      </header>
 
-        <XiangqiBoard
-          :snapshot="archiveData.board.snapshot"
-          :material="material"
-          :traditional-glyphs="traditionalGlyphs"
-          :dark-surface="darkSurface"
-          :locale="locale"
-          :interactive="false"
-        />
-
-        <div class="replay-bar">
-          <button type="button" class="jade-btn" data-testid="archive-first" @click="stepPly(0)">
-            |&lt; Start
-          </button>
-          <button type="button" class="jade-btn" data-testid="archive-prev" @click="stepPly(replayPly - 1)">
-            &lt; Prev
-          </button>
-          <span class="ply-indicator" data-testid="archive-ply">
-            {{ t('game.ply') }} {{ replayPly }} / {{ archiveData.replayable }}
-          </span>
-          <button type="button" class="jade-btn" data-testid="archive-next" @click="stepPly(replayPly + 1)">
-            Next &gt;
-          </button>
-          <button
-            type="button"
-            class="jade-btn"
-            data-testid="archive-last"
-            @click="stepPly(archiveData.replayable)"
+      <section class="players" data-testid="player-directory-card" aria-label="Players">
+        <form method="get" action="/archive" class="search-form" @submit.prevent="refreshSearch()">
+          <input
+            v-model="searchQuery"
+            name="q"
+            type="search"
+            aria-label="Search players"
+            placeholder="赵汝权, 趙汝權, Chiu, 林明…"
+            class="search-input"
+            data-testid="player-search-input"
+          />
+          <button type="submit" class="jade-btn" data-testid="player-search-btn">Search</button>
+        </form>
+        <ul class="player-list" data-testid="player-list">
+          <li
+            v-for="player in archiveData.directory.players"
+            :key="player.player_id"
+            class="player-item"
+            :data-player-id="player.player_id"
           >
-            End &gt;|
-          </button>
-        </div>
+            <NuxtLink :to="`/players/${player.player_id}`" class="player-link">
+              {{ player.native_display_name }} · {{ player.primary_display_name }}
+            </NuxtLink>
+            <span class="disambig-note">{{ player.disambiguation_note }}</span>
+          </li>
+        </ul>
+      </section>
+    </aside>
 
-        <ol class="archive-moves" data-testid="archive-move-list">
-          <li v-for="row in moveRows" :key="row.number" class="archive-move-row">
-            <span class="archive-move-number">{{ row.number }}.</span>
+    <div class="jade-table-stage">
+      <XiangqiBoard
+        :snapshot="archiveData.board.snapshot"
+        :material="material"
+        :traditional-glyphs="traditionalGlyphs"
+        :dark-surface="darkSurface"
+        :locale="locale"
+        :interactive="false"
+      />
+
+      <div class="jade-capsule" role="toolbar" aria-label="Replay">
+        <IconButton
+          v-for="(a, i) in scrubActions.slice(0, 2)"
+          :key="i"
+          :data-testid="a.testid"
+          :label="a.label"
+          :paths="a.paths"
+          @click="stepPly(a.ply)"
+        />
+        <span class="ply-indicator" data-testid="archive-ply">
+          {{ t('game.ply') }} {{ replayPly }} / {{ archiveData.replayable }}
+        </span>
+        <IconButton
+          v-for="(a, i) in scrubActions.slice(2)"
+          :key="i + 2"
+          :data-testid="a.testid"
+          :label="a.label"
+          :paths="a.paths"
+          @click="stepPly(a.ply)"
+        />
+      </div>
+    </div>
+
+    <aside class="jade-ledger">
+      <section class="moves" aria-label="Moves">
+        <ol class="jade-move-list" data-testid="archive-move-list">
+          <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
+            <span class="jade-move-number">{{ row.number }}.</span>
             <button
               v-for="m in row.plies"
               :key="m.ply"
               type="button"
-              class="archive-move"
+              class="jade-move"
               :class="{ current: replayPly === m.ply }"
               :disabled="m.ply > archiveData.replayable"
               :aria-current="replayPly === m.ply ? 'step' : undefined"
@@ -193,91 +239,54 @@ async function applyContinuation(uci: string) {
           The record stops replaying at ply {{ archiveData.replayable + 1 }}: {{ archiveData.invalidMove }} is not a
           legal move in that position.
         </p>
-      </div>
+      </section>
 
-      <aside class="archive-side-col">
-        <!-- Position Continuation Explorer (Deduplicated by PositionKey, Distinct Status Label!) -->
-        <section class="jade-card" data-testid="position-explorer-card">
-          <div class="explorer-head">
-            <h2 class="card-heading">Position Explorer</h2>
-            <span class="source-pill" data-testid="explorer-source-label">
-              Sample Archive · {{ archiveData.explorer?.sample_size_games ?? 0 }} game(s)
-            </span>
-          </div>
-
-          <p v-if="!archiveData.explorer" class="muted-note" data-testid="explorer-unavailable">
-            This position could not be looked up in the sample archive.
-          </p>
-          <table
-            v-else-if="archiveData.explorer.continuations.length > 0"
-            class="explorer-table"
-            data-testid="continuation-table"
-          >
-            <thead>
-              <tr>
-                <th>Move</th>
-                <th>Coord</th>
-                <th>Games</th>
-                <th>R / D / B</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="cont in archiveData.explorer.continuations"
-                :key="cont.move_uci"
-                class="cont-row"
-                @click="applyContinuation(cont.move_uci)"
-              >
-                <td><strong>{{ cont.move_chinese }}</strong></td>
-                <td><code>{{ cont.move_uci }}</code></td>
-                <td>{{ cont.deduplicated_game_count }}</td>
-                <td>{{ cont.red_wins }} / {{ cont.draws }} / {{ cont.black_wins }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="muted-note">No further continuations recorded in sample fixture.</p>
-        </section>
-
-        <!-- Local Browser Web Worker Engine Analysis (Explicitly Distinct from Archive Counts!) -->
-        <EngineAnalysisCard
-          :fen="archiveData.game.initial_fen"
-          :moves-uci="activeMovesUci"
-          :state-id="`archive:${selectedGameId}:${replayPly}`"
-        />
-
-        <!-- Disambiguated Player Search & Directory -->
-        <section class="jade-card" data-testid="player-directory-card">
-          <h2 class="card-heading">Players &amp; Alias Search</h2>
-          <form method="get" action="/archive" class="search-form" @submit.prevent="refreshSearch()">
-            <input
-              v-model="searchQuery"
-              name="q"
-              type="search"
-              placeholder="Search 赵汝权, 趙汝權, Chiu, 林明…"
-              class="search-input"
-              data-testid="player-search-input"
-            />
-            <button type="submit" class="jade-btn jade-btn-primary" data-testid="player-search-btn">
-              Search
-            </button>
-          </form>
-
-          <ul class="player-list" data-testid="player-list">
-            <li
-              v-for="player in archiveData.directory.players"
-              :key="player.player_id"
-              class="player-item"
-              :data-player-id="player.player_id"
+      <!-- Position Continuation Explorer (Deduplicated by PositionKey, Distinct Status Label!) -->
+      <section class="explorer jade-rule" data-testid="position-explorer-card" aria-label="Position explorer">
+        <div class="explorer-head">
+          <span class="explorer-title">Recorded continuations</span>
+          <span class="source-pill" data-testid="explorer-source-label">
+            Sample Archive · {{ archiveData.explorer?.sample_size_games ?? 0 }} game(s)
+          </span>
+        </div>
+        <p v-if="!archiveData.explorer" class="muted-note" data-testid="explorer-unavailable">
+          This position could not be looked up in the sample archive.
+        </p>
+        <table
+          v-else-if="archiveData.explorer.continuations.length > 0"
+          class="explorer-table"
+          data-testid="continuation-table"
+        >
+          <thead>
+            <tr>
+              <th>Move</th>
+              <th>Games</th>
+              <th>R / D / B</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="cont in archiveData.explorer.continuations"
+              :key="cont.move_uci"
+              class="cont-row"
+              @click="applyContinuation(cont.move_uci)"
             >
-              <NuxtLink :to="`/players/${player.player_id}`" class="player-link">
-                <strong>{{ player.native_display_name }} · {{ player.primary_display_name }}</strong>
-              </NuxtLink>
-              <span class="disambig-note">{{ player.disambiguation_note }}</span>
-            </li>
-          </ul>
-        </section>
-      </aside>
-    </div>
+              <td><strong>{{ cont.move_chinese }}</strong> <code>{{ cont.move_uci }}</code></td>
+              <td>{{ cont.deduplicated_game_count }}</td>
+              <td>{{ cont.red_wins }} / {{ cont.draws }} / {{ cont.black_wins }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="muted-note">No further continuations recorded in the sample.</p>
+      </section>
+
+      <!-- Local Browser Web Worker Engine Analysis (Explicitly Distinct from Archive Counts!) -->
+      <EngineAnalysisCard
+        :fen="archiveData.game.initial_fen"
+        :moves-uci="activeMovesUci"
+        :state-id="`archive:${selectedGameId}:${replayPly}`"
+      />
+    </aside>
   </div>
   <div v-else class="archive-error" role="alert" data-testid="archive-error">
     <p>The archive could not load{{ archiveError ? `: ${archiveError.message}` : '' }}.</p>
@@ -286,12 +295,6 @@ async function applyContinuation(uci: string) {
 </template>
 
 <style scoped>
-.archive-page {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 /* Room below the content for the overlaid banner, kept after dismissal so the page height never changes. */
 .archive-page.has-banner {
   padding-bottom: 96px;
@@ -305,15 +308,15 @@ async function applyContinuation(uci: string) {
   z-index: 20;
   transform: translateX(-50%);
   width: min(720px, calc(100vw - 32px));
-  box-sizing: border-box;
   display: flex;
   align-items: flex-start;
   gap: 12px;
   padding: 10px 10px 10px 16px;
-  border-radius: 10px;
-  background: rgba(29, 36, 33, 0.92);
-  color: #F3EEE4;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  border-radius: 12px;
+  background: rgba(29, 36, 33, 0.8);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: inset 0 0 0 1px var(--jade-hairline), 0 10px 30px rgba(0, 0, 0, 0.4);
   font-size: 0.82rem;
   line-height: 1.4;
 }
@@ -338,175 +341,61 @@ async function applyContinuation(uci: string) {
 
 .provenance-dismiss:hover,
 .provenance-dismiss:focus-visible {
-  background: rgba(243, 238, 228, 0.14);
+  background: var(--jade-surface-hover);
 }
 
-.archive-grid {
-  display: grid;
-  grid-template-columns: minmax(300px, 520px) minmax(300px, 1fr);
-  gap: 24px;
-  align-items: start;
+.game-side {
+  justify-content: flex-start;
+  gap: 28px;
 }
 
-@media (max-width: 880px) {
-  .archive-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.archive-board-col,
-.archive-side-col {
-  min-width: 0;
+.game-header {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
 }
 
 .opening-tag {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #415447;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-}
-
-.theme-dark .opening-tag {
-  color: #DCE3CE;
+  color: var(--jade-pale);
 }
 
 .game-title {
-  margin: 4px 0 0;
-  font-size: 1.15rem;
-}
-
-.replay-bar {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.ply-indicator {
-  font-size: 0.86rem;
-  font-weight: 600;
-}
-
-.archive-moves {
-  list-style: none;
-  padding: 0;
   margin: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 2px 16px;
-  font-variant-numeric: tabular-nums;
+  font-family: var(--jade-display);
+  font-weight: 400;
+  font-size: clamp(1.8rem, 2.6vw, 2.4rem);
+  line-height: 1.1;
 }
 
-.archive-move-row {
-  display: grid;
-  grid-template-columns: 2.2em minmax(0, 1fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 4px;
+.game-date {
+  font-size: 0.85rem;
+  color: var(--jade-muted);
 }
 
-.archive-move-number {
-  font-size: 0.78rem;
-  opacity: 0.7;
-}
-
-.archive-move {
-  appearance: none;
-  border: 0;
-  border-radius: 5px;
-  padding: 5px 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 0.9rem;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.archive-move:hover:not(:disabled):not(.current) {
-  background: rgba(65, 84, 71, 0.1);
-}
-
-.archive-move.current {
-  background: #415447;
-  color: #F3EEE4;
-}
-
-.archive-move:disabled {
-  cursor: default;
-  opacity: 0.45;
-  text-decoration: line-through;
-}
-
-.record-break {
-  margin: 0;
-  font-size: 0.82rem;
-  color: #A54837;
-}
-
-.archive-error {
+.players {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
   gap: 10px;
-  padding: 24px 0;
-}
-
-.explorer-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.card-heading {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.source-pill {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(65, 84, 71, 0.14);
-  font-weight: 600;
-}
-
-.explorer-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.86rem;
-}
-
-.explorer-table th,
-.explorer-table td {
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid rgba(65, 84, 71, 0.16);
-}
-
-.cont-row {
-  cursor: pointer;
 }
 
 .search-form {
   display: flex;
-  gap: 8px;
-  margin: 10px 0;
+  gap: 6px;
 }
 
 .search-input {
   flex: 1;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(65, 84, 71, 0.3);
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--jade-hairline);
+  background: var(--jade-surface);
+  color: var(--jade-paper);
   font: inherit;
-  font-size: 0.86rem;
+  font-size: 0.85rem;
 }
 
 .player-list {
@@ -515,30 +404,113 @@ async function applyContinuation(uci: string) {
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .player-item {
   display: flex;
   flex-direction: column;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: rgba(65, 84, 71, 0.08);
+  gap: 2px;
 }
 
 .player-link {
-  color: inherit;
+  color: var(--jade-paper);
   text-decoration: none;
+  font-size: 0.92rem;
 }
 
-.disambig-note {
-  font-size: 0.78rem;
-  opacity: 0.78;
+.player-link:hover {
+  text-decoration: underline;
 }
 
+.disambig-note,
 .muted-note {
   margin: 0;
-  font-size: 0.84rem;
-  opacity: 0.75;
+  font-size: 0.78rem;
+  color: var(--jade-muted);
+}
+
+.ply-indicator {
+  padding: 0 8px;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--jade-muted);
+}
+
+.moves {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.record-break {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--jade-vermilion-text);
+}
+
+.explorer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.explorer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.explorer-title {
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--jade-muted);
+}
+
+.source-pill {
+  font-size: 0.72rem;
+  color: var(--jade-muted);
+}
+
+.explorer-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.explorer-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.72rem;
+  color: var(--jade-muted);
+  padding: 4px 6px;
+}
+
+.explorer-table td {
+  padding: 6px;
+  border-top: 1px solid var(--jade-hairline);
+}
+
+.explorer-table code {
+  font-size: 0.75rem;
+  color: var(--jade-muted);
+}
+
+.cont-row {
+  cursor: pointer;
+}
+
+.cont-row:hover {
+  background: var(--jade-surface-hover);
+}
+
+.archive-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 24px 0;
 }
 </style>

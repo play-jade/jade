@@ -16,8 +16,6 @@ const {
   isAnalyzing,
   engineName,
   depth,
-  nodes,
-  nps,
   scoreRedCp,
   mateRed,
   pvUci,
@@ -61,44 +59,24 @@ function onToggleEngine() {
 </script>
 
 <template>
-  <section class="jade-card engine-card" data-testid="engine-analysis-card">
+  <section class="engine-card" data-testid="engine-analysis-card" :aria-label="t('engine.title')">
     <div class="engine-header">
-      <div>
-        <span class="engine-badge">Local Engine · Browser WASM</span>
-        <h3 class="engine-title">{{ t('engine.title') }}</h3>
-      </div>
-
       <button
         type="button"
-        class="jade-btn jade-btn-primary"
+        class="jade-btn"
         data-testid="engine-toggle-btn"
+        :title="`${engineName} runs in this browser; positions stay on this device.`"
         @click="onToggleEngine"
       >
         {{ isAnalyzing ? t('engine.stop') : t('engine.start') }}
       </button>
-    </div>
-
-    <div class="engine-metrics">
-      <div>
-        <span class="metric-label">Eval (Red)</span>
-        <strong data-testid="engine-eval">{{ formattedEval }}</strong>
-      </div>
-      <div>
-        <span class="metric-label">Depth</span>
-        <strong data-testid="engine-depth">{{ depth }}</strong>
-      </div>
-      <div>
-        <span class="metric-label">Nodes</span>
-        <strong>{{ nodes.toLocaleString() }}</strong>
-      </div>
-      <div>
-        <span class="metric-label">NPS</span>
-        <strong>{{ nps.toLocaleString() }}</strong>
-      </div>
+      <span v-if="isAnalyzing || depth > 0" class="engine-metrics">
+        <span data-testid="engine-eval">{{ formattedEval }}</span>
+        <span class="metric-label">depth <span data-testid="engine-depth">{{ depth }}</span></span>
+      </span>
     </div>
 
     <div v-if="pvUci.length > 0 || bestMoveUci" class="engine-pv" data-testid="engine-pv">
-      <span class="metric-label">Principal variation:</span>
       <code>{{ pvUci.join(' ') || bestMoveUci }}</code>
       <button
         v-if="bestMoveUci"
@@ -111,9 +89,6 @@ function onToggleEngine() {
       </button>
     </div>
 
-    <p class="engine-caption">
-      {{ engineName }} — runs locally in a Web Worker without sending positions to a server.
-    </p>
     <p v-if="errorMsg" class="engine-error">{{ errorMsg }}</p>
   </section>
 </template>
@@ -122,7 +97,7 @@ function onToggleEngine() {
 .engine-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .engine-header {
@@ -132,35 +107,17 @@ function onToggleEngine() {
   gap: 10px;
 }
 
-.engine-badge {
-  display: inline-block;
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #415447;
-}
-
-.theme-dark .engine-badge {
-  color: #DCE3CE;
-}
-
-.engine-title {
-  margin: 2px 0 0;
-  font-size: 0.98rem;
-}
-
 .engine-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  font-size: 0.86rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .metric-label {
-  display: block;
-  font-size: 0.74rem;
-  opacity: 0.72;
+  font-size: 0.78rem;
+  color: var(--jade-muted);
 }
 
 .engine-pv {
@@ -169,17 +126,12 @@ function onToggleEngine() {
   align-items: center;
   gap: 8px;
   font-size: 0.85rem;
-}
-
-.engine-caption {
-  margin: 0;
-  font-size: 0.76rem;
-  opacity: 0.72;
+  color: var(--jade-muted);
 }
 
 .engine-error {
   margin: 0;
   font-size: 0.8rem;
-  color: #A54837;
+  color: var(--jade-vermilion-text);
 }
 </style>

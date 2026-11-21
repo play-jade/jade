@@ -545,7 +545,7 @@ onMounted(() => {
     const measure = () => {
       if (!containerRef.value) return
       const avail = containerRef.value.clientWidth || 340
-      const w = Math.max(260, Math.min(540, Math.floor(avail)))
+      const w = Math.max(260, Math.min(680, Math.floor(avail)))
       boardWidth.value = w
       void renderCanvas()
     }
@@ -691,7 +691,7 @@ watch(
 <style scoped>
 .jade-board-frame {
   width: 100%;
-  max-width: 520px;
+  max-width: 680px;
   margin: 0 auto;
   display: flex;
   justify-content: center;
@@ -699,17 +699,24 @@ watch(
   touch-action: none;
 }
 
+/* The board is a slab lit from the upper left: a fine rim, and cast shadows falling to the lower right. */
 .jade-board-stage {
   position: relative;
-  border-radius: 10px;
+  border-radius: 6px;
   overflow: hidden;
-  box-shadow: 0 10px 28px rgba(37, 42, 37, 0.14), 0 2px 6px rgba(37, 42, 37, 0.08);
-  border: 1px solid rgba(65, 84, 71, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 0 0 1px rgba(0, 0, 0, 0.35),
+    10px 14px 24px rgba(0, 0, 0, 0.38),
+    30px 44px 90px rgba(0, 0, 0, 0.55);
 }
 
 .jade-board-frame.is-dark .jade-board-stage {
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
-  border-color: rgba(220, 227, 206, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    10px 14px 24px rgba(0, 0, 0, 0.45),
+    30px 44px 90px rgba(0, 0, 0, 0.6);
 }
 
 .jade-board-svg-fallback,

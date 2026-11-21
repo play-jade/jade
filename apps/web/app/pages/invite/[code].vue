@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
+import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -542,18 +543,46 @@ onBeforeUnmount(() => {
     ws = null
   }
 })
+
+// Side plates with the match clocks, as the home page and macOS show them.
+const plates = computed(() => {
+  const pieces = boardData.value?.snapshot.pieces ?? []
+  const playing = snapshot.value?.status === 'playing'
+  return plateOrder(redBelow.value).map((side) => {
+    const toMove = playing && snapshot.value?.side_to_move === side
+    const who = assignedSide.value === side ? 'You' : assignedSide.value ? 'Friend' : ''
+    return {
+      side,
+      name: sideName(side, locale.value),
+      caption: [who, toMove ? 'to move' : ''].filter(Boolean).join(' · '),
+      toMove,
+      clock: formatClock(side === 'red' ? displayRedMs.value : displayBlackMs.value),
+      captured: capturedFaces(pieces, side, traditionalGlyphs.value),
+    }
+  })
+})
+
+const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveLabels.value))
+
+function showPly(ply: number | null) {
+  replayPly.value = ply
+  postgameBranchMoves.value = []
+}
 </script>
 
 <template>
-  <div class="match-layout">
-    <div class="board-col">
-      <div class="clock-bar" data-testid="match-clock-bar">
-        <div class="clock-pill" :class="{ active: snapshot?.status === 'playing' && snapshot?.side_to_move === 'black' }">
-          <span>Black</span>
-          <strong data-testid="clock-black">{{ formatClock(displayBlackMs) }}</strong>
-        </div>
-
-        <div class="lifecycle-badge" data-testid="match-status-badge" :data-connection-state="connectionState">
+  <div class="jade-table">
+    <aside class="jade-plates" data-testid="match-clock-bar">
+      <template v-for="(plate, i) in plates" :key="plate.side">
+        <SidePlate :name="plate.name" :caption="plate.caption" :to-move="plate.toMove" :captured="plate.captured">
+          <strong class="plate-clock" :data-testid="`clock-${plate.side}`">{{ plate.clock }}</strong>
+        </SidePlate>
+        <div
+          v-if="i === 0"
+          class="room-status"
+          data-testid="match-status-badge"
+          :data-connection-state="connectionState"
+        >
           <template v-if="snapshot?.status === 'waiting'">Waiting for friend…</template>
           <template v-else-if="snapshot?.status === 'playing'">
             Live · {{ assignedSide ? `You play ${assignedSide}` : 'Spectating' }}
@@ -563,13 +592,10 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>{{ connectionState }}</template>
         </div>
+      </template>
+    </aside>
 
-        <div class="clock-pill" :class="{ active: snapshot?.status === 'playing' && snapshot?.side_to_move === 'red' }">
-          <span>Red</span>
-          <strong data-testid="clock-red">{{ formatClock(displayRedMs) }}</strong>
-        </div>
-      </div>
-
+    <div class="jade-table-stage">
       <XiangqiBoard
         v-if="boardData"
         :snapshot="boardData.snapshot"
@@ -583,10 +609,9 @@ onBeforeUnmount(() => {
         @play-move="handleBoardPlayMove"
       />
 
-      <div class="match-actions">
-        <button type="button" class="jade-btn" @click="redBelow = !redBelow">
-          {{ t('board.flip') }}
-        </button>
+      <!-- One glass capsule, as on macOS: flip always, then the actions the room's state allows. -->
+      <div class="jade-capsule" role="toolbar" aria-label="Match">
+        <IconButton :label="t('board.flip')" :paths="['M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3']" @click="redBelow = !redBelow" />
 
         <template v-if="snapshot?.status === 'playing' && assignedSide">
           <button
@@ -596,15 +621,9 @@ onBeforeUnmount(() => {
             data-testid="btn-accept-draw"
             @click="acceptDraw"
           >
-            Accept draw offer
+            Accept draw
           </button>
-          <button
-            v-else
-            type="button"
-            class="jade-btn"
-            data-testid="btn-offer-draw"
-            @click="offerDraw"
-          >
+          <button v-else type="button" class="jade-btn" data-testid="btn-offer-draw" @click="offerDraw">
             {{ t('action.offer_draw') }}
           </button>
 
@@ -618,46 +637,25 @@ onBeforeUnmount(() => {
             >
               Accept takeback
             </button>
-            <button
-              v-else
-              type="button"
-              class="jade-btn"
-              data-testid="btn-request-takeback"
-              @click="requestTakeback"
-            >
+            <button v-else type="button" class="jade-btn" data-testid="btn-request-takeback" @click="requestTakeback">
               {{ t('board.undo') }}
             </button>
           </template>
 
-          <button
-            type="button"
-            class="jade-btn jade-btn-danger"
-            data-testid="btn-resign"
-            @click="resignMatch"
-          >
+          <button type="button" class="jade-btn jade-btn-danger" data-testid="btn-resign" @click="resignMatch">
             {{ t('action.resign') }}
           </button>
         </template>
 
         <template v-if="snapshot?.status === 'finished' || snapshot?.status === 'interrupted'">
-          <button
-            type="button"
-            class="jade-btn jade-btn-primary"
-            data-testid="btn-rematch"
-            @click="startRematch"
-          >
-            {{ snapshot.next_rematch_invitation_code ? 'Join Rematch →' : t('action.rematch') }}
+          <button type="button" class="jade-btn jade-btn-primary" data-testid="btn-rematch" @click="startRematch">
+            {{ snapshot.next_rematch_invitation_code ? 'Join rematch' : t('action.rematch') }}
           </button>
-          <button
-            type="button"
-            class="jade-btn"
-            data-testid="btn-export-pgn"
-            @click="exportMatchPgn"
-          >
+          <button type="button" class="jade-btn" data-testid="btn-export-pgn" @click="exportMatchPgn">
             {{ t('export.pgn') }}
           </button>
           <NuxtLink :to="`/g/${snapshot.match_id}`" class="jade-btn" data-testid="link-open-replay">
-            Replay &amp; Study
+            Replay &amp; study
           </NuxtLink>
         </template>
       </div>
@@ -665,76 +663,45 @@ onBeforeUnmount(() => {
       <p v-if="errorBanner" class="error-note" data-testid="match-error">{{ errorBanner }}</p>
     </div>
 
-    <aside class="meta-col">
-      <!-- Waiting / Shareable Link Box -->
-      <section v-if="snapshot?.status === 'waiting'" class="jade-card" data-testid="invite-share-card">
-        <h2 class="card-title">Share invitation link</h2>
-        <p class="card-sub">
-          Send this URL to a friend. Seat credentials are kept in your session and never exposed in the link.
-        </p>
+    <aside class="jade-ledger">
+      <section v-if="snapshot?.status === 'waiting'" class="share" data-testid="invite-share-card" aria-label="Invitation link">
+        <p class="share-note">Send this link to a friend. Your seat stays on this device; the link only offers the other seat.</p>
         <div class="share-row">
-          <input
-            type="text"
-            readonly
-            :value="shareUrl"
-            class="share-input"
-            data-testid="share-link-input"
-          />
+          <input type="text" readonly :value="shareUrl" class="share-input" aria-label="Invitation link" data-testid="share-link-input" />
           <button type="button" class="jade-btn jade-btn-primary" @click="copyShareLink">
             {{ copiedLink ? 'Copied' : 'Copy' }}
           </button>
         </div>
       </section>
 
-      <!-- Move History & Postgame Replay / Alternative Line Tryout -->
-      <section class="jade-card" data-testid="match-moves-card">
-        <div class="moves-top">
-          <h2 class="card-title">Moves ({{ snapshot?.rules_profile || 'program-2023.11-v1' }})</h2>
-          <div v-if="snapshot && snapshot.moves_uci.length > 0" class="scrub-group">
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="postgame-scrub-start"
-              @click="((replayPly = 0), (postgameBranchMoves = []))"
-            >
-              |&lt;
-            </button>
-            <button
-              type="button"
-              class="jade-pill-btn"
-              data-testid="postgame-scrub-live"
-              @click="((replayPly = null), (postgameBranchMoves = []))"
-            >
-              Live
-            </button>
-          </div>
-        </div>
-
+      <section class="moves" data-testid="match-moves-card" aria-label="Moves">
         <div v-if="postgameBranchMoves.length > 0" class="branch-pill" data-testid="postgame-branch-banner">
-          Trying alternative branch ({{ postgameBranchMoves.join(' ') }})
-          <button
-            type="button"
-            class="jade-pill-btn"
-            @click="((replayPly = null), (postgameBranchMoves = []))"
-          >
-            Reset to game
-          </button>
+          <span>Trying {{ postgameBranchMoves.join(' ') }}</span>
+          <button type="button" class="jade-pill-btn" @click="showPly(null)">Back to the game</button>
         </div>
 
-        <ol class="match-move-list" data-testid="match-move-list">
-          <li
-            v-for="(u, i) in snapshot?.moves_uci || []"
-            :key="`${i}-${u}`"
-            class="move-item"
-            @click="((replayPly = i + 1), (postgameBranchMoves = []))"
-          >
-            <span>{{ i + 1 }}.</span>
-            <strong>{{ moveLabels[i] ?? u }}</strong>
+        <ol class="jade-move-list" data-testid="match-move-list">
+          <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
+            <span class="jade-move-number">{{ row.number }}.</span>
+            <button
+              v-for="m in row.plies"
+              :key="m.ply"
+              type="button"
+              class="jade-move"
+              :class="{ current: replayPly === m.ply }"
+              @click="showPly(m.ply)"
+            >
+              {{ m.label }}
+            </button>
           </li>
         </ol>
+
+        <div v-if="snapshot && snapshot.moves_uci.length > 0" class="scrub jade-rule">
+          <button type="button" class="jade-pill-btn" data-testid="postgame-scrub-start" @click="showPly(0)">Start</button>
+          <button type="button" class="jade-pill-btn" data-testid="postgame-scrub-live" @click="showPly(null)">Live</button>
+        </div>
       </section>
 
-      <!-- Postgame Local Engine Analysis -->
       <EngineAnalysisCard
         v-if="snapshot?.status === 'finished'"
         :fen="STARTING_FEN"
@@ -743,13 +710,12 @@ onBeforeUnmount(() => {
         @play-engine-move="(uci) => handleBoardPlayMove(uci.slice(0, 2), uci.slice(2, 4))"
       />
 
-      <!-- Dual-Participant Privacy & Consent Controls (Section 3 & 16) -->
-      <section v-if="assignedSide" class="jade-card privacy-card" data-testid="privacy-consent-card">
-        <h3 class="card-title">Privacy &amp; Research Consent</h3>
-        <p class="card-sub">
-          Personal matches are <strong>private by default</strong>. Public/unlisted sharing and any training or research opt-in take effect only when both participants agree.
+      <!-- Dual-participant privacy and consent (handoff sections 3 and 16), folded so play stays the focus. -->
+      <details v-if="assignedSide" class="privacy jade-rule" data-testid="privacy-consent-card">
+        <summary>Privacy · {{ desiredVisibility === 'private' ? 'Private' : desiredVisibility === 'unlisted' ? 'Unlisted' : 'Public' }}</summary>
+        <p class="privacy-note">
+          Matches are private by default. Sharing and any training or research use take effect only when both players agree.
         </p>
-
         <label class="priv-row">
           <span>Your visibility choice</span>
           <select v-model="desiredVisibility" class="jade-select" data-testid="privacy-visibility">
@@ -758,95 +724,48 @@ onBeforeUnmount(() => {
             <option value="public">Public archive</option>
           </select>
         </label>
-
-        <label class="priv-check">
-          <input v-model="consentTraining" type="checkbox" />
-          <span>Allow internal model training</span>
-        </label>
-        <label class="priv-check">
-          <input v-model="consentResearch" type="checkbox" />
-          <span>Allow published research analysis</span>
-        </label>
-        <label class="priv-check">
-          <input v-model="consentDataset" type="checkbox" />
-          <span>Allow open dataset release</span>
-        </label>
-
+        <label class="priv-check"><input v-model="consentTraining" type="checkbox" /> <span>Allow internal model training</span></label>
+        <label class="priv-check"><input v-model="consentResearch" type="checkbox" /> <span>Allow published research analysis</span></label>
+        <label class="priv-check"><input v-model="consentDataset" type="checkbox" /> <span>Allow open dataset release</span></label>
         <button type="button" class="jade-btn" data-testid="save-privacy-btn" @click="savePrivacyPreferences">
           Save privacy preferences
         </button>
-        <p v-if="privacyStatusMsg" class="priv-note" data-testid="privacy-status">{{ privacyStatusMsg }}</p>
-      </section>
+        <p v-if="privacyStatusMsg" class="privacy-note" data-testid="privacy-status">{{ privacyStatusMsg }}</p>
+      </details>
     </aside>
   </div>
 </template>
 
 <style scoped>
-.match-layout {
-  display: grid;
-  grid-template-columns: minmax(300px, 540px) minmax(290px, 1fr);
-  gap: 24px;
-  align-items: start;
+.plate-clock {
+  font-family: var(--jade-display);
+  font-weight: 400;
+  font-size: clamp(2rem, 3.2vw, 2.8rem);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--jade-muted);
 }
 
-@media (max-width: 880px) {
-  .match-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.to-move .plate-clock {
+  color: var(--jade-paper);
 }
 
-.board-col,
-.meta-col {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.clock-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.clock-pill {
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(65, 84, 71, 0.25);
-  display: flex;
-  flex-direction: column;
-  min-width: 96px;
+.room-status {
   font-size: 0.8rem;
+  color: var(--jade-muted);
 }
 
-.clock-pill.active {
-  border-color: #A54837;
-  background: rgba(165, 72, 55, 0.1);
-}
-
-.lifecycle-badge {
-  font-size: 0.86rem;
-  font-weight: 600;
-  text-align: center;
-}
-
-.match-actions {
+.share {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  flex-direction: column;
   gap: 8px;
 }
 
-.card-title {
-  margin: 0 0 6px;
-  font-size: 1rem;
-}
-
-.card-sub {
-  margin: 0 0 10px;
-  font-size: 0.83rem;
-  opacity: 0.8;
+.share-note,
+.privacy-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--jade-muted);
 }
 
 .share-row {
@@ -856,85 +775,80 @@ onBeforeUnmount(() => {
 
 .share-input {
   flex: 1;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(65, 84, 71, 0.3);
-  font-size: 0.84rem;
-  background: rgba(255, 255, 255, 0.75);
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--jade-hairline);
+  background: var(--jade-surface);
+  color: var(--jade-paper);
+  font: inherit;
+  font-size: 0.82rem;
 }
 
-.moves-top {
+.moves {
+  flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 10px;
+  min-height: 160px;
 }
 
-.scrub-group {
-  display: inline-flex;
-  gap: 4px;
+.scrub {
+  display: flex;
+  gap: 6px;
 }
 
 .branch-pill {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
-  border-radius: 6px;
-  background: rgba(65, 84, 71, 0.14);
+  gap: 8px;
   font-size: 0.8rem;
-  margin-bottom: 8px;
+  color: var(--jade-pale);
 }
 
-.match-move-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.move-item {
-  padding: 4px 8px;
-  border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
-  font-size: 0.84rem;
-  cursor: pointer;
-  display: inline-flex;
-  gap: 4px;
-}
-
-.privacy-card {
+.privacy {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  font-size: 0.85rem;
+}
+
+.privacy summary {
+  cursor: pointer;
+  color: var(--jade-muted);
+}
+
+.privacy[open] {
+  gap: 10px;
 }
 
 .priv-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.84rem;
+  gap: 8px;
+  margin: 8px 0;
 }
 
 .priv-check {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.84rem;
-}
-
-.priv-note {
-  margin: 0;
-  font-size: 0.8rem;
-  color: #415447;
+  margin: 4px 0;
 }
 
 .error-note {
   margin: 0;
-  font-size: 0.84rem;
-  color: #A54837;
-  text-align: center;
+  font-size: 0.82rem;
+  color: var(--jade-vermilion-text);
+}
+
+@media (max-width: 1100px) {
+  .moves {
+    justify-content: flex-start;
+    min-height: 0;
+  }
 }
 </style>

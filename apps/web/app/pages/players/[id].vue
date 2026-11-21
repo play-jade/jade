@@ -78,7 +78,7 @@ const { data: profile } = await useAsyncData(
 .provenance-note {
   padding: 10px 14px;
   border-radius: 8px;
-  background: rgba(65, 84, 71, 0.12);
+  background: rgba(243, 238, 228, 0.12);
   font-size: 0.85rem;
 }
 
@@ -109,7 +109,7 @@ const { data: profile } = await useAsyncData(
 .alias-table td {
   text-align: left;
   padding: 6px 8px;
-  border-bottom: 1px solid rgba(65, 84, 71, 0.18);
+  border-bottom: 1px solid rgba(243, 238, 228, 0.18);
 }
 
 .profile-actions {

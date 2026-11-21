@@ -46,10 +46,22 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     })
 
     // Switch locale (`zh-Hant-HK`), material (`boxwood`), notation (`uci`), and theme (`Dark`) WITHOUT losing active move!
+    // Preferences live in the settings sheet, as on macOS.
+    await page.getByTestId('settings-toggle').click()
+    // The sheet is modal: focus moves in, the page behind it is inert, and Tab wraps inside the sheet.
+    await expect(page.getByTestId('pref-locale')).toBeFocused()
+    await expect(page.locator('main')).toHaveAttribute('inert', '')
+    await page.getByTestId('pref-sound').focus()
+    await page.keyboard.press('Tab')
+    await expect(page.getByTestId('pref-locale')).toBeFocused()
     await page.getByTestId('pref-locale').selectOption('zh-Hant-HK')
     await page.getByTestId('pref-material').selectOption('boxwood')
     await page.getByTestId('pref-notation').selectOption('uci')
     await page.getByTestId('pref-theme').click()
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('settings-sheet')).toBeHidden()
+    await expect(page.getByTestId('settings-toggle')).toBeFocused()
+    await expect(page.locator('main')).not.toHaveAttribute('inert', '')
 
     await expect(page.getByTestId('move-list')).toContainText('h2e2')
     await expect(page.getByTestId('board-status-strip')).toContainText('黑方行棋')
@@ -173,6 +185,13 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await playBoardSquares(redPage, 'b2', 'e2')
       await expect(redPage.getByTestId('postgame-branch-banner')).toContainText('b2e2')
 
+      // Black opens the finished game's replay, which sits at the same table as play
+      const replayHref = await blkPage.getByTestId('link-open-replay').getAttribute('href')
+      await blkPage.goto(replayHref ?? '')
+      await expect(blkPage.getByTestId('match-replay-page')).toContainText('C2=5')
+      await expect(blkPage.locator('.jade-table .jade-capsule')).toBeVisible()
+      await blkPage.screenshot({ path: test.info().outputPath('match-replay.png') })
+
       // Rematch creates fresh invitation cleanly
       await redPage.getByTestId('btn-rematch').click()
       await expect(redPage.getByTestId('match-status-badge')).toContainText('Waiting for friend')
@@ -236,10 +255,12 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     // English reads WXF by default; a Chinese locale reads Chinese notation.
     const moves = page.getByTestId('archive-move')
     await expect(moves.first()).toHaveText('C2=5')
+    await page.getByTestId('settings-toggle').click()
     await page.getByTestId('pref-locale').selectOption('zh-Hans-CN')
     await expect(moves.first()).toHaveText('炮二平五')
     await page.getByTestId('pref-locale').selectOption('en-US')
     await expect(moves.first()).toHaveText('C2=5')
+    await page.keyboard.press('Escape')
 
     // Selecting a move jumps to that ply and stays there.
     await moves.nth(2).click()
