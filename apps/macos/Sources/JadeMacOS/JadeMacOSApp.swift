@@ -940,7 +940,7 @@ enum HeadlessCoreGraphicsProof {
         _ = try session.applyMoveToken(token: "h2e2")
         _ = try session.applyMoveToken(token: "h9g7")
         _ = try session.applyMoveToken(token: "h0g2")
-        let pieces = try session.pieces(traditionalGlyphs: false)
+        let model = try session.renderModel(traditionalGlyphs: false, selectedUci: nil)
 
         let w = 760
         let h = 840
@@ -967,9 +967,12 @@ enum HeadlessCoreGraphicsProof {
             darkSurface: false,
             materialId: "pale-jade",
             traditionalGlyphs: false,
-            pieces: pieces,
+            pieces: model.pieces,
             selectedUci: "e2",
             legalDestUcis: [],
+            lastMoveFromUci: model.lastMoveFromUci,
+            lastMoveToUci: model.lastMoveToUci,
+            checkUci: model.checkUci,
             repoRoot: repoRoot
         )
 

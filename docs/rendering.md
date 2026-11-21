@@ -70,7 +70,7 @@ Every platform renderer consumes an immutable `BoardView` v1 snapshot derived fr
 | :--- | :--- | :--- |
 | `revision` | `u64` | Monotonic view sequence number used to reconcile transitions |
 | `orientation` | `"red-below" \| "black-below"` | Controls intersection projection only; never rotates glyphs or lighting |
-| `theme` | `"light" \| "dark"` | Selects warm-paper (`#F3EEE4`) or dark-slate (`#1D2421`) surface presentation |
+| `theme` | `"light" \| "dark"` | Selects the light board surface (`#EDE5D6` under `paper-grain.png`) or the dark one (`#222B27` under `dark-grain.png`) |
 | `material_family` | `"pale-jade" \| "boxwood" \| "ivory-stone"` | Selects baked orthographic piece and audio material family |
 | `glyph_set` | `"simplified-prototype-v1" \| "traditional-prototype-v1"` | Selects curated `zh-Hans` or `zh-Hant` Xiangqi piece faces |
 | `pieces` | `Vec<PieceInstance>` | Stable piece `token_id`, `side` (`red`/`black`), `role`, and canonical `(x, y)` |
@@ -90,11 +90,12 @@ Every platform renderer consumes an immutable `BoardView` v1 snapshot derived fr
 All platform renderers MUST draw strictly in the following bottom-to-top order so shadows, pieces, and non-color state markers never occlude one another erroneously:
 
 1. **Layer 1 — Board Surface & Exact Markings**:
-   - Seamless surface texture (`paper-grain.png` anchored at `#F3EEE4` or `dark-grain.png` anchored at `#1D2421`).
+   - Board surface fill `#EDE5D6` (light) or `#222B27` (dark), with the seamless `paper-grain.png` or `dark-grain.png` tile laid over it at `32%` or `24%` opacity. The page around the board keeps the palette grounds `#F3EEE4` and `#1D2421`.
    - Outer frame, 10 horizontal rank lines (`y = 0..9`), continuous outer vertical boundary files (`x = 0` and `x = 8` crossing the river), split interior files (`x = 1..7` stopping at `y = 4` and resuming at `y = 5`), palace diagonals (`(3,0)–(5,2)`, `(5,0)–(3,2)`, `(3,7)–(5,9)`, `(5,7)–(3,9)`), and L-shaped cannon/soldier fiducial corner ticks (`(1,2)`, `(7,2)`, `(1,7)`, `(7,7)` and `x ∈ {0,2,4,6,8}` on `y ∈ {3,6}`, omitting outward arms on `x = 0` and `x = 8`).
 2. **Layer 2 — Under-Piece State Indicators**:
-   - Last-move origin marker (small center dot + compact corner brackets) and destination marker (square corner brackets framing the landed piece).
-   - Check indicator (12-notch starburst octagon halo in `#A54837` vermilion beneath the checked General).
+   - Last-move corner brackets at both the origin and the destination: four L-shaped corners at `0.52 × d` from the intersection, arms `max(5, 0.16 * s)` long, `2` px, deep jade `#415447` (light) or pale jade `#DCE3CE` (dark), where `d = 0.88 * s` is the piece diameter.
+   - Check indicator: a dashed `#A54837` vermilion ring of radius `0.58 * d`, `2.6` px, dashes `5` on `3` off, around the checked General.
+   - River inscription `楚 河` and `汉 界` (`漢 界` with traditional faces) in a Song serif (Songti SC Bold on Apple, Noto Serif CJK SC on the web) at `0.44 * s`, deep jade at `68%` (light) or pale jade at `56%` (dark).
 3. **Layer 3 — Contact Shadows**:
    - `contact-shadow.png` (`@1x`) / `contact-shadow@2x.png` (`@2x`) drawn at `box_size = s` centered on each stationary piece's projected intersection. All stationary shadows render in Layer 3 before any piece disc in Layer 4 so a shadow never darkens a neighboring piece's carved top surface.
 4. **Layer 4 — Stationary Pieces**:
@@ -102,9 +103,9 @@ All platform renderers MUST draw strictly in the following bottom-to-top order s
 5. **Layer 5 — Moving or Dragged Piece**:
    - Active animated or pointer-dragged piece rendered above all stationary pieces with an elevated, slightly softer shadow offset (`1.6×` standard shadow offset) and subtle `1.04×` lift scale (suppressed when reduced motion is active).
 6. **Layer 6 — Foreground Focus, Selection & Annotation Overlays**:
-   - Selected piece double high-contrast ring (`#F3EEE4` inner halo + `#415447` deep-jade outer stroke).
-   - Quiet legal-move destination dots (`r = 0.115 * s` with contrast halo).
-   - Legal capture target markers (outer contrast ring + 4 vermilion corner brackets around the capturable piece).
+   - Selected piece ring: radius `0.54 * d`, `2.5` px, deep jade (light) or pale jade (dark).
+   - Quiet legal-move destination dots: radius `max(4.5, 0.13 * s)`, deep jade at `78%` (light) or pale jade at `85%` (dark).
+   - Legal capture target ring: radius `0.53 * d`, `2.5` px, vermilion.
    - Keyboard / switch-control focus ring and optional study review arrows.
 
 ---
@@ -128,8 +129,8 @@ Flipping the board between `red-below` and `black-below` updates **only** the bo
 | `deep-jade` | `#415447` | Rim depth accent, selection ring, legal-move dots | `#DCE3CE` on `#415447`: `6.16:1` |
 | `charcoal` | `#252A25` | Black-side recessed engraving & light-mode grid lines | `#252A25` on `#F3EEE4`: `12.64:1` |
 | `vermilion` | `#A54837` | Red-side recessed engraving, capture brackets, check halo | `#A54837` on `#F3EEE4`: `5.07:1` (`4.45:1` on `#DCE3CE` — bold graphic strokes) |
-| `warm-paper` | `#F3EEE4` | Light board surface (`paper-grain.png`) & contrast halos | Primary light ground |
-| `dark-ground` | `#1D2421` | Dark presentation surface (`dark-grain.png`) | `#F3EEE4` on `#1D2421`: `13.69:1` |
+| `warm-paper` | `#F3EEE4` | Light page ground; text on dark grounds | Primary light ground |
+| `dark-ground` | `#1D2421` | Dark page ground around the board | `#F3EEE4` on `#1D2421`: `13.69:1` |
 
 *(Boxwood `#DFC496` pairs `#99392A` deep vermilion with `#252A25` charcoal; Ivory Stone `#EDE6D6` pairs `#A54837` vermilion with `#252A25` charcoal.)*
 
@@ -162,11 +163,11 @@ Flipping the board between `red-below` and `black-below` updates **only** the bo
 
 1. **Non-Color-Only State Geometry (WCAG 2.2 SC 1.4.1 & 1.4.11)**:
    - **Piece Side**: Distinguished simultaneously by vermilion vs. charcoal ink AND side-specific traditional/simplified ideographs (`帅/帥` vs. `将/將`, `仕` vs. `士`, `相` vs. `象`, `兵` vs. `卒`, and Traditional `炮` vs. `砲`).
-   - **Selected Piece**: Continuous double concentric ring (`warm-paper` inner separator + `deep-jade` outer stroke).
-   - **Quiet Legal Destination**: Small centered filled disc (`r = 0.115 * s`).
-   - **Legal Capture Target**: Four outer corner brackets + contrast halo framing the target piece.
-   - **Last Move**: Compact corner brackets at origin + full square corner brackets at destination.
-   - **Check**: 12-notch polygonal starburst halo beneath the checked General.
+   - **Selected Piece**: Continuous solid ring around the piece.
+   - **Quiet Legal Destination**: Small centered filled disc on an empty intersection.
+   - **Legal Capture Target**: Vermilion ring around the capturable piece; it marks an occupied point, where a destination dot marks an empty one.
+   - **Last Move**: Corner brackets at the origin and the destination.
+   - **Check**: Dashed ring around the checked General, told from the solid selection ring by its dashes.
 2. **Parallel Native Semantic Accessibility Tree & Keyboard Control**:
    - Canvas/GPU board surfaces MUST expose a synchronized `9 × 10` semantic grid (`role="grid"` on Web, `NSAccessibilityGridRole` / `UIAccessibilityContainer` on Apple, Compose `Semantics` on Android) ordered consistently with the active orientation.
    - Every cell exposes localized coordinates, occupant side/role, and state (`selected`, `in check`, `legal move`, `legal capture`).
