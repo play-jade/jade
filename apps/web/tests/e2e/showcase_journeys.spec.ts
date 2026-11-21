@@ -32,10 +32,10 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     await expect(page.getByTestId('xiangqi-board')).toBeVisible()
     await expect(page.getByTestId('board-status-strip')).toContainText('Red to move')
 
-    // Play Cannon 2 to 5 (`h2` -> `e2`) and verify Chinese notation + turn switch
+    // Play Cannon 2 to 5 (`h2` -> `e2`) and verify English-locale WXF notation + turn switch
     await playBoardSquares(page, 'h2', 'e2')
 
-    await expect(page.getByTestId('move-list')).toContainText('炮二平五')
+    await expect(page.getByTestId('move-list')).toContainText('C2=5')
     await expect(page.getByTestId('board-status-strip')).toContainText('Black to move')
 
     // Capture desktop light-paper visual reference plate
@@ -107,16 +107,16 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         timeout: 6_000,
       })
 
-      // Red plays h2 -> e2; Black sees 炮二平五!
+      // Red plays h2 -> e2; Black sees C2=5 (WXF under the English locale)!
       await playBoardSquares(redPage, 'h2', 'e2')
-      await expect(redPage.getByTestId('match-move-list')).toContainText('炮二平五')
-      await expect(blkPage.getByTestId('match-move-list')).toContainText('炮二平五', {
+      await expect(redPage.getByTestId('match-move-list')).toContainText('C2=5')
+      await expect(blkPage.getByTestId('match-move-list')).toContainText('C2=5', {
         timeout: 6_000,
       })
 
-      // Black plays h9 -> g7; Red sees 马8进7!
+      // Black plays h9 -> g7; Red sees H8+7!
       await playBoardSquares(blkPage, 'h9', 'g7')
-      await expect(redPage.getByTestId('match-move-list')).toContainText('马8进7', {
+      await expect(redPage.getByTestId('match-move-list')).toContainText('H8+7', {
         timeout: 6_000,
       })
 
@@ -146,11 +146,11 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         { timeout: 6_000 },
       )
       await playBoardSquares(redPage, 'h0', 'g2')
-      await expect(blkPage.getByTestId('match-move-list')).toContainText('马二进三', {
+      await expect(blkPage.getByTestId('match-move-list')).toContainText('H2+3', {
         timeout: 6_000,
       })
       await playBoardSquares(blkPage, 'i9', 'h9')
-      await expect(redPage.getByTestId('match-move-list')).toContainText('车9平8', {
+      await expect(redPage.getByTestId('match-move-list')).toContainText('R9=8', {
         timeout: 6_000,
       })
 
@@ -217,5 +217,54 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     } finally {
       await noJsContext.close()
     }
+  })
+
+  test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({
+    page,
+  }) => {
+    const pageErrors: string[] = []
+    page.on('pageerror', (e) => pageErrors.push(e.message))
+    page.on('console', (m) => {
+      if (m.type() === 'error') pageErrors.push(m.text())
+    })
+    await page.setViewportSize({ width: 1000, height: 640 })
+    await page.goto('/archive')
+
+    await expect(page).toHaveTitle('Jade')
+    await expect(page.getByTestId('brand-home-link')).toHaveText('Jade')
+
+    // English reads WXF by default; a Chinese locale reads Chinese notation.
+    const moves = page.getByTestId('archive-move')
+    await expect(moves.first()).toHaveText('C2=5')
+    await page.getByTestId('pref-locale').selectOption('zh-Hans-CN')
+    await expect(moves.first()).toHaveText('炮二平五')
+    await page.getByTestId('pref-locale').selectOption('en-US')
+    await expect(moves.first()).toHaveText('C2=5')
+
+    // Selecting a move jumps to that ply and stays there.
+    await moves.nth(2).click()
+    await expect(page.getByTestId('archive-ply')).toContainText('3 /')
+    await page.waitForTimeout(1500)
+    await expect(page.getByTestId('archive-ply')).toContainText('3 /')
+    await expect(moves.nth(2)).toHaveAttribute('aria-current', 'step')
+
+    // Every recorded ply, the last one included, renders without unmounting the page.
+    const count = await moves.count()
+    for (let i = 0; i < count; i++) {
+      await moves.nth(i).click()
+      await expect(page.getByTestId('archive-ply')).toContainText(`${i + 1} / ${count}`)
+    }
+    await expect(page.getByTestId('xiangqi-board')).toBeVisible()
+    await expect(page.getByTestId('archive-error')).toHaveCount(0)
+
+    // The sample notice overlays the page, so dismissing it moves nothing.
+    const banner = page.getByTestId('archive-provenance-banner')
+    await expect(banner).toHaveCSS('position', 'fixed')
+    const boardTop = (await page.getByTestId('xiangqi-board').boundingBox())?.y
+    await page.getByTestId('archive-provenance-dismiss').click()
+    await expect(banner).toHaveCount(0)
+    expect((await page.getByTestId('xiangqi-board').boundingBox())?.y).toBe(boardTop)
+
+    expect(pageErrors).toEqual([])
   })
 })

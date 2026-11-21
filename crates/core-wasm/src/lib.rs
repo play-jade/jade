@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use xiangqi_core::{
     ADOPTED_RULES_PROFILE, BoardViewSnapshot, BoardViewport, GameState, Move, NotationDialect,
     Orientation, PresentationPrefsSnapshot, STARTING_FEN, Square, format_chinese_move,
-    parse_move_token, replay_tokens,
+    format_wxf_move, parse_move_token, replay_tokens,
 };
 
 #[derive(Serialize)]
@@ -257,6 +257,16 @@ enum DirectWasmRequest {
     ArchivePosition {
         fen: Option<String>,
     },
+    /// Notates a recorded move list in one dialect, stopping at the first ply that does not replay.
+    NotateMoves {
+        fen: Option<String>,
+        #[serde(default)]
+        moves_uci: Vec<String>,
+        #[serde(default)]
+        wxf: bool,
+        #[serde(default)]
+        traditional_glyphs: bool,
+    },
 }
 
 fn default_true() -> bool {
@@ -284,6 +294,43 @@ fn replay_game(
         zh_moves.push(zh);
     }
     Ok((game, zh_moves))
+}
+
+/// Notates each recorded move until the first one that fails to parse or is illegal. The response holds the
+/// notated prefix and, when the record breaks, the zero-based index of the first bad ply and its error.
+fn notate_moves(
+    initial_fen: Option<&str>,
+    moves_uci: &[String],
+    wxf: bool,
+    traditional: bool,
+) -> Result<serde_json::Value, String> {
+    let start = initial_fen
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(STARTING_FEN);
+    let mut game = GameState::from_fen(start, ADOPTED_RULES_PROFILE).map_err(|e| e.to_string())?;
+    let mut notations = Vec::with_capacity(moves_uci.len());
+    for (ply, tok) in moves_uci.iter().enumerate() {
+        let step = parse_move_token(game.board(), tok, ply).and_then(|mv| {
+            let text = if wxf {
+                format_wxf_move(game.board(), mv)
+            } else {
+                format_chinese_move(game.board(), mv, traditional)
+            }?;
+            game.apply_move(mv)?;
+            Ok(text)
+        });
+        match step {
+            Ok(text) => notations.push(text),
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "notations": notations,
+                    "invalid_ply": ply,
+                    "invalid_reason": e.to_string(),
+                }));
+            }
+        }
+    }
+    Ok(serde_json::json!({ "notations": notations, "invalid_ply": null, "invalid_reason": null }))
 }
 
 pub fn handle_direct_json_request(input: &[u8]) -> i32 {
@@ -434,6 +481,15 @@ pub fn handle_direct_json_request(input: &[u8]) -> i32 {
                 ),
             }
         }
+        DirectWasmRequest::NotateMoves {
+            fen,
+            moves_uci,
+            wxf,
+            traditional_glyphs,
+        } => write_response(
+            true,
+            notate_moves(fen.as_deref(), &moves_uci, wxf, traditional_glyphs),
+        ),
         DirectWasmRequest::ArchivePosition { fen } => {
             let provider = SampleArchiveProvider::new_embedded();
             let target_fen = fen
@@ -518,5 +574,26 @@ mod tests {
         let mv_json: serde_json::Value =
             LAST_RESPONSE.with(|c| serde_json::from_slice(&c.borrow()).unwrap());
         assert_eq!(mv_json["data"]["move_chinese"], "炮二平五");
+    }
+
+    #[test]
+    fn notate_moves_follows_dialect_and_reports_the_first_bad_ply() {
+        let status = handle_direct_json_request(
+            br#"{"op":"notate_moves","moves_uci":["h2e2","h9g7","h0g2","b9c7","b7c7"],"wxf":true}"#,
+        );
+        assert_eq!(status, 1);
+        let json: serde_json::Value =
+            LAST_RESPONSE.with(|c| serde_json::from_slice(&c.borrow()).unwrap());
+        assert_eq!(
+            json["data"]["notations"],
+            serde_json::json!(["C2=5", "H8+7", "H2+3", "H2+3"])
+        );
+        assert_eq!(json["data"]["invalid_ply"], 4);
+
+        handle_direct_json_request(br#"{"op":"notate_moves","moves_uci":["h2e2"]}"#);
+        let json: serde_json::Value =
+            LAST_RESPONSE.with(|c| serde_json::from_slice(&c.borrow()).unwrap());
+        assert_eq!(json["data"]["notations"], serde_json::json!(["炮二平五"]));
+        assert!(json["data"]["invalid_ply"].is_null());
     }
 }

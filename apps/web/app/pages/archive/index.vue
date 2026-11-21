@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import {
   computeBoardView,
   getSampleArchiveGame,
+  notateMoves,
   querySamplePosition,
   searchSampleArchive,
 } from '~/utils/core-wasm'
@@ -12,7 +13,7 @@ const {
   locale,
   material,
   darkSurface,
-  notationMode,
+  notationDialect,
   traditionalGlyphs,
   t,
 } = usePreferences()
@@ -20,13 +21,22 @@ const {
 const searchQuery = ref(typeof route.query.q === 'string' ? route.query.q : '')
 const selectedGameId = ref('sample-game-central-cannon-001')
 const replayPly = ref(0)
+const bannerDismissed = ref(false)
 
-const { data: archiveData, refresh: refreshSearch } = await useAsyncData(
+const { data: archiveData, error: archiveError, refresh: refreshSearch } = await useAsyncData(
   () => `archive-directory-${searchQuery.value}`,
   async () => {
     const directory = await searchSampleArchive(searchQuery.value)
     const game = await getSampleArchiveGame(selectedGameId.value)
-    const activeMoves = game.moves_uci.slice(0, replayPly.value)
+    // A record can hold a move that does not replay; the board stops at the last move that does.
+    const replay = await notateMoves({
+      fen: game.initial_fen,
+      movesUci: game.moves_uci,
+      wxf: notationDialect.value === 'wxf',
+      traditionalGlyphs: traditionalGlyphs.value,
+    })
+    const replayable = replay.invalid_ply ?? game.moves_uci.length
+    const activeMoves = game.moves_uci.slice(0, Math.min(replayPly.value, replayable))
     const board = await computeBoardView({
       fen: game.initial_fen,
       movesUci: activeMoves,
@@ -38,12 +48,18 @@ const { data: archiveData, refresh: refreshSearch } = await useAsyncData(
       materialId: material.value,
       darkSurface: darkSurface.value,
     })
-    const explorer = await querySamplePosition(board.fen)
+    const explorer = await querySamplePosition(board.fen).catch(() => null)
     return {
       directory,
       game,
       board,
       explorer,
+      replayable,
+      notations:
+        notationDialect.value === 'uci'
+          ? game.moves_uci
+          : game.moves_uci.map((u, i) => replay.notations[i] ?? u),
+      invalidMove: replay.invalid_ply === null ? null : game.moves_uci[replay.invalid_ply],
     }
   },
   {
@@ -55,8 +71,26 @@ const activeMovesUci = computed(() =>
   archiveData.value ? archiveData.value.game.moves_uci.slice(0, replayPly.value) : [],
 )
 
+const gameMovesUci = computed(() => archiveData.value?.game.moves_uci ?? [])
+const gameFen = computed(() => archiveData.value?.game.initial_fen)
+const { labels: moveLabels } = useNotatedMoves(
+  gameMovesUci,
+  gameFen,
+  computed(() => archiveData.value?.notations),
+)
+
+/** Moves paired by move number: Red's ply, then Black's. */
+const moveRows = computed(() => {
+  const rows: { number: number; plies: { ply: number; label: string }[] }[] = []
+  gameMovesUci.value.forEach((u, idx) => {
+    if (idx % 2 === 0) rows.push({ number: idx / 2 + 1, plies: [] })
+    rows[rows.length - 1].plies.push({ ply: idx + 1, label: moveLabels.value[idx] ?? u })
+  })
+  return rows
+})
+
 function stepPly(next: number) {
-  const max = archiveData.value?.game.moves_uci.length ?? 0
+  const max = archiveData.value?.replayable ?? 0
   replayPly.value = Math.max(0, Math.min(max, next))
 }
 
@@ -70,15 +104,31 @@ async function applyContinuation(uci: string) {
 </script>
 
 <template>
-  <div v-if="archiveData" class="archive-page">
-    <!-- Explicit Synthetic Fixture Provenance Banner (Section 9) -->
+  <div
+    v-if="archiveData"
+    class="archive-page"
+    :class="{ 'has-banner': archiveData.directory.is_synthetic_fixture }"
+  >
+    <!-- Explicit Synthetic Fixture Provenance Banner (Section 9), overlaid so it never moves the page -->
     <div
-      v-if="archiveData.directory.is_synthetic_fixture"
+      v-if="archiveData.directory.is_synthetic_fixture && !bannerDismissed"
       class="provenance-banner"
+      role="note"
       data-testid="archive-provenance-banner"
     >
-      <strong>Sample Provider ({{ archiveData.directory.dataset_id }}):</strong>
-      {{ archiveData.directory.provenance_banner }}
+      <p class="provenance-text">
+        <strong>Sample Provider ({{ archiveData.directory.dataset_id }}):</strong>
+        {{ archiveData.directory.provenance_banner }}
+      </p>
+      <button
+        type="button"
+        class="provenance-dismiss"
+        aria-label="Dismiss sample provider notice"
+        data-testid="archive-provenance-dismiss"
+        @click="bannerDismissed = true"
+      >
+        ×
+      </button>
     </div>
 
     <div class="archive-grid">
@@ -105,7 +155,7 @@ async function applyContinuation(uci: string) {
             &lt; Prev
           </button>
           <span class="ply-indicator" data-testid="archive-ply">
-            {{ t('game.ply') }} {{ replayPly }} / {{ archiveData.game.moves_uci.length }}
+            {{ t('game.ply') }} {{ replayPly }} / {{ archiveData.replayable }}
           </span>
           <button type="button" class="jade-btn" data-testid="archive-next" @click="stepPly(replayPly + 1)">
             Next &gt;
@@ -114,24 +164,35 @@ async function applyContinuation(uci: string) {
             type="button"
             class="jade-btn"
             data-testid="archive-last"
-            @click="stepPly(archiveData.game.moves_uci.length)"
+            @click="stepPly(archiveData.replayable)"
           >
             End &gt;|
           </button>
         </div>
 
         <ol class="archive-moves" data-testid="archive-move-list">
-          <li
-            v-for="(u, idx) in archiveData.game.moves_uci"
-            :key="`${idx}-${u}`"
-            class="archive-move-chip"
-            :class="{ current: replayPly === idx + 1 }"
-            @click="stepPly(idx + 1)"
-          >
-            <span>{{ idx + 1 }}.</span>
-            <strong>{{ notationMode === 'chinese' ? archiveData.game.moves_chinese[idx] || u : u }}</strong>
+          <li v-for="row in moveRows" :key="row.number" class="archive-move-row">
+            <span class="archive-move-number">{{ row.number }}.</span>
+            <button
+              v-for="m in row.plies"
+              :key="m.ply"
+              type="button"
+              class="archive-move"
+              :class="{ current: replayPly === m.ply }"
+              :disabled="m.ply > archiveData.replayable"
+              :aria-current="replayPly === m.ply ? 'step' : undefined"
+              :data-ply="m.ply"
+              data-testid="archive-move"
+              @click="stepPly(m.ply)"
+            >
+              {{ m.label }}
+            </button>
           </li>
         </ol>
+        <p v-if="archiveData.invalidMove" class="record-break" data-testid="archive-record-break">
+          The record stops replaying at ply {{ archiveData.replayable + 1 }}: {{ archiveData.invalidMove }} is not a
+          legal move in that position.
+        </p>
       </div>
 
       <aside class="archive-side-col">
@@ -140,11 +201,18 @@ async function applyContinuation(uci: string) {
           <div class="explorer-head">
             <h2 class="card-heading">Position Explorer</h2>
             <span class="source-pill" data-testid="explorer-source-label">
-              Sample Archive · {{ archiveData.explorer.sample_size_games }} game(s)
+              Sample Archive · {{ archiveData.explorer?.sample_size_games ?? 0 }} game(s)
             </span>
           </div>
 
-          <table v-if="archiveData.explorer.continuations.length > 0" class="explorer-table" data-testid="continuation-table">
+          <p v-if="!archiveData.explorer" class="muted-note" data-testid="explorer-unavailable">
+            This position could not be looked up in the sample archive.
+          </p>
+          <table
+            v-else-if="archiveData.explorer.continuations.length > 0"
+            class="explorer-table"
+            data-testid="continuation-table"
+          >
             <thead>
               <tr>
                 <th>Move</th>
@@ -211,6 +279,10 @@ async function applyContinuation(uci: string) {
       </aside>
     </div>
   </div>
+  <div v-else class="archive-error" role="alert" data-testid="archive-error">
+    <p>The archive could not load{{ archiveError ? `: ${archiveError.message}` : '' }}.</p>
+    <button type="button" class="jade-btn" @click="refreshSearch()">Try again</button>
+  </div>
 </template>
 
 <style scoped>
@@ -220,12 +292,53 @@ async function applyContinuation(uci: string) {
   gap: 16px;
 }
 
+/* Room below the content for the overlaid banner, kept after dismissal so the page height never changes. */
+.archive-page.has-banner {
+  padding-bottom: 96px;
+}
+
+/* Overlaid at the bottom of the viewport so showing or dismissing it never moves the page. */
 .provenance-banner {
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: rgba(65, 84, 71, 0.12);
-  border: 1px solid rgba(65, 84, 71, 0.3);
-  font-size: 0.85rem;
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 20;
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 32px));
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 10px 10px 16px;
+  border-radius: 10px;
+  background: rgba(29, 36, 33, 0.92);
+  color: #F3EEE4;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.provenance-text {
+  margin: 0;
+  flex: 1;
+}
+
+.provenance-dismiss {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.provenance-dismiss:hover,
+.provenance-dismiss:focus-visible {
+  background: rgba(243, 238, 228, 0.14);
 }
 
 .archive-grid {
@@ -282,24 +395,65 @@ async function applyContinuation(uci: string) {
   list-style: none;
   padding: 0;
   margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 2px 16px;
+  font-variant-numeric: tabular-nums;
 }
 
-.archive-move-chip {
-  padding: 4px 8px;
-  border-radius: 5px;
-  background: rgba(65, 84, 71, 0.1);
-  font-size: 0.84rem;
-  cursor: pointer;
-  display: inline-flex;
+.archive-move-row {
+  display: grid;
+  grid-template-columns: 2.2em minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
   gap: 4px;
 }
 
-.archive-move-chip.current {
+.archive-move-number {
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+
+.archive-move {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.archive-move:hover:not(:disabled):not(.current) {
+  background: rgba(65, 84, 71, 0.1);
+}
+
+.archive-move.current {
   background: #415447;
   color: #F3EEE4;
+}
+
+.archive-move:disabled {
+  cursor: default;
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.record-break {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #A54837;
+}
+
+.archive-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 24px 0;
 }
 
 .explorer-head {

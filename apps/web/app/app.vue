@@ -75,6 +75,8 @@ useHead(() => ({
         <label class="jade-pref-field">
           <span class="sr-only">Notation</span>
           <select v-model="notationMode" data-testid="pref-notation" class="jade-select">
+            <option value="auto">Notation: Auto</option>
+            <option value="wxf">WXF</option>
             <option value="chinese">中文纵线</option>
             <option value="uci">Coord (UCI)</option>
           </select>

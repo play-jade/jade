@@ -4,8 +4,8 @@
   "notes": "Canonical Xiangqi glossary reviewed prior to screen translation (Section 6). In Xiangqi, having no legal moves without check (困毙 / 困斃) is a loss for the side to move, never a draw; English strings make this loss outcome explicit rather than calling it an unqualified stalemate.",
   "terms": {
     "product.title": {
-      "en-US": "Jade — Xiangqi",
-      "en-GB": "Jade — Xiangqi",
+      "en-US": "Jade",
+      "en-GB": "Jade",
       "zh-Hans-CN": "玉枰象棋 · Jade",
       "zh-Hant-TW": "玉枰象棋 · Jade",
       "zh-Hant-HK": "玉枰象棋 · Jade"

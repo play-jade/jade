@@ -15,7 +15,7 @@ export default defineNuxtConfig({
   },
   app: {
     head: {
-      title: 'Jade — Xiangqi · 玉枰象棋',
+      title: 'Jade',
       htmlAttrs: { lang: 'en-US' },
       meta: [
         { charset: 'utf-8' },

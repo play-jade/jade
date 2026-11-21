@@ -12,7 +12,6 @@ const {
   locale,
   material,
   darkSurface,
-  notationMode,
   soundEnabled,
   reducedMotion,
   traditionalGlyphs,
@@ -256,12 +255,13 @@ async function createFriendlyInvitation() {
   }
 }
 
+const { labels: moveLabels } = useNotatedMoves(activeMovesUci)
+
 const displayedMoves = computed(() => {
-  const zh = boardData.value?.moves_chinese ?? []
   const uci = activeMovesUci.value
   return uci.map((u, idx) => ({
     ply: idx + 1,
-    label: notationMode.value === 'chinese' ? zh[idx] || u : u,
+    label: moveLabels.value[idx] ?? u,
     uci: u,
   }))
 })

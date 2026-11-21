@@ -37,7 +37,6 @@ const {
   locale,
   material,
   darkSurface,
-  notationMode,
   soundEnabled,
   reducedMotion,
   traditionalGlyphs,
@@ -47,6 +46,7 @@ const {
 const code = computed(() => String(route.params.code || ''))
 const assignedSide = ref<'red' | 'black' | null>(null)
 const snapshot = ref<MatchSnapshot | null>(null)
+const { labels: moveLabels } = useNotatedMoves(computed(() => snapshot.value?.moves_uci ?? []))
 const connectionState = ref<'connecting' | 'connected' | 'reconnecting' | 'error'>('connecting')
 const errorBanner = ref<string | null>(null)
 const copiedLink = ref(false)
@@ -729,7 +729,7 @@ onBeforeUnmount(() => {
             @click="((replayPly = i + 1), (postgameBranchMoves = []))"
           >
             <span>{{ i + 1 }}.</span>
-            <strong>{{ notationMode === 'chinese' ? snapshot?.moves_chinese[i] || u : u }}</strong>
+            <strong>{{ moveLabels[i] ?? u }}</strong>
           </li>
         </ol>
       </section>

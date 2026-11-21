@@ -112,8 +112,7 @@
         "b9c7",
         "c3c4",
         "g6g5",
-        "b0c2",
-        "b7c7"
+        "b0c2"
       ],
       "moves_chinese": [
         "炮二平五",
@@ -124,8 +123,7 @@
         "马２进３",
         "兵七进一",
         "卒７进１",
-        "马八进七",
-        "炮２平３"
+        "马八进七"
       ],
       "recorded_result": "red_win",
       "recorded_result_reason": "resignation",
