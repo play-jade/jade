@@ -91,7 +91,8 @@ enum LamplitTheme {
     static let ground = Color(red: 0x1D / 255.0, green: 0x24 / 255.0, blue: 0x21 / 255.0)
     static let paper = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0)
     static let paleJade = Color(red: 0xDC / 255.0, green: 0xE3 / 255.0, blue: 0xCE / 255.0)
-    static let vermilionOnDark = Color(red: 0xC4 / 255.0, green: 0x5A / 255.0, blue: 0x45 / 255.0)
+    /// Vermilion lightened for small text on the dark ground; the web uses the same `#E69383`.
+    static let vermilionOnDark = Color(red: 0xE6 / 255.0, green: 0x93 / 255.0, blue: 0x83 / 255.0)
     static let mutedText = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0).opacity(0.62)
     static let hairline = Color(red: 0xF3 / 255.0, green: 0xEE / 255.0, blue: 0xE4 / 255.0).opacity(0.12)
 
