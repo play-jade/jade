@@ -206,7 +206,18 @@ export function getCoreWasm(): Promise<RawWasmExports> {
   return cachedExportsPromise
 }
 
-async function callCoreJson<T>(payload: Record<string, unknown>): Promise<T> {
+/** A core call that answered with an error; `code` is set when the operation names one. */
+export class CoreCallError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message)
+    this.name = 'CoreCallError'
+  }
+}
+
+export async function callCoreJson<T>(payload: Record<string, unknown>): Promise<T> {
   const wasm = await getCoreWasm()
   const reqBytes = encoder.encode(JSON.stringify(payload))
   const ptr = wasm.jade_wasm_alloc(reqBytes.length)
@@ -220,9 +231,9 @@ async function callCoreJson<T>(payload: Record<string, unknown>): Promise<T> {
   const outPtr = wasm.jade_wasm_response_ptr()
   const outLen = wasm.jade_wasm_response_len()
   const outStr = decoder.decode(new Uint8Array(wasm.memory.buffer, outPtr, outLen))
-  const parsed = JSON.parse(outStr) as { ok: boolean; data?: T; error?: string }
+  const parsed = JSON.parse(outStr) as { ok: boolean; data?: T; error?: string; code?: string }
   if (!parsed.ok || parsed.data === undefined) {
-    throw new Error(parsed.error || 'core_wasm call failed')
+    throw new CoreCallError(parsed.error || 'core_wasm call failed', parsed.code)
   }
   return parsed.data
 }
