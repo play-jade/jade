@@ -3,5 +3,5 @@ rust = { version = "1.98.1", components = "rustfmt,clippy,rust-analyzer", target
 node = "24.22.1"
 pnpm = "12.15.0"
 "aqua:go-task/task" = "3.54.0"
-"github:pithecene/bosun" = { version = "0.26.0", os = ["linux", "macos"] }
+"github:pithecene/bosun" = { version = "0.28.1", os = ["linux", "macos"] }
 sccache = "0.19.0"

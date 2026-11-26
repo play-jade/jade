@@ -26,7 +26,7 @@ This repository (`play-jade/jade`) is the single public monorepo for the Jade Xi
 
 ## Verification Evidence Requirements
 
-- Drive changes through pinned Bosun `v0.26.0` (`mise.toml` + `bosun.yaml`): start isolated worktrees with `bosun worktree <type> <scope> <slug>` (MCP `change_start`), validate static gates with `bosun check` (MCP `check_run`) and manifest-scoped tests/lints with `bosun verify`, publish ready PRs with `bosun submit` / `bosun submit --onto` (MCP `submission_open`, which derives title/body from commits and run records), and verify merge readiness with `bosun ready` (MCP `readiness`).
+- Drive changes through pinned Bosun `v0.28.1` (`mise.toml` + `bosun.yaml`): start isolated worktrees with `bosun worktree <type> <scope> <slug>` (MCP `change_start`), validate static gates with `bosun check` (MCP `check_run`) and manifest-scoped tests/lints with `bosun verify`, publish ready PRs with `bosun submit` / `bosun submit --onto` (MCP `submission_open`, which derives title/body from commits and run records), and verify merge readiness with `bosun ready` (MCP `readiness`).
 - Run shared rules, notation, repetition/chase (`例1`–`例39`), and `BoardView` geometry/hit-testing fixtures across every active binding (`Rust`, `wasm-bindgen`, `UniFFI Swift`, `UniFFI Kotlin`, `.NET C ABI`, and `GTK`).
 - Validate `assets/manifest.json` against `assets/manifest.schema.json` and keep `docs/rendering.md` and `docs/visual-reference/` synchronized with renderer changes.
 - Record exact OS, SDK, device/simulator, and build mode for every test or screenshot claim.
