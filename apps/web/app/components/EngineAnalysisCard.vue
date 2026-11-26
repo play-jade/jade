@@ -8,7 +8,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'playEngineMove', uci: string): void
+  /** A suggestion for the position `stateId` names; the receiver applies it only to that position. */
+  (e: 'playEngineMove', uci: string, stateId: string): void
 }>()
 
 const { t } = usePreferences()
@@ -25,6 +26,17 @@ const {
   stopAnalysis,
   invalidateForState,
 } = useLocalEngine()
+
+// Engine moves show in the reader's notation, notated from the analysed position; UCI stays internal.
+// With no engine line there is nothing to notate, so the game is not replayed for an empty card.
+const pvPath = computed(() => (pvUci.value.length > 0 ? [...props.movesUci, ...pvUci.value] : []))
+const { labels: pvPathLabels } = useNotatedMoves(pvPath, computed(() => props.fen))
+const pvLabels = computed(() =>
+  pvPathLabels.value.length > props.movesUci.length ? pvPathLabels.value.slice(props.movesUci.length) : [],
+)
+const bestMoveLabel = computed(() =>
+  bestMoveUci.value && pvUci.value[0] === bestMoveUci.value ? (pvLabels.value[0] ?? bestMoveUci.value) : bestMoveUci.value,
+)
 
 watch(
   () => props.stateId,
@@ -77,15 +89,15 @@ function onToggleEngine() {
     </div>
 
     <div v-if="pvUci.length > 0 || bestMoveUci" class="engine-pv" data-testid="engine-pv">
-      <code>{{ pvUci.join(' ') || bestMoveUci }}</code>
+      <code>{{ pvLabels.join(' ') || bestMoveLabel }}</code>
       <button
         v-if="bestMoveUci"
         type="button"
         class="jade-pill-btn"
         data-testid="engine-play-best"
-        @click="emit('playEngineMove', bestMoveUci)"
+        @click="emit('playEngineMove', bestMoveUci, stateId)"
       >
-        Try {{ bestMoveUci }}
+        Try {{ bestMoveLabel }}
       </button>
     </div>
 

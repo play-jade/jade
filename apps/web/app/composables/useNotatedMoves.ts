@@ -24,7 +24,7 @@ export function useNotatedMoves(
     async () => {
       const moves = [...movesUci.value]
       const id = ++request
-      if (notationDialect.value === 'uci') {
+      if (moves.length === 0 || notationDialect.value === 'uci') {
         labels.value = moves
         invalidPly.value = null
         return
