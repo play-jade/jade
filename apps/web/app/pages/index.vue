@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
 import { loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
@@ -22,7 +22,8 @@ const {
 const redBelow = ref(true)
 const selectedUci = ref<string | null>(null)
 const mainlineMovesUci = ref<string[]>([])
-// Local play extends the mainline at its end; a move from an earlier ply starts a variation in memory.
+// Local play extends the mainline at its end; a move from an earlier ply starts a variation, which this
+// device keeps beside the game and restores after a reload. New game clears both.
 const session = useReplaySession({
   source: ref({ kind: 'local', id: 'active_board', revision: 'local' }),
   rootFen: ref(STARTING_FEN),
@@ -30,8 +31,9 @@ const session = useReplaySession({
   recordedMovesUci: mainlineMovesUci,
   traditionalGlyphs,
   extendAtEnd: true,
+  persist: true,
 })
-const { cursor: cursorPly, variation, activePath: activeMovesUci } = session
+const { cursor: cursorPly, variation, parked, activePath: activeMovesUci } = session
 
 const lastAnnouncement = ref('')
 const moveError = ref<string | null>(null)
@@ -111,6 +113,9 @@ onMounted(async () => {
     mainlineMovesUci.value = saved.movesUci
     cursorPly.value = saved.movesUci.length
   }
+  // The kept variation reapplies only to the game it was made on, so it is read after the game.
+  await nextTick()
+  await session.restoreDraft()
 })
 
 watch(
@@ -172,9 +177,12 @@ function handleUndo() {
   if (mainlineMovesUci.value.length > 0) {
     mainlineMovesUci.value = mainlineMovesUci.value.slice(0, -1)
     cursorPly.value = mainlineMovesUci.value.length
+    // A kept variation that leaves the game after the taken-back move no longer has a place to start.
+    if (parked.value && parked.value.originPly > mainlineMovesUci.value.length) session.discardVariation()
   }
 }
 
+/** New game clears the board and the variation this device kept for the old one. */
 function handleReset() {
   selectedUci.value = null
   session.discardVariation()
@@ -185,14 +193,28 @@ function handleReset() {
 
 function stepToPly(target: number) {
   selectedUci.value = null
-  session.discardVariation()
   session.selectPly(target)
 }
 
-function exitBranch() {
-  const origin = variation.value?.originPly
-  session.discardVariation()
-  if (origin !== undefined) session.selectPly(origin)
+function returnToMainLine() {
+  selectedUci.value = null
+  session.returnToRecordedLine()
+}
+
+function resumeVariation() {
+  selectedUci.value = null
+  session.resumeDraft()
+}
+
+async function exportVariation() {
+  const blob = await session.exportDraft()
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'jade-local-variation.json'
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 async function createFriendlyInvitation() {
@@ -364,12 +386,19 @@ const moveRows = computed(() => {
 
     <aside class="jade-ledger">
       <section class="moves" data-testid="move-list-card" aria-label="Moves">
-        <div v-if="variation" class="branch-banner" data-testid="branch-banner">
-          <span>Trying a line from ply {{ variation.originPly }}</span>
-          <button type="button" class="jade-pill-btn" data-testid="exit-branch-btn" @click="exitBranch">
-            Return to main line
-          </button>
-        </div>
+        <ReplayVariationBar
+          :variation="variation"
+          :parked="parked"
+          :save-state="session.saveState.value"
+          :will-replace-draft="session.willReplaceDraft.value"
+          :draft-notice="session.draftNotice.value"
+          :feedback="session.feedback.value"
+          :recorded-moves-uci="mainlineMovesUci"
+          :root-fen="STARTING_FEN"
+          @return-to-game="returnToMainLine"
+          @resume="resumeVariation"
+          @export="exportVariation"
+        />
 
         <ol v-if="displayedMoves.length > 0" class="jade-move-list" data-testid="move-list">
           <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
@@ -476,15 +505,6 @@ const moveRows = computed(() => {
   display: flex;
   gap: 2px;
   padding-top: 8px;
-}
-
-.branch-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.8rem;
-  color: var(--jade-pale);
 }
 
 .invite {

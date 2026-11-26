@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { DraftSaveState, Variation } from '~/composables/useReplaySession'
 
 /** The recorded game stays intact; this bar shows the visitor's variation and where it is kept. */
@@ -9,7 +10,26 @@ const props = defineProps<{
   willReplaceDraft: boolean
   draftNotice: string | null
   feedback: string | null
+  /** The recorded line the variation leaves, so its moves are notated from the right position. */
+  recordedMovesUci: string[]
+  rootFen: string
 }>()
+
+// The variation's moves in the reader's notation, notated along the recorded line up to its origin.
+const line = computed(() => props.variation ?? props.parked)
+const linePath = computed(() =>
+  line.value ? [...props.recordedMovesUci.slice(0, line.value.originPly), ...line.value.movesUci] : [],
+)
+const { labels } = useNotatedMoves(linePath, computed(() => props.rootFen))
+const lineMoves = computed(() => {
+  const origin = line.value?.originPly ?? 0
+  return labels.value.slice(origin).map((label, index) => ({
+    ply: origin + index + 1,
+    number: Math.floor((origin + index) / 2) + 1,
+    black: (origin + index) % 2 === 1,
+    label,
+  }))
+})
 
 const emit = defineEmits<{
   (e: 'returnToGame'): void
@@ -52,6 +72,13 @@ const emit = defineEmits<{
       </button>
     </template>
 
+    <ol v-if="lineMoves.length > 0" class="variation-moves" data-testid="variation-moves" aria-label="Variation moves">
+      <li v-for="(m, i) in lineMoves" :key="m.ply" :class="{ current: props.variation && i === lineMoves.length - 1 }">
+        <span v-if="!m.black || i === 0" class="variation-number">{{ m.number }}{{ m.black ? '…' : '.' }}</span>
+        <span class="variation-label">{{ m.label }}</span>
+      </li>
+    </ol>
+
     <span v-if="props.draftNotice" class="variation-warn" data-testid="variation-notice">{{ props.draftNotice }}</span>
     <span v-if="props.feedback" class="variation-warn" data-testid="variation-feedback">{{ props.feedback }}</span>
   </div>
@@ -72,5 +99,26 @@ const emit = defineEmits<{
 
 .variation-warn {
   color: var(--jade-vermilion-text);
+}
+
+.variation-moves {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--jade-pale);
+}
+
+.variation-moves .current {
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.variation-number {
+  color: var(--jade-muted);
+  margin-right: 2px;
 }
 </style>

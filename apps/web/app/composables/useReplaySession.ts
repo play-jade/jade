@@ -1,6 +1,12 @@
 import { computed, ref, unref, watch, type Ref } from 'vue'
 import { applyCoreMove, notateMoves, type ApplyMoveResult } from '~/utils/core-wasm'
-import { loadReplayDraft, replayDraftId, saveReplayDraft, type ReplayDraft } from '~/utils/offline-store'
+import {
+  deleteReplayDraft,
+  loadReplayDraft,
+  replayDraftId,
+  saveReplayDraft,
+  type ReplayDraft,
+} from '~/utils/offline-store'
 
 /** What a replay shows: a local game, a finished match, or an archive game at a published release. */
 export interface ReplaySource {
@@ -222,10 +228,21 @@ export function useReplaySession(options: ReplaySessionOptions) {
   }
 
   /** Drops the active or retained variation without touching the recorded line. */
+  /** Drops the active and retained variation, and the copy this device keeps of it. */
   function discardVariation() {
     edits++
     variation.value = null
     parked.value = null
+    const source = options.source.value
+    if (!persistEnabled() || !source) return
+    const write = ++writes
+    saveState.value = { state: 'none' }
+    const key = replayDraftId(source.kind, source.id, ownerScope.value)
+    void enqueue(key, async () => {
+      const result = await deleteReplayDraft(key)
+      if (!result.ok && write === writes) saveState.value = { state: 'unsaved', reason: result.reason }
+      return result.ok
+    })
   }
 
   /**
@@ -280,8 +297,11 @@ export function useReplaySession(options: ReplaySessionOptions) {
       return Promise.resolve(true)
     }
     saveState.value = { state: 'pending' }
-    const key = snapshot.draft.draftId
-    const run = () => writeSnapshot(write, snapshot)
+    return enqueue(snapshot.draft.draftId, () => writeSnapshot(write, snapshot))
+  }
+
+  /** Runs `run` after every earlier storage step for the same draft key in this tab. */
+  function enqueue(key: string, run: () => Promise<boolean>): Promise<boolean> {
     const written = (writeChains.get(key) ?? Promise.resolve(true)).then(run, run)
     writeChains.set(key, written)
     const settle = () => {
@@ -396,6 +416,16 @@ export function useReplaySession(options: ReplaySessionOptions) {
     const draft = await currentDraft()
     return draft ? new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' }) : null
   }
+
+  // A recorded line that grows (local play extends its game) still holds a kept variation, so its copy is
+  // stored again against the longer record; otherwise the next restore would find a different record.
+  watch(
+    () => options.recordedMovesUci.value.length,
+    (length, before) => {
+      const line = variation.value ?? parked.value
+      if (length > before && line && line.originPly <= before) void persist()
+    },
+  )
 
   // A different source, record, or guest starts a fresh session, so no line follows a guest change.
   watch(

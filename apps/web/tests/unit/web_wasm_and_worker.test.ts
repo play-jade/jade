@@ -637,6 +637,7 @@ describe('replay session', () => {
             }),
           // Like IndexedDB, a read returns a copy, so a caller cannot change the stored row in place.
           get: (key: string) => request(() => structuredClone(store.get(key))),
+          delete: (key: string) => request(() => void store.delete(key)),
         })
         return tx
       },
@@ -1118,6 +1119,45 @@ describe('replay session', () => {
       expect(await move).toMatchObject({ kind: 'rejected' })
       expect(s.variation.value).toBeNull()
       expect(memory.puts).toHaveLength(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('deletes the kept variation when it is discarded', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const s = session({ persist: true, ownerScope: ref('guest-1') })
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      expect(storedRows(memory)).toHaveLength(1)
+      s.discardVariation()
+      await vi.waitFor(() => expect(storedRows(memory)).toHaveLength(0), { interval: 1 })
+      const reopened = session({ persist: true, ownerScope: ref('guest-1') })
+      await reopened.restoreDraft()
+      expect(reopened.parked.value).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('stores a kept variation again when the recorded line grows, so it still restores', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const line = ref(['h2e2', 'h9g7'])
+      const s = session({ persist: true, extendAtEnd: true, recordedMovesUci: line })
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      s.returnToRecordedLine()
+      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+      line.value = [...line.value, 'h0g2']
+      await vi.waitFor(() => expect(memory.puts).toHaveLength(3), { interval: 1 })
+      const reopened = session({ persist: true, extendAtEnd: true, recordedMovesUci: ref([...line.value]) })
+      await reopened.restoreDraft()
+      expect(reopened.draftNotice.value).toBeNull()
+      expect(reopened.parked.value?.movesUci).toEqual(['b9c7'])
     } finally {
       vi.unstubAllGlobals()
     }

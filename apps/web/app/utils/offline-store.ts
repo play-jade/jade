@@ -149,6 +149,24 @@ export async function saveReplayDraft(draft: ReplayDraft): Promise<DraftWriteRes
   }
 }
 
+/** Removes a source's draft; reports success only after the transaction completes. */
+export async function deleteReplayDraft(draftId: string): Promise<DraftWriteResult> {
+  if (typeof indexedDB === 'undefined') return { ok: false, reason: 'Browser storage is not available' }
+  try {
+    const db = await openOfflineDb('fail')
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(DRAFT_STORE_NAME, 'readwrite')
+      tx.objectStore(DRAFT_STORE_NAME).delete(draftId)
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error)
+    })
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 export async function loadReplayDraft(draftId: string): Promise<DraftReadResult> {
   if (typeof indexedDB === 'undefined') return { status: 'unavailable', reason: 'Browser storage is not available' }
   try {

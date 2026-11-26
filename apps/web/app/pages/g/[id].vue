@@ -132,12 +132,20 @@ async function handleTryMove(fromUci: string, toUci: string) {
 }
 
 function handleEngineMove(uci: string, stateId: string) {
-  if (stateId === session.stateId.value) void session.tryMove(uci)
+  if (stateId !== session.stateId.value) return
+  selectedUci.value = null
+  void session.tryMove(uci)
 }
 
 function returnToGame() {
+  selectedUci.value = null
   session.returnToRecordedLine()
   void router.replace({ query: { ...route.query, ply: String(cursorPly.value) } })
+}
+
+function resumeVariation() {
+  selectedUci.value = null
+  session.resumeDraft()
 }
 
 async function exportVariation() {
@@ -288,11 +296,13 @@ const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveL
             :will-replace-draft="session.willReplaceDraft.value"
             :draft-notice="session.draftNotice.value"
             :feedback="session.feedback.value"
+            :recorded-moves-uci="snapshot.moves_uci"
+            :root-fen="STARTING_FEN"
             @return-to-game="returnToGame"
-            @resume="session.resumeDraft"
+            @resume="resumeVariation"
             @export="exportVariation"
           />
-          <ol class="jade-move-list">
+          <ol class="jade-move-list" data-testid="recorded-move-list">
             <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
               <span class="jade-move-number">{{ row.number }}.</span>
               <button
