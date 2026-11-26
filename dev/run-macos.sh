@@ -54,6 +54,7 @@ mkdir -p "$SWIFT_BUILD_DIR"
   -emit-module \
   -emit-object \
   -module-name JadeCoreBindings \
+  -package-name JadeCoreBindings \
   -module-cache-path /tmp/jade-swift-modcache \
   -Xcc -fmodules-cache-path=/tmp/jade-clang-modcache \
   -I "$REPO_ROOT/packages/apple/Sources/core_ffiFFI/include" \

@@ -108,7 +108,7 @@ open class ReplayDraftStore {
     /// The file that holds a draft: the SHA-256 of its key's exact bytes, so every key is one fixed-length name that
     /// no other key shares, whatever its length or case and on a case-insensitive volume too. The key itself stays
     /// in the record.
-    public static func fileName(for draftId: String) -> String {
+    package static func fileName(for draftId: String) -> String {
         SHA256.hash(data: Data(draftId.utf8)).map { String(format: "%02x", $0) }.joined() + ".json"
     }
 
