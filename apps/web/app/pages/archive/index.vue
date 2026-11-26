@@ -1,378 +1,200 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import {
-  computeBoardView,
-  getSampleArchiveGame,
-  notateMoves,
-  querySamplePosition,
-  searchSampleArchive,
-} from '~/utils/core-wasm'
+import { computed, ref, watch } from 'vue'
+import { useArchiveProvider } from '~/utils/archive-provider'
+import { pageLinks, queryOffset } from '~/utils/archive-paging'
 
 const route = useRoute()
-const {
-  locale,
-  material,
-  darkSurface,
-  notationDialect,
-  traditionalGlyphs,
-  t,
-} = usePreferences()
+const provider = useArchiveProvider()
+/** The submitted player search lives in the URL, so paging, reload, and the form without scripts agree. */
+const submittedQuery = computed(() => (typeof route.query.q === 'string' ? route.query.q : ''))
+const searchQuery = ref(submittedQuery.value)
+// A query restored by history, or set by a link, replaces what the box shows; typing alone looks nothing up.
+watch(submittedQuery, (q) => (searchQuery.value = q))
+/** The game page's first game, from a `?offset=` link; the server renders any page. */
+const gameOffset = computed(() => queryOffset(route.query.offset))
 
-const searchQuery = ref(typeof route.query.q === 'string' ? route.query.q : '')
-const selectedGameId = ref('sample-game-central-cannon-001')
-const replayPly = ref(0)
-const bannerDismissed = ref(false)
-
-const { data: archiveData, error: archiveError, refresh: refreshSearch } = await useAsyncData(
-  () => `archive-directory-${searchQuery.value}`,
+// The collection's labels and one page of its games, through the archive contract.
+const { data: directory, error: directoryError, refresh } = await useAsyncData(
+  () => `archive-directory-${gameOffset.value}`,
   async () => {
-    const directory = await searchSampleArchive(searchQuery.value)
-    const game = await getSampleArchiveGame(selectedGameId.value)
-    // A record can hold a move that does not replay; the board stops at the last move that does.
-    const replay = await notateMoves({
-      fen: game.initial_fen,
-      movesUci: game.moves_uci,
-      wxf: notationDialect.value === 'wxf',
-      traditionalGlyphs: traditionalGlyphs.value,
-    })
-    const replayable = replay.invalid_ply ?? game.moves_uci.length
-    const activeMoves = game.moves_uci.slice(0, Math.min(replayPly.value, replayable))
-    const board = await computeBoardView({
-      fen: game.initial_fen,
-      movesUci: activeMoves,
-      width: 460,
-      height: 511,
-      padding: 18,
-      redBelow: true,
-      traditionalGlyphs: traditionalGlyphs.value,
-      materialId: material.value,
-      darkSurface: darkSurface.value,
-    })
-    const explorer = await querySamplePosition(board.fen).catch(() => null)
-    return {
-      directory,
-      game,
-      board,
-      explorer,
-      replayable,
-      notations:
-        notationDialect.value === 'uci'
-          ? game.moves_uci
-          : game.moves_uci.map((u, i) => replay.notations[i] ?? u),
-      invalidMove: replay.invalid_ply === null ? null : game.moves_uci[replay.invalid_ply],
-    }
+    const [collection, games] = await Promise.all([
+      provider.collection(),
+      provider.browseGames({ offset: gameOffset.value }),
+    ])
+    return { collection, games }
   },
-  {
-    watch: [selectedGameId, replayPly, traditionalGlyphs, material, darkSurface],
-  },
+  { watch: [gameOffset] },
 )
 
-const activeMovesUci = computed(() =>
-  archiveData.value ? archiveData.value.game.moves_uci.slice(0, replayPly.value) : [],
+// Player search loads on its own, so a search neither refetches the directory nor removes it when it fails.
+const { data: players, error: playersError, refresh: refreshPlayers } = await useAsyncData(
+  () => `archive-players-${submittedQuery.value}`,
+  () => provider.findPlayers(submittedQuery.value),
+  { watch: [submittedQuery] },
 )
 
-const gameMovesUci = computed(() => archiveData.value?.game.moves_uci ?? [])
-const gameFen = computed(() => archiveData.value?.game.initial_fen)
-const { labels: moveLabels } = useNotatedMoves(
-  gameMovesUci,
-  gameFen,
-  computed(() => archiveData.value?.notations),
-)
-
-/** Moves paired by move number: Red's ply, then Black's. */
-const moveRows = computed(() => {
-  const rows: { number: number; plies: { ply: number; label: string }[] }[] = []
-  gameMovesUci.value.forEach((u, idx) => {
-    if (idx % 2 === 0) rows.push({ number: idx / 2 + 1, plies: [] })
-    rows[rows.length - 1].plies.push({ ply: idx + 1, label: moveLabels.value[idx] ?? u })
-  })
-  return rows
-})
-
-function stepPly(next: number) {
-  const max = archiveData.value?.replayable ?? 0
-  replayPly.value = Math.max(0, Math.min(max, next))
+const router = useRouter()
+function searchPlayers() {
+  if (searchQuery.value === submittedQuery.value) void refreshPlayers()
+  // Each submitted search is a history entry, as the form without scripts makes one.
+  else void router.push({ query: { ...route.query, q: searchQuery.value || undefined } })
 }
 
-async function applyContinuation(uci: string) {
-  const game = archiveData.value?.game
-  if (!game) return
-  if (game.moves_uci[replayPly.value] === uci) {
-    replayPly.value += 1
-  }
-}
-
-/** Replay controls for the glass capsule, as on the home page. */
-const scrubActions = computed(() => {
-  const end = archiveData.value?.replayable ?? 0
-  return [
-    { testid: 'archive-first', label: 'First move', paths: ['M5 4v12M15 4l-7 6 7 6'], ply: 0 },
-    { testid: 'archive-prev', label: 'Previous move', paths: ['M12.5 4 6.5 10l6 6'], ply: replayPly.value - 1 },
-    { testid: 'archive-next', label: 'Next move', paths: ['m7.5 4 6 6-6 6'], ply: replayPly.value + 1 },
-    { testid: 'archive-last', label: 'Last move', paths: ['M15 4v12M5 4l7 6-7 6'], ply: end },
-  ]
-})
+const pages = computed(() => (directory.value ? pageLinks(directory.value.games) : null))
 </script>
 
 <template>
   <div
-    v-if="archiveData"
-    class="jade-table archive-page"
-    :class="{ 'has-banner': archiveData.directory.is_synthetic_fixture }"
+    v-if="directory"
+    class="archive-directory"
+    :class="{ 'has-archive-banner': directory.collection.release.is_synthetic_fixture }"
+    data-testid="archive-directory"
   >
-    <!-- Explicit Synthetic Fixture Provenance Banner (Section 9), overlaid so it never moves the page -->
-    <div
-      v-if="archiveData.directory.is_synthetic_fixture && !bannerDismissed"
-      class="provenance-banner"
-      role="note"
-      data-testid="archive-provenance-banner"
-    >
-      <p class="provenance-text">
-        <strong>Sample Provider ({{ archiveData.directory.dataset_id }}):</strong>
-        {{ archiveData.directory.provenance_banner }}
+    <ArchiveProvenanceBanner
+      v-if="directory.collection.release.is_synthetic_fixture"
+      :dataset-id="directory.collection.release.dataset_id"
+      :text="directory.collection.provenance_banner"
+    />
+
+    <header class="collection-header">
+      <h1 class="collection-title">{{ directory.collection.title }}</h1>
+      <p class="muted-note">{{ directory.collection.scope }}</p>
+      <p class="muted-note" data-testid="archive-collection-count">
+        {{ directory.collection.game_count }}
+        {{ directory.collection.release.is_synthetic_fixture ? 'synthetic sample games' : 'games' }} ·
+        {{ directory.collection.source.label }}
       </p>
-      <button
-        type="button"
-        class="provenance-dismiss"
-        aria-label="Dismiss sample provider notice"
-        data-testid="archive-provenance-dismiss"
-        @click="bannerDismissed = true"
+    </header>
+
+    <section class="games" aria-label="Games">
+      <h2 class="section-title">Games</h2>
+      <p v-if="directory.games.status === 'no_games_found' && !pages?.pastEnd" class="muted-note">No games found.</p>
+      <template v-else>
+      <ul v-if="!pages?.pastEnd" class="game-list" data-testid="archive-game-list">
+        <li v-for="g in directory.games.games" :key="g.game_id" class="game-item">
+          <NuxtLink :to="`/archive/g/${g.game_id}`" class="game-link" :data-game-id="g.game_id">
+            {{ g.red_display_name }} – {{ g.black_display_name }}
+          </NuxtLink>
+          <span class="muted-note">{{ g.event_name }} · {{ g.date_display }} · {{ g.recorded_result.replace(/_/g, ' ') }}</span>
+        </li>
+      </ul>
+      <p v-if="pages?.pastEnd" class="muted-note" data-testid="games-past-end">
+        This page is past the last of {{ pages.total }} games.
+        <NuxtLink :to="{ query: { ...route.query, offset: pages.lastPage } }">Go to the last page</NuxtLink>
+      </p>
+      <nav
+        v-else-if="pages && !pages.pastEnd && (pages.previous !== null || pages.next !== null)"
+        class="pager"
+        aria-label="Game pages"
       >
-        ×
-      </button>
-    </div>
+        <NuxtLink v-if="pages.previous !== null" :to="{ query: { ...route.query, offset: pages.previous } }">
+          ← Previous
+        </NuxtLink>
+        <span class="muted-note">{{ pages.first }}–{{ pages.last }} of {{ pages.total }}</span>
+        <NuxtLink v-if="pages.next !== null" :to="{ query: { ...route.query, offset: pages.next } }" data-testid="games-next">
+          Next →
+        </NuxtLink>
+      </nav>
+      </template>
+    </section>
 
-    <!-- The game's identity, where the play table shows the side plates. -->
-    <aside class="jade-plates game-side">
-      <header class="game-header">
-        <span v-if="archiveData.game.opening_label" class="opening-tag">
-          {{ t('archive.opening') }} · {{ archiveData.game.opening_label }}
-        </span>
-        <h1 class="game-title">{{ archiveData.game.event_name }}</h1>
-        <span class="game-date">{{ archiveData.game.date_display }}</span>
-      </header>
-
-      <section class="players" data-testid="player-directory-card" aria-label="Players">
-        <form method="get" action="/archive" class="search-form" @submit.prevent="refreshSearch()">
-          <input
-            v-model="searchQuery"
-            name="q"
-            type="search"
-            aria-label="Search players"
-            placeholder="赵汝权, 趙汝權, Chiu, 林明…"
-            class="search-input"
-            data-testid="player-search-input"
-          />
-          <button type="submit" class="jade-btn" data-testid="player-search-btn">Search</button>
-        </form>
-        <ul class="player-list" data-testid="player-list">
-          <li
-            v-for="player in archiveData.directory.players"
-            :key="player.player_id"
-            class="player-item"
-            :data-player-id="player.player_id"
-          >
-            <NuxtLink :to="`/players/${player.player_id}`" class="player-link">
-              {{ player.native_display_name }} · {{ player.primary_display_name }}
-            </NuxtLink>
-            <span class="disambig-note">{{ player.disambiguation_note }}</span>
-          </li>
-        </ul>
-      </section>
-    </aside>
-
-    <div class="jade-table-stage">
-      <XiangqiBoard
-        :snapshot="archiveData.board.snapshot"
-        :material="material"
-        :traditional-glyphs="traditionalGlyphs"
-        :dark-surface="darkSurface"
-        :locale="locale"
-        :interactive="false"
-      />
-
-      <div class="jade-capsule" role="toolbar" aria-label="Replay">
-        <IconButton
-          v-for="(a, i) in scrubActions.slice(0, 2)"
-          :key="i"
-          :data-testid="a.testid"
-          :label="a.label"
-          :paths="a.paths"
-          @click="stepPly(a.ply)"
+    <section class="players" data-testid="player-directory-card" aria-label="Players">
+      <h2 class="section-title">Players</h2>
+      <form method="get" action="/archive" class="search-form" @submit.prevent="searchPlayers()">
+        <input
+          v-model="searchQuery"
+          name="q"
+          type="search"
+          aria-label="Search players"
+          placeholder="赵汝权, 趙汝權, Chiu, 林明…"
+          class="search-input"
+          data-testid="player-search-input"
         />
-        <span class="ply-indicator" data-testid="archive-ply">
-          {{ t('game.ply') }} {{ replayPly }} / {{ archiveData.replayable }}
-        </span>
-        <IconButton
-          v-for="(a, i) in scrubActions.slice(2)"
-          :key="i + 2"
-          :data-testid="a.testid"
-          :label="a.label"
-          :paths="a.paths"
-          @click="stepPly(a.ply)"
-        />
+        <!-- Without scripts the form keeps the game page shown, as the scripted search does. -->
+        <input v-if="gameOffset > 0" type="hidden" name="offset" :value="gameOffset" />
+        <button type="submit" class="jade-btn" data-testid="player-search-btn">Search</button>
+      </form>
+      <div v-if="playersError" class="muted-note" role="alert" data-testid="player-search-error">
+        The player search could not run: {{ playersError.message }}
+        <button type="button" class="jade-pill-btn" @click="refreshPlayers()">Try again</button>
       </div>
-    </div>
-
-    <aside class="jade-ledger">
-      <section class="moves" aria-label="Moves">
-        <ol class="jade-move-list" data-testid="archive-move-list">
-          <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
-            <span class="jade-move-number">{{ row.number }}.</span>
-            <button
-              v-for="m in row.plies"
-              :key="m.ply"
-              type="button"
-              class="jade-move"
-              :class="{ current: replayPly === m.ply }"
-              :disabled="m.ply > archiveData.replayable"
-              :aria-current="replayPly === m.ply ? 'step' : undefined"
-              :data-ply="m.ply"
-              data-testid="archive-move"
-              @click="stepPly(m.ply)"
-            >
-              {{ m.label }}
-            </button>
-          </li>
-        </ol>
-        <p v-if="archiveData.invalidMove" class="record-break" data-testid="archive-record-break">
-          The record stops replaying at ply {{ archiveData.replayable + 1 }}: {{ archiveData.invalidMove }} is not a
-          legal move in that position.
-        </p>
-      </section>
-
-      <!-- Position Continuation Explorer (Deduplicated by PositionKey, Distinct Status Label!) -->
-      <section class="explorer jade-rule" data-testid="position-explorer-card" aria-label="Position explorer">
-        <div class="explorer-head">
-          <span class="explorer-title">Recorded continuations</span>
-          <span class="source-pill" data-testid="explorer-source-label">
-            Sample Archive · {{ archiveData.explorer?.sample_size_games ?? 0 }} game(s)
-          </span>
-        </div>
-        <p v-if="!archiveData.explorer" class="muted-note" data-testid="explorer-unavailable">
-          This position could not be looked up in the sample archive.
-        </p>
-        <table
-          v-else-if="archiveData.explorer.continuations.length > 0"
-          class="explorer-table"
-          data-testid="continuation-table"
+      <ul v-else class="player-list" data-testid="player-list">
+        <li
+          v-for="player in players?.players ?? []"
+          :key="player.player_id"
+          class="player-item"
+          :data-player-id="player.player_id"
         >
-          <thead>
-            <tr>
-              <th>Move</th>
-              <th>Games</th>
-              <th>R / D / B</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="cont in archiveData.explorer.continuations"
-              :key="cont.move_uci"
-              class="cont-row"
-              @click="applyContinuation(cont.move_uci)"
-            >
-              <td><strong>{{ cont.move_chinese }}</strong> <code>{{ cont.move_uci }}</code></td>
-              <td>{{ cont.deduplicated_game_count }}</td>
-              <td>{{ cont.red_wins }} / {{ cont.draws }} / {{ cont.black_wins }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-else class="muted-note">No further continuations recorded in the sample.</p>
-      </section>
-
-      <!-- Local Browser Web Worker Engine Analysis (Explicitly Distinct from Archive Counts!) -->
-      <EngineAnalysisCard
-        :fen="archiveData.game.initial_fen"
-        :moves-uci="activeMovesUci"
-        :state-id="`archive:${selectedGameId}:${replayPly}`"
-      />
-    </aside>
+          <NuxtLink :to="`/players/${player.player_id}`" class="player-link">
+            {{ player.native_display_name }} · {{ player.primary_display_name }}
+          </NuxtLink>
+          <span class="muted-note">{{ player.disambiguation_note }}</span>
+        </li>
+      </ul>
+    </section>
   </div>
   <div v-else class="archive-error" role="alert" data-testid="archive-error">
-    <p>The archive could not load{{ archiveError ? `: ${archiveError.message}` : '' }}.</p>
-    <button type="button" class="jade-btn" @click="refreshSearch()">Try again</button>
+    <p>The archive could not load{{ directoryError ? `: ${directoryError.message}` : '' }}.</p>
+    <button type="button" class="jade-btn" @click="refresh()">Try again</button>
   </div>
 </template>
 
 <style scoped>
-/* Room below the content for the overlaid banner, kept after dismissal so the page height never changes. */
-.archive-page.has-banner {
-  padding-bottom: 96px;
-}
-
-/* Overlaid at the bottom of the viewport so showing or dismissing it never moves the page. */
-.provenance-banner {
-  position: fixed;
-  left: 50%;
-  bottom: 16px;
-  z-index: 20;
-  transform: translateX(-50%);
-  width: min(720px, calc(100vw - 32px));
+.archive-directory {
+  max-width: 760px;
+  margin: 0 auto;
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 10px 10px 10px 16px;
-  border-radius: 12px;
-  background: rgba(29, 36, 33, 0.8);
-  backdrop-filter: blur(24px) saturate(140%);
-  -webkit-backdrop-filter: blur(24px) saturate(140%);
-  box-shadow: inset 0 0 0 1px var(--jade-hairline), 0 10px 30px rgba(0, 0, 0, 0.4);
-  font-size: 0.82rem;
-  line-height: 1.4;
-}
-
-.provenance-text {
-  margin: 0;
-  flex: 1;
-}
-
-.provenance-dismiss {
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 14px;
-  background: transparent;
-  color: inherit;
-  font-size: 1.1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.provenance-dismiss:hover,
-.provenance-dismiss:focus-visible {
-  background: var(--jade-surface-hover);
-}
-
-.game-side {
-  justify-content: flex-start;
+  flex-direction: column;
   gap: 28px;
 }
 
-.game-header {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.opening-tag {
-  font-size: 0.72rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--jade-pale);
-}
-
-.game-title {
-  margin: 0;
+.collection-title {
+  margin: 0 0 6px;
   font-family: var(--jade-display);
   font-weight: 400;
-  font-size: clamp(1.8rem, 2.6vw, 2.4rem);
-  line-height: 1.1;
+  font-size: 2.2rem;
 }
 
-.game-date {
-  font-size: 0.85rem;
+.section-title {
+  margin: 0 0 10px;
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   color: var(--jade-muted);
+}
+
+.game-list,
+.player-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.game-item,
+.player-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.game-link {
+  color: var(--jade-paper);
+  text-decoration: none;
+  font-size: 1rem;
+}
+
+.game-link:hover {
+  text-decoration: underline;
+}
+
+.pager {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-top: 12px;
 }
 
 .players {
@@ -398,20 +220,6 @@ const scrubActions = computed(() => {
   font-size: 0.85rem;
 }
 
-.player-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.player-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
 
 .player-link {
   color: var(--jade-paper);
@@ -423,94 +231,16 @@ const scrubActions = computed(() => {
   text-decoration: underline;
 }
 
-.disambig-note,
 .muted-note {
   margin: 0;
   font-size: 0.78rem;
   color: var(--jade-muted);
 }
 
-.ply-indicator {
-  padding: 0 8px;
-  font-size: 0.85rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--jade-muted);
-}
-
-.moves {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.record-break {
-  margin: 0;
-  font-size: 0.82rem;
-  color: var(--jade-vermilion-text);
-}
-
-.explorer {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.explorer-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.explorer-title {
-  font-size: 0.72rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--jade-muted);
-}
-
-.source-pill {
-  font-size: 0.72rem;
-  color: var(--jade-muted);
-}
-
-.explorer-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-}
-
-.explorer-table th {
-  text-align: left;
-  font-weight: 500;
-  font-size: 0.72rem;
-  color: var(--jade-muted);
-  padding: 4px 6px;
-}
-
-.explorer-table td {
-  padding: 6px;
-  border-top: 1px solid var(--jade-hairline);
-}
-
-.explorer-table code {
-  font-size: 0.75rem;
-  color: var(--jade-muted);
-}
-
-.cont-row {
-  cursor: pointer;
-}
-
-.cont-row:hover {
-  background: var(--jade-surface-hover);
-}
-
 .archive-error {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 10px;
-  padding: 24px 0;
+  gap: 12px;
 }
 </style>

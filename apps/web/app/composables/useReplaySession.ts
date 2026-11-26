@@ -237,7 +237,7 @@ export function useReplaySession(options: ReplaySessionOptions) {
     if (!persistEnabled() || !source) return
     const write = ++writes
     saveState.value = { state: 'none' }
-    const key = replayDraftId(source.kind, source.id, ownerScope.value)
+    const key = replayDraftId(source.kind, source.id, ownerScope.value, source.revision)
     void enqueue(key, async () => {
       const result = await deleteReplayDraft(key)
       if (!result.ok && write === writes) saveState.value = { state: 'unsaved', reason: result.reason }
@@ -255,7 +255,7 @@ export function useReplaySession(options: ReplaySessionOptions) {
     if (!source || !line) return null
     const draft = {
       schemaVersion: 1 as const,
-      draftId: replayDraftId(source.kind, source.id, ownerScope.value),
+      draftId: replayDraftId(source.kind, source.id, ownerScope.value, source.revision),
       sourceKind: source.kind,
       sourceId: source.id,
       sourceRevision: source.revision,
@@ -379,10 +379,10 @@ export function useReplaySession(options: ReplaySessionOptions) {
     draftNotice.value = null
     // The key is fixed before the read; if the source or guest changes meanwhile, the row is never shown,
     // so one guest's private variation cannot appear under another.
-    const draftId = replayDraftId(source.kind, source.id, ownerScope.value)
+    const draftId = replayDraftId(source.kind, source.id, ownerScope.value, source.revision)
     const stillCurrent = () => {
       const now = options.source.value
-      return now !== null && replayDraftId(now.kind, now.id, ownerScope.value) === draftId
+      return now !== null && replayDraftId(now.kind, now.id, ownerScope.value, now.revision) === draftId
     }
     const read = await loadReplayDraft(draftId)
     if (!stillCurrent()) return

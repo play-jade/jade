@@ -30,10 +30,14 @@ export interface MoveRecord {
   to: string
 }
 
-export interface AdjudicationVerdict {
+/**
+ * The rules core's own adjudication of a position (`xiangqi_core::Adjudication`), as both `board_view` and
+ * `apply_move` return it.
+ */
+export interface CoreAdjudication {
   outcome: 'red_win' | 'black_win' | 'draw'
   reason: string
-  detail: string
+  profile_version: string
 }
 
 export interface BoardViewSnapshot {
@@ -48,7 +52,7 @@ export interface BoardViewSnapshot {
   last_move: MoveRecord | null
   in_check_side: 'red' | 'black' | null
   check_square: string | null
-  adjudication: AdjudicationVerdict | null
+  adjudication: CoreAdjudication | null
 }
 
 export interface BoardViewResult {
@@ -66,7 +70,7 @@ export interface ApplyMoveResult {
   moves_chinese: string[]
   side_to_move: 'red' | 'black'
   in_check: boolean
-  adjudication: AdjudicationVerdict | null
+  adjudication: CoreAdjudication | null
   legal_moves_uci: string[]
 }
 
@@ -259,7 +263,7 @@ interface RawBoardViewResult {
     legal_destinations: Array<number | string>
     last_move: { from: number | string; to: number | string } | null
     check_square: number | string | null
-    adjudication: AdjudicationVerdict | null
+    adjudication: CoreAdjudication | null
   }
   fen: string
   moves_chinese: string[]

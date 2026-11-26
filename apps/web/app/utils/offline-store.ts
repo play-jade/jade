@@ -122,13 +122,18 @@ export async function loadOfflineGame(id = 'active_board'): Promise<LocalSavedGa
   }
 }
 
-/** The key of a source's single retained draft, scoped to the guest identity when one owns it. */
+/**
+ * The key of a source's single retained draft, scoped to the guest identity when one owns it. An archive game's
+ * key also names its release, so a variation kept for one release is never overwritten from another.
+ */
 export function replayDraftId(
   sourceKind: ReplayDraft['sourceKind'],
   sourceId: string,
   ownerScope: string | null,
+  sourceRevision: string,
 ): string {
-  return [sourceKind, sourceId, ownerScope ?? ''].join(':')
+  const key = [sourceKind, sourceId, ownerScope ?? ''].join(':')
+  return sourceKind === 'archive' ? `${key}:${sourceRevision}` : key
 }
 
 /** Replaces this source's draft; reports success only after the transaction completes. */
@@ -164,6 +169,26 @@ export async function deleteReplayDraft(draftId: string): Promise<DraftWriteResu
     return { ok: true }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * This device's most recently saved variation of a public archive game that no guest owns, or null when it keeps
+ * none or cannot be read. The variation itself stays on this device; a private match draft is never returned here.
+ */
+export async function latestArchiveDraft(): Promise<ReplayDraft | null> {
+  if (typeof indexedDB === 'undefined') return null
+  try {
+    const db = await openOfflineDb('fail')
+    const drafts = await new Promise<ReplayDraft[]>((resolve, reject) => {
+      const req = db.transaction(DRAFT_STORE_NAME, 'readonly').objectStore(DRAFT_STORE_NAME).getAll()
+      req.onsuccess = () => resolve(req.result as ReplayDraft[])
+      req.onerror = () => reject(req.error)
+    })
+    const ofKind = drafts.filter((d) => d.sourceKind === 'archive' && d.ownerScope === null && Number.isFinite(d.updatedAt))
+    return ofKind.sort((x, y) => y.updatedAt - x.updatedAt)[0] ?? null
+  } catch {
+    return null
   }
 }
 

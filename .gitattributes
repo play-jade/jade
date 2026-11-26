@@ -1,0 +1,2 @@
+# Written by the asset pipeline (crates/asset-pipeline): structurally repeated entries, not code to deduplicate.
+assets/manifest.json linguist-generated=true

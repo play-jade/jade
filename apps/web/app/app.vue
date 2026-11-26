@@ -420,6 +420,12 @@ body {
   box-shadow: inset 0 0 0 1px var(--jade-hairline);
 }
 
+/* Room below an archive page's content for its overlaid sample banner, kept after dismissal so the page height
+   never changes. */
+.has-archive-banner {
+  padding-bottom: 96px;
+}
+
 /* The lamplit table, shared by every page where a game is played: side plates, the board as the lit object,
    and a quiet ledger of moves. */
 .jade-table {

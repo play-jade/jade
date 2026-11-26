@@ -6,6 +6,7 @@ import {
   applyCoreMove,
   computeBoardView,
   hitTestBoard,
+  notateMoves,
   querySamplePosition,
   searchSampleArchive,
 } from '../../app/utils/core-wasm'
@@ -13,6 +14,8 @@ import { archiveProviderFor, hostedArchiveProvider, sampleArchiveProvider } from
 import { archivePathOf, readArchive } from '../../server/utils/archive-proxy'
 import { resolveTraditionalScript, SUPPORTED_LOCALES, tTerm } from '../../app/utils/i18n'
 import { loadOfflineGame } from '../../app/utils/offline-store'
+import { webHref } from '../../app/utils/web-href'
+import { pageLinks, queryOffset } from '../../app/utils/archive-paging'
 import {
   parsePlyQuery,
   recordedMovesDigest,
@@ -20,6 +23,7 @@ import {
   type ReplaySessionOptions,
 } from '../../app/composables/useReplaySession'
 import { ref, type Ref } from 'vue'
+import { useNotatedMoves } from '../../app/composables/useNotatedMoves'
 import pikafishFixtures from '../../../../data/fixtures/rules/pikafish_examples.json'
 
 describe('core_wasm isomorphic browser/SSR rules & geometry contract', () => {
@@ -288,6 +292,7 @@ describe('hosted archive proxy', () => {
       switch (path) {
         case '/base/api/v1/archive/games':
           // A page without `limit` is incomplete; every other directory request gets a full page.
+          if (req.url?.includes('text=zero-limit')) return send(200, { ...page, games: [], limit: 0 })
           return req.url?.includes('text=partial') ? send(200, { ...page, limit: undefined }) : send(200, page)
         case '/base/api/v1/archive/games/g1':
           return send(200, detail)
@@ -375,6 +380,7 @@ describe('hosted archive proxy', () => {
       ['games/wrong-shape', {}],
       ['games/sign-in', {}],
       ['games', { text: 'partial' }],
+      ['games', { text: 'zero-limit' }],
       ['games/missing-provenance', {}],
       ['games/bad-source', {}],
       ['games/no-round', {}],
@@ -483,6 +489,100 @@ describe('5-locale glossary & browser WASM search worker contract', () => {
       expect(checkLegal.moves_uci).toHaveLength(2)
     } finally {
       await adapter.dispose()
+    }
+  })
+})
+
+describe('archive page helpers', () => {
+  it('links only web addresses from archive sources', () => {
+    expect(webHref('https://example.org/game?id=1')).toBe('https://example.org/game?id=1')
+    expect(webHref('http://example.org/')).toBe('http://example.org/')
+    expect(webHref('javascript:alert(1)')).toBeNull()
+    expect(webHref('data:text/html,hi')).toBeNull()
+    expect(webHref('not a url')).toBeNull()
+    expect(webHref(null)).toBeNull()
+  })
+
+  it('reads page positions a provider accepts and reports a page past the end', () => {
+    expect(queryOffset('25')).toBe(25)
+    expect(queryOffset(String(2 ** 32 - 1))).toBe(2 ** 32 - 1)
+    expect(queryOffset(String(2 ** 32))).toBe(0)
+    expect(queryOffset('-1')).toBe(0)
+    const release = { dataset_id: 'd', release_id: 'd@sha256:0', is_synthetic_fixture: true }
+    expect(pageLinks({ release, status: 'ok', total: 2, offset: 25, limit: 25, games: [] })).toEqual({
+      pastEnd: true,
+      lastPage: 0,
+      total: 2,
+    })
+    expect(pageLinks({ release, status: 'ok', total: 1, offset: 0, limit: 0, games: [] })).toBeNull()
+    expect(pageLinks({ release, status: 'ok', total: 60, offset: 0, limit: 25, games: Array(25).fill({}) })).toMatchObject({
+      pastEnd: false,
+      previous: null,
+      next: 25,
+    })
+  })
+})
+
+describe('notation seeds', () => {
+  // An invalid position makes the core refuse to notate, which exercises the coordinate fallback.
+  const BAD_FEN = 'not a position'
+  const moves = ['h2e2', 'h9g7']
+  // The seed is tagged with other settings than the reader's, so the composable asks the core and falls back.
+  const settings = ref({ dialect: 'zh', glyphs: false, invalidPly: 1 as number | null })
+
+  function notate(
+    initialFor?: Ref<{ fen: string; movesUci: string[] } | undefined>,
+    dialect = 'wxf',
+    seedLabels = ['A', 'B'],
+  ) {
+    vi.stubGlobal('usePreferences', () => ({ notationDialect: ref(dialect), traditionalGlyphs: ref(false) }))
+    return useNotatedMoves(ref([...moves]), ref(BAD_FEN), ref(seedLabels), settings, initialFor)
+  }
+
+  /** Resolves once a core refusal started earlier has been handled: calls settle in order. */
+  async function afterRefusal() {
+    await notateMoves({ fen: BAD_FEN, movesUci: moves, wxf: true }).catch(() => undefined)
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  it('keeps a matching seed’s break when notation fails, and refuses a seed made for other inputs', async () => {
+    try {
+      const matching = notate(ref({ fen: BAD_FEN, movesUci: [...moves] }))
+      await vi.waitFor(() => expect(matching.labels.value).toEqual(moves), { interval: 1 })
+      expect(matching.invalidPly.value).toBe(1)
+
+      const otherFen = notate(ref({ fen: 'another position', movesUci: [...moves] }))
+      const otherMoves = notate(ref({ fen: BAD_FEN, movesUci: ['h2e2', 'h9g8'] }))
+      await afterRefusal()
+      expect(otherFen.labels.value).toEqual(moves)
+      expect(otherFen.invalidPly.value).toBeNull()
+      expect(otherMoves.labels.value).toEqual(moves)
+      expect(otherMoves.invalidPly.value).toBeNull()
+
+      // An unnamed seed must still be for a line of the same length.
+      const shortSeed = notate(undefined, 'uci', ['A'])
+      expect(shortSeed.invalidPly.value).toBeNull()
+
+      // Without named inputs the previous length check applies.
+      const unnamed = notate(undefined)
+      await vi.waitFor(() => expect(unnamed.labels.value).toEqual(moves), { interval: 1 })
+      expect(unnamed.invalidPly.value).toBe(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('reuses a seed only once its named inputs are known, and then without another preference change', async () => {
+    try {
+      // In coordinate notation the first pass is synchronous, so only the identity arriving can bring the break.
+      const identity = ref<{ fen: string; movesUci: string[] } | undefined>(undefined)
+      const pending = notate(identity, 'uci')
+      expect(pending.labels.value).toEqual(moves)
+      expect(pending.invalidPly.value).toBeNull()
+      identity.value = { fen: BAD_FEN, movesUci: [...moves] }
+      await vi.waitFor(() => expect(pending.invalidPly.value).toBe(1), { interval: 1 })
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 })
@@ -1036,7 +1136,7 @@ describe('replay session', () => {
         ['guest-1', 'variation', ['b0c2']],
         ['guest-1', 'recorded', ['b0c2']],
       ])
-      expect(storedRows(memory)).toEqual([expect.objectContaining({ draftId: expect.stringMatching(/:guest-1$/) })])
+      expect(storedRows(memory)).toEqual([expect.objectContaining({ draftId: 'archive:game-1:guest-1:release-1' })])
       // The last old-guest write has completed (put, then its transaction) and reported nothing here.
       for (let turn = 0; turn < 3; turn++) await new Promise((resolve) => setTimeout(resolve, 0))
       expect(reopened.saveState.value).toEqual({ state: 'none' })
@@ -1158,6 +1258,29 @@ describe('replay session', () => {
       await reopened.restoreDraft()
       expect(reopened.draftNotice.value).toBeNull()
       expect(reopened.parked.value?.movesUci).toEqual(['b9c7'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("keeps an archive game's variation for each release apart", async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const release = (revision: string) => ref({ kind: 'archive' as const, id: 'game-1', revision })
+      const first = session({ persist: true, source: release('release-1') })
+      first.selectPly(1)
+      await first.tryMove('b9c7')
+      const second = session({ persist: true, source: release('release-2') })
+      second.selectPly(1)
+      await second.tryMove('c6c5')
+      expect(storedRows(memory).map((row) => row.draftId).sort()).toEqual([
+        'archive:game-1::release-1',
+        'archive:game-1::release-2',
+      ])
+      const back = session({ persist: true, source: release('release-1') })
+      await back.restoreDraft()
+      expect(back.variation.value?.movesUci).toEqual(['b9c7'])
     } finally {
       vi.unstubAllGlobals()
     }

@@ -86,7 +86,8 @@ const isGamePage = shape<ArchiveGameSummaryPage>({
   status: oneOf('ok', 'no_games_found'),
   total: 'count',
   offset: 'count',
-  limit: 'count',
+  // A page holds at least one game, so its size is positive.
+  limit: (v) => Number.isSafeInteger(v) && (v as number) > 0,
   games: listOf(isSummary),
 })
 const isRecord = shape<ArchiveGameRecord>({

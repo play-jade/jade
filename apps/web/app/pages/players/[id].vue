@@ -1,23 +1,35 @@
 <script setup lang="ts">
-import { searchSampleArchive } from '~/utils/core-wasm'
+import { ArchiveRequestError, useArchiveProvider } from '~/utils/archive-provider'
+import { pageLinks, queryOffset } from '~/utils/archive-paging'
 
 const route = useRoute()
 const { t } = usePreferences()
+const provider = useArchiveProvider()
 const playerId = computed(() => String(route.params.id || ''))
+const gameOffset = computed(() => queryOffset(route.query.offset))
 
-const { data: profile } = await useAsyncData(
-  () => `player-profile-${playerId.value}`,
+// The player and one page of their games through the archive contract. Only a missing player is a not-found
+// page; an archive that does not answer is an error with a retry.
+const { data: profile, error: profileError, refresh } = await useAsyncData(
+  () => `player-profile-${playerId.value}-${gameOffset.value}`,
   async () => {
-    const res = await searchSampleArchive('')
-    const found = res.players.find((p) => p.player_id === playerId.value) ?? null
+    const collection = await provider.collection()
+    const found = await provider.playerProfile(playerId.value, { offset: gameOffset.value }).catch((error: unknown) => {
+      if (error instanceof ArchiveRequestError && error.code === 'archive_not_found') return null
+      throw error
+    })
     return {
-      datasetId: res.dataset_id,
-      provenanceBanner: res.provenance_banner,
-      isSynthetic: res.is_synthetic_fixture,
-      player: found,
+      datasetId: collection.release.dataset_id,
+      provenanceBanner: collection.provenance_banner,
+      isSynthetic: collection.release.is_synthetic_fixture,
+      player: found?.player ?? null,
+      games: found?.games ?? null,
     }
   },
+  { watch: [gameOffset] },
 )
+
+const pages = computed(() => (profile.value?.games ? pageLinks(profile.value.games) : null))
 </script>
 
 <template>
@@ -53,12 +65,34 @@ const { data: profile } = await useAsyncData(
         </tbody>
       </table>
 
+      <h2>Games</h2>
+      <ul class="player-games" data-testid="player-game-list">
+        <li v-for="g in profile.games?.games ?? []" :key="g.game_id">
+          <NuxtLink :to="`/archive/g/${g.game_id}`">{{ g.red_display_name }} – {{ g.black_display_name }}</NuxtLink>
+          · {{ g.event_name }} · {{ g.date_display }}
+        </li>
+      </ul>
+      <p v-if="pages?.pastEnd" class="disambig" data-testid="player-games-past-end">
+        This page is past the last of this player's {{ pages.total }} games.
+        <NuxtLink :to="{ query: { offset: pages.lastPage } }">Go to the last page</NuxtLink>
+      </p>
+      <nav v-else-if="pages && (pages.previous !== null || pages.next !== null)" class="profile-actions" aria-label="Game pages">
+        <NuxtLink v-if="pages.previous !== null" :to="{ query: { offset: pages.previous } }">← Previous</NuxtLink>
+        <NuxtLink v-if="pages.next !== null" :to="{ query: { offset: pages.next } }">Next →</NuxtLink>
+      </nav>
+
       <div class="profile-actions">
         <NuxtLink to="/archive" class="jade-btn jade-btn-primary">
           ← Back to Archive
         </NuxtLink>
         <span class="correction-hint">{{ t('archive.identity_correction') }} (queued for review)</span>
       </div>
+    </section>
+
+    <section v-else-if="profileError" class="jade-card" role="alert" data-testid="player-profile-error">
+      <h1>This player could not load</h1>
+      <p>{{ profileError.message }}</p>
+      <button type="button" class="jade-btn" @click="refresh()">Try again</button>
     </section>
 
     <section v-else class="jade-card">
