@@ -105,10 +105,15 @@ open class ReplayDraftStore {
         return ReplayDraftStore(directory: base.appendingPathComponent("Jade/replay-drafts", isDirectory: true))
     }
 
+    /// The file that holds a draft: the SHA-256 of its key's exact bytes, so every key is one fixed-length name that
+    /// no other key shares, whatever its length or case and on a case-insensitive volume too. The key itself stays
+    /// in the record.
+    public static func fileName(for draftId: String) -> String {
+        SHA256.hash(data: Data(draftId.utf8)).map { String(format: "%02x", $0) }.joined() + ".json"
+    }
+
     private func fileURL(_ draftId: String) -> URL {
-        // Percent-encoding keeps any key a single file name inside the directory.
-        let name = draftId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? draftId
-        return directory.appendingPathComponent("\(name).json")
+        directory.appendingPathComponent(Self.fileName(for: draftId))
     }
 
     /// Only a missing file counts as no draft; a folder that cannot be read reports why.

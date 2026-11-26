@@ -99,12 +99,16 @@ enum ReplaySessionProof {
 
         // Another release of the game keeps its own draft: it finds none, and saving there leaves this one untouched.
         let otherSource = ReplaySource(kind: "archive", id: gameId, revision: "other@sha256:0")
+        expect(store.load(otherSource.draftId) == .none, "another release has no draft before its first save")
         let otherRelease = session(store, source: otherSource)
         otherRelease.restoreDraft()
         expect(otherRelease.draftNotice == nil && otherRelease.parked == nil, "another release starts with no draft")
         otherRelease.selectPly(1)
         _ = otherRelease.tryMove(alternative)
-        expect(store.load(otherSource.draftId) != .none, "another release's variation is kept under its own key")
+        guard case .found(let otherDraft) = store.load(otherSource.draftId),
+              otherDraft.sourceRevision == otherSource.revision, otherDraft.variationMovesUci == [alternative] else {
+            fatalError("Replay proof: another release's variation must be kept, readable, under its own key")
+        }
         guard case .found(let untouched) = store.load(source.draftId), untouched == current else {
             fatalError("Replay proof: another release must not overwrite this release's draft")
         }
@@ -244,7 +248,7 @@ enum ReplaySessionProof {
         let remover = session(blockedStore)
         remover.selectPly(1)
         _ = remover.tryMove(alternative)
-        let draftFile = blocked.appendingPathComponent("\(source.draftId.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!).json")
+        let draftFile = blocked.appendingPathComponent(ReplayDraftStore.fileName(for: source.draftId))
         try FileManager.default.removeItem(at: draftFile)
         try FileManager.default.createDirectory(at: draftFile, withIntermediateDirectories: true)
         remover.undoVariationMove()
@@ -268,14 +272,30 @@ enum ReplaySessionProof {
 
         // A read that fails for any reason but absence reports the store unavailable, not empty.
         expect(store.load("archive:absent:") == .none, "an absent draft reads as none")
-        if case .unavailable = store.load(String(repeating: "x", count: 400)) {} else {
-            fatalError("Replay proof: an unreadable draft name must read as unavailable")
+        let unreadable = scratch.appendingPathComponent("unreadable")
+        try FileManager.default.createDirectory(
+            at: unreadable.appendingPathComponent(ReplayDraftStore.fileName(for: "archive:folder:")),
+            withIntermediateDirectories: true)
+        if case .unavailable = ReplayDraftStore(directory: unreadable).load("archive:folder:") {} else {
+            fatalError("Replay proof: a draft place that cannot be read must read as unavailable")
         }
+
+        // Keys that differ only in case, or that are long, still name separate files.
+        let cased = ReplayDraftStore(directory: scratch.appendingPathComponent("cased"))
+        var upper = current
+        upper.draftId = "archive:game::Release-A"
+        var lower = current
+        lower.draftId = "archive:game::release-a"
+        var long = current
+        long.draftId = "archive:game::" + String(repeating: "r", count: 300)
+        expect(cased.save(upper) == nil && cased.save(lower) == nil && cased.save(long) == nil, "all drafts save")
+        expect(cased.load(upper.draftId) == .found(upper) && cased.load(lower.draftId) == .found(lower)
+               && cased.load(long.draftId) == .found(long), "keys differing only in case, or long, keep separate files")
 
         // Removal takes only a draft file: a folder at its place stays, with its contents, and is reported.
         let odd = scratch.appendingPathComponent("odd")
-        let name = source.draftId.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
-        let folder = odd.appendingPathComponent("\(name).json", isDirectory: true)
+        let name = ReplayDraftStore.fileName(for: source.draftId)
+        let folder = odd.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try Data("keep".utf8).write(to: folder.appendingPathComponent("inside.txt"))
         expect(ReplayDraftStore(directory: odd).delete(source.draftId) != nil, "a folder is not removed as a draft")
@@ -285,7 +305,7 @@ enum ReplaySessionProof {
         try FileManager.default.createDirectory(at: linkFolder, withIntermediateDirectories: true)
         let target = scratch.appendingPathComponent("target.json")
         try Data("{}".utf8).write(to: target)
-        let link = linkFolder.appendingPathComponent("\(name).json")
+        let link = linkFolder.appendingPathComponent(name)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
         expect(ReplayDraftStore(directory: linkFolder).delete(source.draftId) != nil, "a link is not removed as a draft")
         expect((try? FileManager.default.destinationOfSymbolicLink(atPath: link.path)) != nil, "the link survives")
