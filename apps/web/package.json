@@ -10,7 +10,8 @@
     "preview": "nuxt preview",
     "test:unit": "vitest run",
     "test:e2e": "playwright test",
-    "test": "vitest run && playwright test"
+    "test": "vitest run && playwright test",
+    "typecheck": "nuxt prepare && vue-tsc -b --noEmit .nuxt/tsconfig.app.json .nuxt/tsconfig.server.json .nuxt/tsconfig.shared.json .nuxt/tsconfig.node.json"
   },
   "dependencies": {
     "@jade/wasm-worker": "workspace:*",
@@ -22,6 +23,7 @@
     "@playwright/test": "^1.51.1",
     "@types/node": "^22.13.10",
     "typescript": "^5.8.2",
-    "vitest": "^3.0.8"
+    "vitest": "^3.0.8",
+    "vue-tsc": "^3.3.14"
   }
 }
