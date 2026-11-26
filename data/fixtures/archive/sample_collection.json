@@ -8,6 +8,15 @@
     "individual_game_export": "allowed",
     "collection_bulk_export": "sample_fixture_only"
   },
+  "collection": {
+    "title": "Jade sample collection",
+    "scope": "Two synthetic games that ship with the public checkout so the archive works without a hosted provider. They are development fixtures, not historical records.",
+    "source": {
+      "label": "Synthetic development fixture, play-jade/jade",
+      "url": null,
+      "locator": "data/fixtures/archive/sample_collection.json"
+    }
+  },
   "players": [
     {
       "player_id": "sample-player-001",
@@ -93,6 +102,12 @@
   "games": [
     {
       "game_id": "sample-game-central-cannon-001",
+      "round": null,
+      "source": {
+        "label": "Synthetic development fixture, play-jade/jade",
+        "url": null,
+        "locator": "sample-game-central-cannon-001"
+      },
       "dataset_id": "jade-public-sample-fixtures-v1",
       "is_synthetic_fixture": true,
       "event_name": "Jade Standalone Central Cannon Study Sample",
@@ -132,6 +147,12 @@
     },
     {
       "game_id": "sample-game-screen-horse-002",
+      "round": null,
+      "source": {
+        "label": "Synthetic development fixture, play-jade/jade",
+        "url": null,
+        "locator": "sample-game-screen-horse-002"
+      },
       "dataset_id": "jade-public-sample-fixtures-v1",
       "is_synthetic_fixture": true,
       "event_name": "Jade Standalone Screen Horse Variation Sample",
