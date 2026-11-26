@@ -82,7 +82,7 @@ enum ReplaySessionProof {
         // On disk the draft has the web record's shape: the owner-less key and an explicit null owner.
         let file = try FileManager.default.contentsOfDirectory(at: scratch, includingPropertiesForKeys: nil)[0]
         let onDisk = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
-        expect(onDisk["draftId"] as? String == "archive:\(gameId):", "the draft key is the web key")
+        expect(onDisk["draftId"] as? String == "archive:\(gameId)::\(source.revision)", "the draft key is the web key")
         expect(onDisk["ownerScope"] is NSNull, "the owner is written as null")
 
         // A new session for the same game restores the line; at an explicit position it comes back parked.
@@ -97,13 +97,27 @@ enum ReplaySessionProof {
         // The kept record as it stands now, after the navigation above rewrote it.
         guard case .found(let current) = store.load(source.draftId) else { fatalError("Replay proof: draft missing") }
 
-        // A draft from another release is explained and left untouched.
-        let otherRelease = session(store, source: ReplaySource(kind: "archive", id: gameId, revision: "other@sha256:0"))
+        // Another release of the game keeps its own draft: it finds none, and saving there leaves this one untouched.
+        let otherSource = ReplaySource(kind: "archive", id: gameId, revision: "other@sha256:0")
+        let otherRelease = session(store, source: otherSource)
         otherRelease.restoreDraft()
-        expect(otherRelease.draftNotice != nil && otherRelease.parked == nil, "another release's draft is refused")
+        expect(otherRelease.draftNotice == nil && otherRelease.parked == nil, "another release starts with no draft")
+        otherRelease.selectPly(1)
+        _ = otherRelease.tryMove(alternative)
+        expect(store.load(otherSource.draftId) != .none, "another release's variation is kept under its own key")
         guard case .found(let untouched) = store.load(source.draftId), untouched == current else {
-            fatalError("Replay proof: a refused draft must stay untouched")
+            fatalError("Replay proof: another release must not overwrite this release's draft")
         }
+
+        // A draft whose recorded release differs from the release its key names is refused and left as stored.
+        var mislabelled = current
+        mislabelled.sourceRevision = "other@sha256:0"
+        _ = store.save(mislabelled)
+        let mismatch = session(store)
+        mismatch.restoreDraft()
+        expect(mismatch.draftNotice != nil && mismatch.parked == nil, "a draft from another release is refused")
+        expect(store.load(source.draftId) == .found(mislabelled), "a refused draft stays as stored")
+        _ = store.save(current)
 
         // A draft that names another game is refused, though its moves and release match.
         var elsewhere = current

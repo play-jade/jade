@@ -15,8 +15,9 @@ public struct ReplaySource: Equatable {
     }
 
     /// The key of this source's single retained draft, spelled as the web app spells it for a draft without an
-    /// owner (`<kind>:<id>:`), so one record keeps one key on every client.
-    public var draftId: String { "\(kind):\(id):" }
+    /// owner (`<kind>:<id>:`), so one record keeps one key on every client. An archive game's key also names its
+    /// release (`archive:<id>::<release>`), so a variation kept for one release is never overwritten from another.
+    public var draftId: String { kind == "archive" ? "\(kind):\(id)::\(revision)" : "\(kind):\(id):" }
 }
 
 public struct ReplayVariation: Equatable {
