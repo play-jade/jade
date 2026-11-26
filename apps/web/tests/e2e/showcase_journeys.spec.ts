@@ -4,6 +4,31 @@ import { expect, test } from '@playwright/test'
 
 const VISUAL_REF_DIR = resolve(process.cwd(), '../../docs/visual-reference')
 
+/** The number of replay drafts this browser holds, read from the page's own IndexedDB. */
+async function storedDraftCount(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      new Promise<number>((resolve, reject) => {
+        const open = indexedDB.open('jade_offline_v1')
+        open.onerror = () => reject(open.error)
+        open.onsuccess = () => {
+          const db = open.result
+          if (!db.objectStoreNames.contains('replay_drafts')) {
+            db.close()
+            resolve(0)
+            return
+          }
+          const count = db.transaction('replay_drafts', 'readonly').objectStore('replay_drafts').count()
+          count.onsuccess = () => {
+            db.close()
+            resolve(count.result)
+          }
+          count.onerror = () => reject(count.error)
+        }
+      }),
+  )
+}
+
 async function playBoardSquares(page: Page, fromSq: string, toSq: string) {
   await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
   await page.locator(`[data-square="${fromSq}"]`).dispatchEvent('click')
@@ -286,6 +311,9 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     // Resume brings it back; after a reload the game and the variation both return.
     await page.getByTestId('variation-resume').click()
     await expect(page.getByTestId('move-list')).toContainText(tried)
+    // Saving is asynchronous; the reload waits until the device holds the resumed line.
+    await expect(page.getByTestId('variation-saving')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
     await page.reload()
     await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
     await expect(page.getByTestId('variation-moves').locator('li')).toHaveCount(1, { timeout: 10_000 })
@@ -295,6 +323,8 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     // New game clears the board and the kept variation; a reload brings neither back.
     await page.getByTestId('btn-reset').click()
     await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+    // Removal is asynchronous and shows nothing on screen, so the reload waits until the device holds no draft.
+    await expect.poll(() => storedDraftCount(page)).toBe(0)
     await page.reload()
     await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
     await expect(page.getByTestId('variation-bar')).toHaveCount(0)
