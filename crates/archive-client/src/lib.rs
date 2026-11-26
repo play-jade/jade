@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use xiangqi_core::{
     ADOPTED_RULES_PROFILE, GameState, Move, NotationDialect, PositionKey, format_chinese_move,
@@ -171,9 +172,206 @@ pub struct CorrectionSubmission {
     pub note: Option<String>,
 }
 
+/// The published dataset release that answered an archive request. Every browse response carries
+/// one, so a link or a report can name the exact records it showed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveRelease {
+    pub dataset_id: String,
+    pub release_id: String,
+    pub is_synthetic_fixture: bool,
+}
+
+/// Public attribution for a collection or a game: a readable label, an optional public URL, and an
+/// optional locator inside the source (a printed page, a source game ID, or a fixture path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceAttribution {
+    pub label: String,
+    pub url: Option<String>,
+    pub locator: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionSummary {
+    pub release: ArchiveRelease,
+    pub title: String,
+    pub scope: String,
+    pub provenance_banner: String,
+    pub source: SourceAttribution,
+    pub access_policy: AccessPolicySummary,
+    pub game_count: usize,
+}
+
+/// One row of the game directory: who played, where, when (at its recorded precision), and the
+/// recorded result. Moves stay in [`GameDetail`], so browsing never needs bulk replay export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameSummary {
+    pub game_id: String,
+    pub red_player_id: String,
+    pub red_display_name: String,
+    pub black_player_id: String,
+    pub black_display_name: String,
+    pub event_name: String,
+    pub round: Option<String>,
+    pub date_precision: String,
+    pub date_display: String,
+    pub recorded_result: String,
+    pub replay_validity: String,
+}
+
+pub const DEFAULT_GAME_PAGE_LIMIT: usize = 25;
+pub const MAX_GAME_PAGE_LIMIT: usize = 100;
+
+/// A game-directory query: an optional player filter, an optional folded text match over player
+/// names, aliases, and event, and an offset page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameQuery {
+    #[serde(default)]
+    pub player_id: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_game_page_limit")]
+    pub limit: usize,
+}
+
+impl Default for GameQuery {
+    fn default() -> Self {
+        Self {
+            player_id: None,
+            text: None,
+            offset: 0,
+            limit: DEFAULT_GAME_PAGE_LIMIT,
+        }
+    }
+}
+
+fn default_game_page_limit() -> usize {
+    DEFAULT_GAME_PAGE_LIMIT
+}
+
+/// A page of a list whose filter is fixed elsewhere, such as one player's games.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageRequest {
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_game_page_limit")]
+    pub limit: usize,
+}
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            limit: DEFAULT_GAME_PAGE_LIMIT,
+        }
+    }
+}
+
+/// What a game-directory query found. Position analysis states belong to [`PositionQueryStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryStatus {
+    Ok,
+    NoGamesFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameSummaryPage {
+    pub release: ArchiveRelease,
+    pub status: DirectoryStatus,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub games: Vec<GameSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSearchResponse {
+    pub release: ArchiveRelease,
+    pub provenance_banner: String,
+    pub players: Vec<PlayerSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerProfile {
+    pub release: ArchiveRelease,
+    pub player: PlayerSummary,
+    pub games: GameSummaryPage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameDetail {
+    pub release: ArchiveRelease,
+    pub summary: GameSummary,
+    pub source: SourceAttribution,
+    pub record: ArchiveGameRecord,
+}
+
+/// A position-explorer answer with the release that produced it. The explorer's fields stay at the
+/// top level, so the JSON is a superset of [`PositionExplorerResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionResponse {
+    pub release: ArchiveRelease,
+    #[serde(flatten)]
+    pub explorer: PositionExplorerResponse,
+}
+
+/// The public archive read interface. The embedded sample implements it here; the hosted archive
+/// service implements it against a published release. Implementations never fetch upstream sources.
+pub trait ArchiveProvider {
+    fn collection(&self) -> Result<CollectionSummary, ArchiveReadError>;
+    fn find_players(&self, query: &str) -> Result<PlayerSearchResponse, ArchiveReadError>;
+    fn player_profile(
+        &self,
+        player_id: &str,
+        page: PageRequest,
+    ) -> Result<PlayerProfile, ArchiveReadError>;
+    fn browse_games(&self, query: &GameQuery) -> Result<GameSummaryPage, ArchiveReadError>;
+    fn game_detail(&self, game_id: &str) -> Result<GameDetail, ArchiveReadError>;
+    /// Explores the position after `fen`. A blank FEN is an invalid request, never the start position.
+    fn explore_position(&self, fen: &str) -> Result<PositionResponse, ArchiveReadError>;
+}
+
+/// Why an archive read returned no answer. A missing record, a request the archive cannot answer, and
+/// an archive that is not answering stay distinct, so a client never shows one as another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "code", content = "message", rename_all = "snake_case")]
+pub enum ArchiveReadError {
+    #[error("archive record not found: {0}")]
+    NotFound(String),
+    #[error("invalid archive request: {0}")]
+    InvalidRequest(String),
+    #[error("archive unavailable: {0}")]
+    Unavailable(String),
+}
+
+/// Fixture-only fields read beside [`SampleCollectionManifest`] from the same embedded JSON.
+#[derive(Debug, Clone, Deserialize)]
+struct SampleFixtureExtras {
+    collection: SampleCollectionDescription,
+    games: Vec<SampleGameExtras>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SampleCollectionDescription {
+    title: String,
+    scope: String,
+    source: SourceAttribution,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SampleGameExtras {
+    game_id: String,
+    round: Option<String>,
+    source: SourceAttribution,
+}
+
 #[derive(Debug, Clone)]
 pub struct SampleArchiveProvider {
     manifest: SampleCollectionManifest,
+    extras: SampleFixtureExtras,
+    release: ArchiveRelease,
 }
 
 impl Default for SampleArchiveProvider {
@@ -186,9 +384,199 @@ impl SampleArchiveProvider {
     pub fn new_embedded() -> Self {
         let manifest: SampleCollectionManifest = serde_json::from_str(EMBEDDED_SAMPLE_COLLECTION)
             .expect("valid embedded sample archive fixture");
-        Self { manifest }
+        let extras: SampleFixtureExtras = serde_json::from_str(EMBEDDED_SAMPLE_COLLECTION)
+            .expect("valid embedded sample archive fixture extras");
+        // The release ID names the fixture's exact bytes, so two builds that show different sample
+        // records never claim the same release.
+        let digest = hex::encode(Sha256::digest(EMBEDDED_SAMPLE_COLLECTION.as_bytes()));
+        let release = ArchiveRelease {
+            dataset_id: manifest.dataset_id.clone(),
+            release_id: format!("{}@sha256:{digest}", manifest.dataset_id),
+            is_synthetic_fixture: manifest.is_synthetic_development_fixture,
+        };
+        Self {
+            manifest,
+            extras,
+            release,
+        }
     }
 
+    pub fn release(&self) -> &ArchiveRelease {
+        &self.release
+    }
+
+    fn summarize(&self, game: &ArchiveGameRecord) -> GameSummary {
+        let name_of = |id: &str| {
+            self.manifest
+                .players
+                .iter()
+                .find(|p| p.player_id == id)
+                .map(|p| p.primary_display_name.clone())
+                .unwrap_or_else(|| id.to_string())
+        };
+        let round = self
+            .extras
+            .games
+            .iter()
+            .find(|g| g.game_id == game.game_id)
+            .and_then(|g| g.round.clone());
+        GameSummary {
+            game_id: game.game_id.clone(),
+            red_player_id: game.red_player_id.clone(),
+            red_display_name: name_of(&game.red_player_id),
+            black_player_id: game.black_player_id.clone(),
+            black_display_name: name_of(&game.black_player_id),
+            event_name: game.event_name.clone(),
+            round,
+            date_precision: game.date_precision.clone(),
+            date_display: game.date_display.clone(),
+            recorded_result: game.recorded_result.clone(),
+            replay_validity: game.replay_validity.clone(),
+        }
+    }
+
+    fn player_matches_text(&self, player_id: &str, folded: &str) -> bool {
+        self.manifest
+            .players
+            .iter()
+            .find(|p| p.player_id == player_id)
+            .is_some_and(|p| {
+                fold_search_key(&p.primary_display_name).contains(folded)
+                    || fold_search_key(&p.native_display_name).contains(folded)
+                    || p.aliases
+                        .iter()
+                        .any(|a| fold_search_key(&a.text).contains(folded))
+            })
+    }
+}
+
+impl ArchiveProvider for SampleArchiveProvider {
+    fn collection(&self) -> Result<CollectionSummary, ArchiveReadError> {
+        Ok(CollectionSummary {
+            release: self.release.clone(),
+            title: self.extras.collection.title.clone(),
+            scope: self.extras.collection.scope.clone(),
+            provenance_banner: self.manifest.provenance_banner.clone(),
+            source: self.extras.collection.source.clone(),
+            access_policy: self.manifest.access_policy.clone(),
+            game_count: self.manifest.games.len(),
+        })
+    }
+
+    fn find_players(&self, query: &str) -> Result<PlayerSearchResponse, ArchiveReadError> {
+        Ok(PlayerSearchResponse {
+            release: self.release.clone(),
+            provenance_banner: self.manifest.provenance_banner.clone(),
+            players: self.search_players(query),
+        })
+    }
+
+    fn player_profile(
+        &self,
+        player_id: &str,
+        page: PageRequest,
+    ) -> Result<PlayerProfile, ArchiveReadError> {
+        let player = self
+            .manifest
+            .players
+            .iter()
+            .find(|p| p.player_id == player_id)
+            .ok_or_else(|| ArchiveReadError::NotFound(format!("player {player_id}")))?
+            .clone();
+        let games = self.browse_games(&GameQuery {
+            player_id: Some(player_id.to_string()),
+            text: None,
+            offset: page.offset,
+            limit: page.limit,
+        })?;
+        Ok(PlayerProfile {
+            release: self.release.clone(),
+            player,
+            games,
+        })
+    }
+
+    fn browse_games(&self, query: &GameQuery) -> Result<GameSummaryPage, ArchiveReadError> {
+        let folded = query
+            .text
+            .as_deref()
+            .map(fold_search_key)
+            .filter(|t| !t.is_empty());
+        let matching: Vec<&ArchiveGameRecord> = self
+            .manifest
+            .games
+            .iter()
+            .filter(|g| {
+                query
+                    .player_id
+                    .as_deref()
+                    .is_none_or(|id| g.red_player_id == id || g.black_player_id == id)
+            })
+            .filter(|g| {
+                folded.as_deref().is_none_or(|t| {
+                    fold_search_key(&g.event_name).contains(t)
+                        || self.player_matches_text(&g.red_player_id, t)
+                        || self.player_matches_text(&g.black_player_id, t)
+                })
+            })
+            .collect();
+        let limit = query.limit.clamp(1, MAX_GAME_PAGE_LIMIT);
+        let games = matching
+            .iter()
+            .skip(query.offset)
+            .take(limit)
+            .map(|g| self.summarize(g))
+            .collect();
+        Ok(GameSummaryPage {
+            release: self.release.clone(),
+            status: if matching.is_empty() {
+                DirectoryStatus::NoGamesFound
+            } else {
+                DirectoryStatus::Ok
+            },
+            total: matching.len(),
+            offset: query.offset,
+            limit,
+            games,
+        })
+    }
+
+    fn game_detail(&self, game_id: &str) -> Result<GameDetail, ArchiveReadError> {
+        let record = self
+            .get_game(game_id)
+            .ok_or_else(|| ArchiveReadError::NotFound(format!("game {game_id}")))?
+            .clone();
+        let source = self
+            .extras
+            .games
+            .iter()
+            .find(|g| g.game_id == game_id)
+            .map(|g| g.source.clone())
+            .unwrap_or_else(|| self.extras.collection.source.clone());
+        Ok(GameDetail {
+            release: self.release.clone(),
+            summary: self.summarize(&record),
+            source,
+            record,
+        })
+    }
+
+    fn explore_position(&self, fen: &str) -> Result<PositionResponse, ArchiveReadError> {
+        if fen.trim().is_empty() {
+            return Err(ArchiveReadError::InvalidRequest(
+                "a position FEN is required".to_string(),
+            ));
+        }
+        Ok(PositionResponse {
+            release: self.release.clone(),
+            explorer: self
+                .query_position(fen)
+                .map_err(ArchiveReadError::InvalidRequest)?,
+        })
+    }
+}
+
+impl SampleArchiveProvider {
     pub fn manifest(&self) -> &SampleCollectionManifest {
         &self.manifest
     }
@@ -411,6 +799,137 @@ mod tests {
         assert_eq!(resp.continuations[0].red_wins, 1);
         assert_eq!(resp.continuations[0].draws, 1);
         assert_eq!(resp.continuations[0].black_wins, 0);
+    }
+
+    #[test]
+    fn sample_collection_names_its_release_and_synthetic_source() {
+        let provider = SampleArchiveProvider::new_embedded();
+        let collection = provider.collection().unwrap();
+        assert_eq!(
+            collection.release.dataset_id,
+            "jade-public-sample-fixtures-v1"
+        );
+        let digest = hex::encode(Sha256::digest(EMBEDDED_SAMPLE_COLLECTION.as_bytes()));
+        assert_eq!(
+            collection.release.release_id,
+            format!("jade-public-sample-fixtures-v1@sha256:{digest}")
+        );
+        assert!(collection.release.is_synthetic_fixture);
+        assert_eq!(collection.game_count, 2);
+        assert_eq!(collection.source.url, None);
+        assert_eq!(
+            provider.find_players("").unwrap().release,
+            collection.release
+        );
+    }
+
+    #[test]
+    fn sample_browse_pages_and_filters_games_by_player_and_text() {
+        let provider = SampleArchiveProvider::new_embedded();
+        let all = provider.browse_games(&GameQuery::default()).unwrap();
+        assert_eq!(all.status, DirectoryStatus::Ok);
+        assert_eq!(all.total, 2);
+        assert_eq!(all.games[1].game_id, "sample-game-screen-horse-002");
+        assert_eq!(all.games[0].red_display_name, "Chiu, Yu Kuen");
+
+        let second_page = provider
+            .browse_games(&GameQuery {
+                offset: 1,
+                limit: 1,
+                ..GameQuery::default()
+            })
+            .unwrap();
+        assert_eq!(second_page.total, 2);
+        assert_eq!(second_page.games.len(), 1);
+        assert_eq!(second_page.games[0].game_id, "sample-game-screen-horse-002");
+
+        let by_player = provider
+            .browse_games(&GameQuery {
+                player_id: Some("sample-player-003".to_string()),
+                ..GameQuery::default()
+            })
+            .unwrap();
+        assert_eq!(by_player.total, 1);
+        assert_eq!(by_player.games[0].game_id, "sample-game-screen-horse-002");
+
+        // A reviewed alias in another script finds the game without being shown beside every name.
+        let by_alias = provider
+            .browse_games(&GameQuery {
+                text: Some("趙汝權".to_string()),
+                ..GameQuery::default()
+            })
+            .unwrap();
+        assert_eq!(by_alias.total, 1);
+        assert_eq!(by_alias.games[0].game_id, "sample-game-central-cannon-001");
+
+        let none = provider
+            .browse_games(&GameQuery {
+                text: Some("no such player".to_string()),
+                ..GameQuery::default()
+            })
+            .unwrap();
+        assert_eq!(none.status, DirectoryStatus::NoGamesFound);
+        assert!(none.games.is_empty());
+    }
+
+    #[test]
+    fn sample_player_profile_lists_that_players_games() {
+        let provider = SampleArchiveProvider::new_embedded();
+        let profile = provider
+            .player_profile("sample-player-001", PageRequest::default())
+            .unwrap();
+        assert_eq!(profile.player.native_display_name, "赵汝权");
+        assert_eq!(profile.games.total, 1);
+        assert_eq!(profile.games.games[0].red_player_id, "sample-player-001");
+        assert!(matches!(
+            provider.player_profile("no-such-player", PageRequest::default()),
+            Err(ArchiveReadError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn sample_game_detail_keeps_record_source_and_release_together() {
+        let provider = SampleArchiveProvider::new_embedded();
+        let detail = provider
+            .game_detail("sample-game-screen-horse-002")
+            .unwrap();
+        assert_eq!(detail.summary.game_id, detail.record.game_id);
+        assert_eq!(
+            detail.source.locator.as_deref(),
+            Some("sample-game-screen-horse-002")
+        );
+        assert_eq!(&detail.release, provider.release());
+        assert!(matches!(
+            provider.game_detail("no-such-game"),
+            Err(ArchiveReadError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn position_response_json_keeps_the_explorer_fields_at_top_level() {
+        let provider = SampleArchiveProvider::new_embedded();
+        let resp = provider.explore_position(STARTING_FEN).unwrap();
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["dataset_id"], "jade-public-sample-fixtures-v1");
+        assert_eq!(json["continuations"][0]["move_uci"], "h2e2");
+        assert_eq!(json["release"]["release_id"], resp.release.release_id);
+        let back: PositionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn blank_or_malformed_fen_is_an_invalid_request() {
+        let provider = SampleArchiveProvider::new_embedded();
+        assert!(matches!(
+            provider.explore_position("  "),
+            Err(ArchiveReadError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            provider.explore_position("not a fen"),
+            Err(ArchiveReadError::InvalidRequest(_))
+        ));
+        let json = serde_json::to_value(ArchiveReadError::NotFound("game x".into())).unwrap();
+        assert_eq!(json["code"], "not_found");
     }
 
     #[test]
