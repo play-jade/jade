@@ -42,6 +42,64 @@ async fn json_body<T: serde::de::DeserializeOwned>(resp: axum::response::Respons
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// Posts `cmd` to the match's command endpoint as the bearer of `token`.
+async fn post_command(
+    app: &axum::Router,
+    token: &str,
+    match_id: &str,
+    cmd: &MatchCommandRequest,
+) -> axum::response::Response {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{match_id}/commands"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(cmd).unwrap()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+/// Asserts that a nonparticipant replaying `cmd` is refused and receives no snapshot.
+async fn assert_replay_refused(
+    app: &axum::Router,
+    token: &str,
+    match_id: &str,
+    cmd: &MatchCommandRequest,
+) {
+    let resp = post_command(app, token, match_id, cmd).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = json_body(resp).await;
+    assert!(
+        body.get("moves_uci").is_none(),
+        "a nonparticipant must not receive a snapshot, got {body}"
+    );
+}
+
+/// Sets one participant's visibility with every research consent withheld.
+async fn set_visibility(
+    app: &axum::Router,
+    token: &str,
+    match_id: &str,
+    visibility: Visibility,
+) -> serde_json::Value {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{match_id}/privacy"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&PrivacyUpdateRequest {
+                visibility,
+                allow_internal_training: false,
+                allow_published_research: false,
+                allow_dataset_release: false,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+    json_body(app.clone().oneshot(req).await.unwrap()).await
+}
+
 async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, String) {
     let req = Request::builder()
         .method("POST")
@@ -337,6 +395,9 @@ async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent(
     assert_eq!(snap_dup.seq, 1);
     assert_eq!(snap_dup.red_remaining_ms, Some(red_rem_after_first));
 
+    // 2b. A nonparticipant replaying a known `command_id` on a private match receives no snapshot!
+    assert_replay_refused(&app, &outsider.access_token, &inv.match_id, &move1).await;
+
     // 3. Stale `expected_seq` (Black sends `expected_seq: 0` when match is at `seq: 1`) MUST be rejected 409!
     let stale_blk = MatchCommandRequest::Move {
         protocol: 1,
@@ -502,6 +563,24 @@ async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent(
     assert_eq!(snap_done.status, "finished");
     assert_eq!(snap_done.outcome.as_deref(), Some("draw"));
     assert_eq!(snap_done.reason_code.as_deref(), Some("agreed_draw"));
+
+    // 8. A participant's retry after the match finished stays idempotent and still receives the snapshot!
+    let accept_retry_resp = post_command(&app, &blk.access_token, &inv.match_id, &accept).await;
+    assert_eq!(accept_retry_resp.status(), StatusCode::OK);
+    let snap_retry: MatchSnapshotResponse = json_body(accept_retry_resp).await;
+    assert_eq!(snap_retry.seq, snap_done.seq);
+    assert_eq!(snap_retry.red_remaining_ms, snap_done.red_remaining_ms);
+    assert_eq!(snap_retry.black_remaining_ms, snap_done.black_remaining_ms);
+
+    // 8b. Sharing grants read access, never command authority: while the match is public, the
+    //     outsider replaying a known `command_id` still receives no snapshot!
+    assert_replay_refused(&app, &outsider.access_token, &inv.match_id, &accept).await;
+
+    // 9. Red revokes sharing; the outsider replaying a known `command_id` still receives no snapshot!
+    let revoke_json =
+        set_visibility(&app, &red.access_token, &inv.match_id, Visibility::Private).await;
+    assert_eq!(revoke_json["effective_visibility"], "private");
+    assert_replay_refused(&app, &outsider.access_token, &inv.match_id, &accept).await;
 }
 
 #[tokio::test]
