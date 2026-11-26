@@ -8,9 +8,16 @@ export default defineNuxtConfig({
   telemetry: false,
   devtools: { enabled: false },
   runtimeConfig: {
+    // The hosted archive's base URL stays server-side (`NUXT_ARCHIVE_API_URL`); the browser reads it
+    // through the same-origin `/api/archive` routes.
+    archiveApiUrl: '',
     public: {
       matchServerUrl: process.env.NUXT_PUBLIC_MATCH_SERVER_URL || 'http://127.0.0.1:4180',
       rulesProfile: 'program-2023.11-v1',
+      // Selects what `useArchiveProvider` reads (`NUXT_PUBLIC_ARCHIVE_SOURCE`): `sample` serves the embedded
+      // synthetic collection; `hosted` reads the configured archive and reports it unavailable rather than
+      // substituting sample records. Any other value is a configuration error.
+      archiveSource: 'sample',
     },
   },
   app: {
