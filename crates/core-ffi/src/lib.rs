@@ -1,4 +1,4 @@
-use archive_client::SampleArchiveProvider;
+use archive_client::{ArchiveProvider, ArchiveReadError, GameQuery, SampleArchiveProvider};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -274,6 +274,34 @@ pub fn ffi_sample_archive_query_position_json(fen: String) -> Result<String, Ffi
     serde_json::to_string(&res).map_err(|e| FfiError::Core {
         detail: e.to_string(),
     })
+}
+
+fn archive_json<T: serde::Serialize>(
+    read: Result<T, ArchiveReadError>,
+) -> Result<String, FfiError> {
+    let value = read.map_err(|e| FfiError::Core {
+        detail: e.to_string(),
+    })?;
+    serde_json::to_string(&value).map_err(|e| FfiError::Core {
+        detail: e.to_string(),
+    })
+}
+
+/// One page of the embedded sample collection's games, as the archive contract's game summary page JSON.
+#[uniffi::export]
+pub fn ffi_sample_archive_games_json(offset: u32, limit: u32) -> Result<String, FfiError> {
+    let query = GameQuery {
+        offset: offset as usize,
+        limit: limit as usize,
+        ..GameQuery::default()
+    };
+    archive_json(SampleArchiveProvider::new_embedded().browse_games(&query))
+}
+
+/// One sample game with its release, summary, source, and record, as the archive contract's game detail JSON.
+#[uniffi::export]
+pub fn ffi_sample_archive_game_detail_json(game_id: String) -> Result<String, FfiError> {
+    archive_json(SampleArchiveProvider::new_embedded().game_detail(&game_id))
 }
 
 // ============================================================================
@@ -636,6 +664,25 @@ pub fn crate_ready() -> bool {
 mod tests {
     use super::*;
     use std::ptr;
+
+    #[test]
+    fn sample_archive_games_and_detail_follow_the_archive_contract() {
+        let page: serde_json::Value =
+            serde_json::from_str(&ffi_sample_archive_games_json(0, 10).unwrap()).unwrap();
+        assert_eq!(page["status"], "ok");
+        assert_eq!(page["release"]["is_synthetic_fixture"], true);
+        let first = page["games"][0]["game_id"].as_str().unwrap().to_string();
+
+        let detail: serde_json::Value =
+            serde_json::from_str(&ffi_sample_archive_game_detail_json(first.clone()).unwrap())
+                .unwrap();
+        assert_eq!(detail["summary"]["game_id"], first.as_str());
+        assert_eq!(detail["release"], page["release"]);
+        assert!(!detail["record"]["moves_uci"].as_array().unwrap().is_empty());
+
+        let missing = ffi_sample_archive_game_detail_json("no-such-game".to_string());
+        assert!(matches!(missing, Err(FfiError::Core { .. })));
+    }
 
     #[test]
     fn uniffi_and_c_abi_run_pikafish_fixtures_identically() {

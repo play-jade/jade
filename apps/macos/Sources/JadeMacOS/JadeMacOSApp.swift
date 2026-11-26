@@ -75,6 +75,29 @@ struct JadeMacOSGuiApp: App {
                     .keyboardShortcut("o", modifiers: [.command])
                 Button("Export Game PGN…") { controller.exportPgnInteractive() }
                     .keyboardShortcut("s", modifiers: [.command])
+                    // The export describes the offline game; a replay is the archive's record, not this Mac's game.
+                    .disabled(controller.replay != nil)
+            }
+            CommandMenu("Replay") {
+                Button("Open Sample Game…") { controller.showSamplePicker = true }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                Divider()
+                // Stepping moves along the recorded line; within a variation, Take Back is the only edit.
+                Button("Previous Move") { controller.replayStep(-1) }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command])
+                    .disabled(controller.replay == nil || controller.replay?.isInVariation == true)
+                Button("Next Move") { controller.replayStep(1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command])
+                    .disabled(controller.replay == nil || controller.replay?.isInVariation == true)
+                Button("Return to Game") { controller.replayReturnToGame() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(controller.replay?.isInVariation != true)
+                Button("Resume Variation") { controller.replayResume() }
+                    .disabled(controller.replay?.parked == nil)
+                Divider()
+                Button("Close Replay") { controller.closeReplay() }
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
+                    .disabled(controller.replay == nil)
             }
         }
 
@@ -123,8 +146,13 @@ struct LamplitTableView: View {
                     .frame(width: 260)
                 MacCoreGraphicsBoardRepresentable(controller: controller)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                MovesColumn(controller: controller)
-                    .frame(width: 280)
+                if controller.replay != nil {
+                    ReplayColumn(controller: controller)
+                        .frame(width: 300)
+                } else {
+                    MovesColumn(controller: controller)
+                        .frame(width: 280)
+                }
             }
             VStack {
                 Spacer()
@@ -135,6 +163,9 @@ struct LamplitTableView: View {
         .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
         .foregroundStyle(LamplitTheme.paper)
+        .sheet(isPresented: $controller.showSamplePicker) {
+            SampleGamePicker(controller: controller)
+        }
     }
 }
 
@@ -193,10 +224,11 @@ struct SidePlate: View {
     let side: String
 
     private var toMove: Bool { controller.sideToMove == side && controller.outcomeText == nil }
-    private var isEngine: Bool { side == "black" && controller.autoEngineBlack }
+    private var isEngine: Bool { side == "black" && controller.autoEngineBlack && controller.replay == nil }
     private var title: String { side == "red" ? "Red" : "Black" }
     private var caption: String {
-        let who = isEngine ? "Engine" : "This Mac"
+        let who = controller.replayPlayers.map { side == "red" ? $0.red : $0.black }
+            ?? (isEngine ? "Engine" : "This Mac")
         return (toMove ? "\(who) · to move" : who).uppercased()
     }
 
@@ -352,10 +384,22 @@ struct ControlCapsule: View {
     var body: some View {
         HStack(spacing: 4) {
             capsuleButton("arrow.up.arrow.down", "Flip board (⌘F)") { controller.redBelow.toggle() }
-            capsuleButton("arrow.uturn.backward", "Take back (⌘Z)") { controller.undo() }
-                .disabled(controller.movesUci.isEmpty || controller.engineThinking)
-            capsuleButton("cpu", "Engine move (⌘E)") { controller.requestEngineMove() }
-                .disabled(controller.engineThinking || controller.outcomeText != nil)
+            if let replay = controller.replay {
+                capsuleButton("chevron.left", "Previous move (⌘←)") { controller.replayStep(-1) }
+                    .disabled(replay.isInVariation || replay.cursor == 0)
+                capsuleButton("chevron.right", "Next move (⌘→)") { controller.replayStep(1) }
+                    .disabled(replay.isInVariation || replay.cursor == replay.recordedMovesUci.count)
+                capsuleButton("arrow.uturn.backward", "Take back variation move (⌘Z)") { controller.undo() }
+                    .disabled(!replay.isInVariation || controller.engineThinking)
+                capsuleButton("cpu", "Try engine suggestion (⌘E)") { controller.requestEngineMove() }
+                    .disabled(controller.engineThinking || controller.outcomeText != nil)
+                capsuleButton("xmark", "Close replay (⇧⌘W)") { controller.closeReplay() }
+            } else {
+                capsuleButton("arrow.uturn.backward", "Take back (⌘Z)") { controller.undo() }
+                    .disabled(controller.movesUci.isEmpty || controller.engineThinking)
+                capsuleButton("cpu", "Engine move (⌘E)") { controller.requestEngineMove() }
+                    .disabled(controller.engineThinking || controller.outcomeText != nil)
+            }
             capsuleButton("arrow.counterclockwise", "New game (⌘N)") { controller.resetOfflineGame() }
             capsuleButton(controller.soundEnabled ? "speaker.wave.2" : "speaker.slash",
                           controller.soundEnabled ? "Sound on" : "Sound off") {
@@ -424,6 +468,21 @@ final class MacBoardController: ObservableObject {
     @Published var inCheck: Bool = false
     @Published var outcomeText: String? = nil
     @Published private(set) var pieceCounts: [String: Int] = [:]
+    /// The archive game being replayed, or nil while playing the offline game.
+    @Published private(set) var replay: ReplaySession? = nil
+    @Published private(set) var replayInfo: SampleGameInfo? = nil
+    @Published private(set) var replayRecordedNotated: [String] = []
+    @Published private(set) var replayVariationNotated: [String] = []
+    /// Bumped after each replay change, so views that read the session redraw.
+    @Published private(set) var replayRevision = 0
+    @Published var showSamplePicker = false
+    var replayPlayers: (red: String, black: String)? {
+        replayInfo.map { ($0.redName, $0.blackName) }
+    }
+    private let replayStore = ReplayDraftStore.applicationSupport()
+    private static let lastReplayGameKey = "jade.replay.lastGameId"
+    private static let lastReplayPlyKey = "jade.replay.lastPly"
+    private static let startFen = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
 
     private let notateWxf = !(Locale.preferredLanguages.first ?? "en").hasPrefix("zh")
     private static let startingCounts: [String: Int] = [
@@ -445,6 +504,17 @@ final class MacBoardController: ObservableObject {
         LamplitTheme.registerFonts(repoRoot: root)
         self.audio = MacPieceAudioEngine(repoRoot: root)
         self.session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
+        loadOfflineGameFromStore()
+        // A replay open when the app quit comes back at the same game and position.
+        if let gameId = UserDefaults.standard.string(forKey: Self.lastReplayGameKey) {
+            openSampleGame(id: gameId, ply: UserDefaults.standard.integer(forKey: Self.lastReplayPlyKey))
+        }
+    }
+
+    private func loadOfflineGameFromStore() {
+        session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
+        movesUci.removeAll()
+        movesChinese.removeAll()
         for uci in offlineStore.loadMoves() {
             if let zh = try? session.applyMoveToken(token: uci) {
                 movesUci.append(uci)
@@ -452,6 +522,145 @@ final class MacBoardController: ObservableObject {
             }
         }
         refreshStatus()
+    }
+
+    // MARK: Replay of a sample archive game
+
+    /// The embedded sample collection's games; empty when the core cannot read it.
+    func sampleGames() -> [SampleGameInfo] {
+        guard let json = try? ffiSampleArchiveGamesJson(offset: 0, limit: 50),
+              let page = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let release = page["release"] as? [String: Any],
+              let games = page["games"] as? [[String: Any]] else { return [] }
+        return games.compactMap { SampleGameInfo(summary: $0, release: release) }
+    }
+
+    /// Opens a sample game: the recorded line, then this Mac's saved variation for it, then `ply` when
+    /// no saved variation says where the visitor was.
+    func openSampleGame(id: String, ply: Int? = nil) {
+        guard let json = try? ffiSampleArchiveGameDetailJson(gameId: id),
+              let detail = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let release = detail["release"] as? [String: Any],
+              let summary = detail["summary"] as? [String: Any],
+              let record = detail["record"] as? [String: Any],
+              let info = SampleGameInfo(summary: summary, release: release),
+              let rootFen = record["initial_fen"] as? String,
+              let moves = record["moves_uci"] as? [String] else {
+            statusLine = "The sample game \(id) could not be opened"
+            UserDefaults.standard.removeObject(forKey: Self.lastReplayGameKey)
+            return
+        }
+        let next = ReplaySession(
+            source: ReplaySource(kind: "archive", id: id, revision: info.releaseId),
+            rootFen: rootFen,
+            rulesProfile: "program-2023.11-v1",
+            recordedMovesUci: moves,
+            store: replayStore
+        )
+        next.selectPly(ply ?? moves.count)
+        next.restoreDraft()
+        replay = next
+        replayInfo = info.withRecord(record)
+        replayRecordedNotated = notate(moves, from: rootFen)
+        selectedUci = nil
+        legalDestUcis.removeAll()
+        UserDefaults.standard.set(id, forKey: Self.lastReplayGameKey)
+        syncReplay()
+    }
+
+    func closeReplay() {
+        guard replay != nil else { return }
+        replay = nil
+        replayInfo = nil
+        replayRecordedNotated = []
+        replayVariationNotated = []
+        selectedUci = nil
+        legalDestUcis.removeAll()
+        UserDefaults.standard.removeObject(forKey: Self.lastReplayGameKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastReplayPlyKey)
+        loadOfflineGameFromStore()
+    }
+
+    func replaySelectPly(_ ply: Int) {
+        guard let replay, !engineThinking else { return }
+        replay.selectPly(ply)
+        syncReplay()
+    }
+
+    /// One ply along the recorded line, or along the variation while one is shown.
+    func replayStep(_ delta: Int) {
+        guard let replay, !engineThinking, !replay.isInVariation else { return }
+        replay.selectPly(replay.cursor + delta)
+        syncReplay()
+    }
+
+    func replayReturnToGame() {
+        guard let replay else { return }
+        replay.returnToRecordedLine()
+        syncReplay()
+    }
+
+    func replayResume() {
+        guard let replay else { return }
+        replay.resumeVariation()
+        syncReplay()
+    }
+
+    /// Shows the replay's active position on the board and its lines in the move list.
+    private func syncReplay() {
+        guard let replay else { return }
+        // Every replay change can move the position, so no earlier selection outlives it.
+        selectedUci = nil
+        legalDestUcis.removeAll()
+        if let game = try? replay.positionSession() { session = game }
+        movesUci = replay.activePath
+        movesChinese = []
+        if let line = replay.variation ?? replay.parked {
+            let prefix = Array(replay.recordedMovesUci.prefix(line.originPly))
+            replayVariationNotated = Array(notate(prefix + line.movesUci, from: replay.rootFen).dropFirst(prefix.count))
+        } else {
+            replayVariationNotated = []
+        }
+        UserDefaults.standard.set(replay.cursor, forKey: Self.lastReplayPlyKey)
+        replayRevision += 1
+        refreshStatus()
+    }
+
+    /// Notates `moves` from `fen` in the reader's dialect, each before it is applied.
+    private func notate(_ moves: [String], from fen: String) -> [String] {
+        guard let game = try? FfiGameSession.fromFen(fen: fen, rulesProfile: "program-2023.11-v1") else { return moves }
+        return moves.map { uci in
+            let text = (try? game.notateMoveToken(token: uci, wxf: notateWxf)) ?? uci
+            _ = try? game.applyMoveToken(token: uci)
+            return text
+        }
+    }
+
+    private func requestReplayEngineMove(_ replay: ReplaySession) {
+        // The local engine is given the standard start plus moves, so it advises only from that start.
+        guard replay.rootFen == Self.startFen else {
+            statusLine = "Engine suggestions need a game that starts from the standard position"
+            return
+        }
+        let path = replay.activePath
+        let root = repoRoot
+        engineThinking = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let best = LocalUciProcessRunner.computeBestMove(repoRoot: root, movesUci: path)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.engineThinking = false
+                // The suggestion applies only to the position it was computed for.
+                guard self.replay === replay, replay.activePath == path else { return }
+                guard let best else {
+                    self.statusLine = "The engine gave no suggestion here"
+                    return
+                }
+                replay.tryMove(best)
+                if self.soundEnabled { self.audio.playPlacementOnce(materialId: self.materialId) }
+                self.syncReplay()
+            }
+        }
     }
 
     func activateSquare(file: Int, rank: Int) {
@@ -462,6 +671,16 @@ final class MacBoardController: ObservableObject {
         } else if selectedUci == uci {
             selectedUci = nil
             legalDestUcis.removeAll()
+        } else if let from = selectedUci, let replay {
+            if case .rejected = replay.tryMove("\(from)\(uci)") {
+                selectIfFriendly(uci: uci)
+            } else {
+                if soundEnabled { audio.playPlacementOnce(materialId: materialId) }
+                selectedUci = nil
+                legalDestUcis.removeAll()
+                syncReplay()
+                return
+            }
         } else if let from = selectedUci {
             let moveToken = "\(from)\(uci)"
             if let zh = try? session.applyMoveToken(token: moveToken) {
@@ -509,11 +728,16 @@ final class MacBoardController: ObservableObject {
     }
 
     func requestEngineMove() {
+        if let replay {
+            if !engineThinking { requestReplayEngineMove(replay) }
+            return
+        }
         guard !engineThinking,
               let sum = try? session.summary(),
               sum.outcome == nil else { return }
         let currentMoves = movesUci
         let root = repoRoot
+        let origin = session
         engineThinking = true
         statusLine = "C++26 engine searching…"
 
@@ -522,6 +746,9 @@ final class MacBoardController: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.engineThinking = false
+                // The answer belongs to the offline position it was computed for; after a replay opened or the
+                // game changed, it applies nowhere.
+                guard self.replay == nil, self.session === origin, self.movesUci == currentMoves else { return }
                 if let bestMove = best,
                    let zh = try? self.session.applyMoveToken(token: bestMove) {
                     self.movesUci.append(bestMove)
@@ -537,6 +764,7 @@ final class MacBoardController: ObservableObject {
     }
 
     func resetOfflineGame() {
+        closeReplay()
         session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
         selectedUci = nil
         legalDestUcis.removeAll()
@@ -547,6 +775,11 @@ final class MacBoardController: ObservableObject {
     }
 
     func undo() {
+        if let replay {
+            replay.undoVariationMove()
+            syncReplay()
+            return
+        }
         if (try? session.undo()) != nil, !movesChinese.isEmpty {
             _ = movesUci.popLast()
             _ = movesChinese.popLast()
@@ -667,6 +900,7 @@ final class MacBoardController: ObservableObject {
             statusLine = "PGN import failed: no moves found; current game preserved"
             return false
         }
+        closeReplay()
         session = fresh
         movesUci = importedUci
         movesChinese = importedZh
@@ -702,7 +936,8 @@ final class MacBoardController: ObservableObject {
 
     /// Replays the recorded moves on a scratch session, notating each one before it is applied.
     private func rebuildNotation() {
-        guard let replay = try? FfiGameSession(rulesProfile: "program-2023.11-v1") else { return }
+        let start = self.replay.map { $0.rootFen } ?? Self.startFen
+        guard let replay = try? FfiGameSession.fromFen(fen: start, rulesProfile: "program-2023.11-v1") else { return }
         var out: [String] = []
         for (idx, uci) in movesUci.enumerated() {
             let fallback = idx < movesChinese.count ? movesChinese[idx] : uci
@@ -726,6 +961,210 @@ final class MacBoardController: ObservableObject {
             out.append(contentsOf: Array(repeating: side == "red" ? face.red : face.black, count: missing))
         }
         return out
+    }
+}
+
+/// One sample game as the picker and the replay header show it, with its release's honest labels.
+struct SampleGameInfo: Identifiable {
+    let id: String
+    let redName: String
+    let blackName: String
+    let event: String
+    let date: String
+    let result: String
+    let releaseId: String
+    let isSyntheticFixture: Bool
+
+    init?(summary: [String: Any], release: [String: Any]) {
+        guard let id = summary["game_id"] as? String,
+              let releaseId = release["release_id"] as? String else { return nil }
+        self.id = id
+        redName = summary["red_display_name"] as? String ?? "Red"
+        blackName = summary["black_display_name"] as? String ?? "Black"
+        event = summary["event_name"] as? String ?? ""
+        date = summary["date_display"] as? String ?? ""
+        result = summary["recorded_result"] as? String ?? ""
+        self.releaseId = releaseId
+        isSyntheticFixture = release["is_synthetic_fixture"] as? Bool ?? true
+    }
+
+    var recordedResultReason = ""
+    var rulesProvenance = ""
+
+    /// The record's own result and the rules it was played under, which the replay shows apart from its rules.
+    func withRecord(_ record: [String: Any]) -> SampleGameInfo {
+        var copy = self
+        copy.recordedResultReason = record["recorded_result_reason"] as? String ?? ""
+        copy.rulesProvenance = record["original_rules_provenance"] as? String ?? ""
+        return copy
+    }
+
+    /// The data's provenance, stated on every screen that shows it.
+    var provenance: String { isSyntheticFixture ? "Synthetic sample · not a real archive game" : "Archive release" }
+}
+
+struct SampleGamePicker: View {
+    @ObservedObject var controller: MacBoardController
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let games = controller.sampleGames()
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Sample games").font(LamplitTheme.display(28))
+            if let first = games.first {
+                Text(first.provenance).font(.system(size: 12)).foregroundStyle(LamplitTheme.vermilionOnDark)
+            }
+            if games.isEmpty {
+                Text("The sample collection could not be read.").foregroundStyle(LamplitTheme.mutedText)
+            }
+            ForEach(games) { game in
+                Button {
+                    dismiss()
+                    controller.openSampleGame(id: game.id)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(game.redName) – \(game.blackName)").font(.system(size: 15, weight: .semibold))
+                        Text([game.event, game.date, game.result].filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(.system(size: 12))
+                            .foregroundStyle(LamplitTheme.mutedText)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
+    }
+}
+
+/// The replay's move list: the recorded line with the shown ply, the variation, and what this Mac keeps.
+struct ReplayColumn: View {
+    @ObservedObject var controller: MacBoardController
+
+    var body: some View {
+        if let replay = controller.replay, let info = controller.replayInfo {
+            VStack(alignment: .leading, spacing: 10) {
+                Spacer(minLength: 48)
+                Text(info.event).font(.system(size: 13, weight: .semibold))
+                Text(info.provenance).font(.system(size: 11)).foregroundStyle(LamplitTheme.vermilionOnDark)
+                recordFacts(info, replay: replay)
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        plyButton(0, "Start", current: !replay.isInVariation && replay.cursor == 0)
+                        ForEach(Array(controller.replayRecordedNotated.enumerated()), id: \.offset) { index, text in
+                            let ply = index + 1
+                            plyButton(ply, "\((index / 2) + 1)\(index % 2 == 0 ? "." : "…") \(text)",
+                                      current: !replay.isInVariation && replay.cursor == ply)
+                        }
+                    }
+                }
+                variationSection(replay)
+                Rectangle().fill(LamplitTheme.hairline).frame(height: 1)
+                statusSection(replay)
+            }
+            .padding(.trailing, 40)
+            .padding(.bottom, 96)
+            .id(controller.replayRevision)
+        }
+    }
+
+    /// The archive's recorded result and rules provenance, kept apart from the rules this replay checks moves by.
+    private func recordFacts(_ info: SampleGameInfo, replay: ReplaySession) -> some View {
+        let result = [info.result, info.recordedResultReason].filter { !$0.isEmpty }
+            .map { $0.replacingOccurrences(of: "_", with: " ") }.joined(separator: " · ")
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("Recorded result: \(result.isEmpty ? "not recorded" : result)")
+            if !info.rulesProvenance.isEmpty {
+                Text("Recorded under: \(info.rulesProvenance)")
+            }
+            Text("Replay rules: \(replay.rulesProfile)")
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(LamplitTheme.mutedText)
+    }
+
+    private func plyButton(_ ply: Int, _ label: String, current: Bool) -> some View {
+        Button { controller.replaySelectPly(ply) } label: {
+            Text(label)
+                .font(.system(size: 14, weight: current ? .semibold : .regular).monospacedDigit())
+                .foregroundStyle(current ? LamplitTheme.paper : LamplitTheme.paper.opacity(0.7))
+                .underline(current, color: LamplitTheme.paleJade.opacity(0.6))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(current ? "\(label), shown" : label)
+    }
+
+    @ViewBuilder
+    private func variationSection(_ replay: ReplaySession) -> some View {
+        if let line = replay.variation ?? replay.parked {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(replay.isInVariation
+                     ? "Variation from ply \(line.originPly)"
+                     : "Variation set aside at ply \(line.originPly)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(LamplitTheme.paleJade)
+                Text(controller.replayVariationNotated.joined(separator: "  "))
+                    .font(.system(size: 13))
+                HStack {
+                    if replay.isInVariation {
+                        Button("Return to game") { controller.replayReturnToGame() }
+                    } else {
+                        Button("Resume") { controller.replayResume() }
+                    }
+                }
+                if replay.keepsUnshownDraft {
+                    Text("This Mac keeps an earlier variation for this game. Any change saved from here on replaces it.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(LamplitTheme.mutedText)
+                }
+                if replay.willReplaceDraft {
+                    Text("Starting a new variation, from the board or the engine, replaces this one.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(LamplitTheme.mutedText)
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Play any legal move on the board to try a variation.")
+                if replay.willReplaceDraft {
+                    // The line this Mac keeps is not shown here, but a new variation would still replace it.
+                    Text("Starting a new variation replaces the one this Mac keeps for this game.")
+                }
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(LamplitTheme.mutedText)
+        }
+    }
+
+    @ViewBuilder
+    private func statusSection(_ replay: ReplaySession) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            switch replay.saveState {
+            case .saved: Text("Saved on this Mac").foregroundStyle(LamplitTheme.mutedText)
+            case .unsaved(let reason): Text("Not saved: \(reason)").foregroundStyle(LamplitTheme.vermilionOnDark)
+            case .none: EmptyView()
+            }
+            if let notice = replay.draftNotice {
+                Text(notice).foregroundStyle(LamplitTheme.vermilionOnDark)
+            }
+            if let feedback = replay.feedback {
+                Text(feedback).foregroundStyle(LamplitTheme.vermilionOnDark)
+            }
+            if controller.engineThinking {
+                Text("Engine thinking…").foregroundStyle(LamplitTheme.mutedText)
+            }
+        }
+        .font(.system(size: 12))
     }
 }
 

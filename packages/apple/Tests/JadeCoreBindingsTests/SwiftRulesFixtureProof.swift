@@ -64,5 +64,7 @@ struct SwiftRulesFixtureProof {
         }
 
         print("SWIFT_UNIFFI_FIXTURE_PROOF_OK: 39/39 Pikafish examples + geometry + Chinese notation verified")
+
+        try ReplaySessionProof.run(repoRoot: repoRoot)
     }
 }
