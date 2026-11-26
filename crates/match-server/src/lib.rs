@@ -1637,24 +1637,7 @@ async fn process_single_command(
         } => (command_id.as_str(), *expected_seq),
     };
 
-    // 1. Idempotency check: if `command_id` was ALREADY committed on this match, return current snapshot
-    //    without applying move twice or awarding extra clock increment (Section 8)!
-    let existing =
-        sqlx::query("SELECT seq FROM match_events WHERE match_id = ? AND command_id = ?")
-            .bind(match_id)
-            .bind(cmd_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| ApiError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "db_error",
-                message: e.to_string(),
-            })?;
-    if existing.is_some() {
-        return load_match_snapshot(db, match_id, None).await;
-    }
-
-    // 2. Load current match seats, sequence, status, and clocks
+    // 1. Load current match seats, sequence, status, and clocks
     let mrow = sqlx::query(
         "SELECT current_seq, status, is_friendly, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, red_remaining_ms, black_remaining_ms
          FROM matches WHERE match_id = ?",
@@ -1677,7 +1660,8 @@ async fn process_single_command(
     let mut red_rem: Option<i64> = mrow.get("red_remaining_ms");
     let mut blk_rem: Option<i64> = mrow.get("black_remaining_ms");
 
-    // 3. Resolve actor seat (spectators have zero player authority!)
+    // 2. Resolve actor seat (spectators have zero player authority!). This runs before the
+    //    idempotency check so a known `command_id` never yields a snapshot to a nonparticipant.
     let actor_side = if red_acct.as_deref() == Some(actor_account_id) {
         Side::Red
     } else if blk_acct.as_deref() == Some(actor_account_id) {
@@ -1689,6 +1673,24 @@ async fn process_single_command(
             message: "Spectators cannot submit match commands".to_string(),
         });
     };
+
+    // 3. Idempotency check: if `command_id` was ALREADY committed on this match, return current snapshot
+    //    without applying move twice or awarding extra clock increment (Section 8)! It precedes the
+    //    status check so a participant's retry after the match finished still receives the snapshot.
+    let existing =
+        sqlx::query("SELECT seq FROM match_events WHERE match_id = ? AND command_id = ?")
+            .bind(match_id)
+            .bind(cmd_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "db_error",
+                message: e.to_string(),
+            })?;
+    if existing.is_some() {
+        return load_match_snapshot(db, match_id, None).await;
+    }
 
     if status != "playing" {
         return Err(ApiError {

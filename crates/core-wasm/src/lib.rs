@@ -1,4 +1,6 @@
-use archive_client::SampleArchiveProvider;
+use archive_client::{
+    ArchiveProvider, ArchiveReadError, GameQuery, PageRequest, SampleArchiveProvider,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
@@ -255,7 +257,28 @@ enum DirectWasmRequest {
         game_id: String,
     },
     ArchivePosition {
-        fen: Option<String>,
+        /// Kept as raw JSON so an omitted field (the start position) differs from an explicit null.
+        #[serde(default, deserialize_with = "present_json")]
+        fen: Option<serde_json::Value>,
+    },
+    ArchiveCollection,
+    ArchiveGames {
+        #[serde(default)]
+        player_id: Option<String>,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        offset: usize,
+        limit: Option<usize>,
+    },
+    ArchivePlayer {
+        player_id: String,
+        #[serde(default)]
+        offset: usize,
+        limit: Option<usize>,
+    },
+    ArchiveGameDetail {
+        game_id: String,
     },
     /// Notates a recorded move list in one dialect, stopping at the first ply that does not replay.
     NotateMoves {
@@ -469,6 +492,7 @@ pub fn handle_direct_json_request(input: &[u8]) -> i32 {
                     "dataset_id": manifest.dataset_id,
                     "is_synthetic_fixture": manifest.is_synthetic_development_fixture,
                     "provenance_banner": manifest.provenance_banner,
+                    "release": provider.release(),
                     "players": provider.search_players(&query),
                 })),
             )
@@ -493,15 +517,76 @@ pub fn handle_direct_json_request(input: &[u8]) -> i32 {
             notate_moves(fen.as_deref(), &moves_uci, wxf, traditional_glyphs),
         ),
         DirectWasmRequest::ArchivePosition { fen } => {
-            let provider = SampleArchiveProvider::new_embedded();
-            let target_fen = fen
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(STARTING_FEN);
-            match provider.query_position(target_fen) {
-                Ok(exp) => write_response(true, Ok(serde_json::to_value(exp).unwrap())),
-                Err(e) => write_response::<serde_json::Value>(false, Err(e)),
-            }
+            // Only an omitted FEN means the start position; null, blank, or malformed is an invalid request.
+            let result = match fen {
+                None => SampleArchiveProvider::new_embedded().explore_position(STARTING_FEN),
+                Some(serde_json::Value::String(text)) => {
+                    SampleArchiveProvider::new_embedded().explore_position(&text)
+                }
+                Some(_) => Err(ArchiveReadError::InvalidRequest(
+                    "fen must be a string".to_string(),
+                )),
+            };
+            write_archive_result(result)
+        }
+        DirectWasmRequest::ArchiveCollection => {
+            write_archive_result(SampleArchiveProvider::new_embedded().collection())
+        }
+        DirectWasmRequest::ArchiveGames {
+            player_id,
+            text,
+            offset,
+            limit,
+        } => {
+            let query = GameQuery {
+                player_id,
+                text,
+                offset,
+                limit: limit.unwrap_or(archive_client::DEFAULT_GAME_PAGE_LIMIT),
+            };
+            write_archive_result(SampleArchiveProvider::new_embedded().browse_games(&query))
+        }
+        DirectWasmRequest::ArchivePlayer {
+            player_id,
+            offset,
+            limit,
+        } => {
+            let page = PageRequest {
+                offset,
+                limit: limit.unwrap_or(archive_client::DEFAULT_GAME_PAGE_LIMIT),
+            };
+            write_archive_result(
+                SampleArchiveProvider::new_embedded().player_profile(&player_id, page),
+            )
+        }
+        DirectWasmRequest::ArchiveGameDetail { game_id } => {
+            write_archive_result(SampleArchiveProvider::new_embedded().game_detail(&game_id))
+        }
+    }
+}
+
+/// Runs only for a field that is present, so `null` arrives as `Some(Value::Null)` rather than `None`.
+fn present_json<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// Writes an archive read with its error code beside the message, so callers never classify a
+/// failure by reading its text.
+fn write_archive_result<T: Serialize>(result: Result<T, ArchiveReadError>) -> i32 {
+    match result {
+        Ok(data) => write_response(true, Ok(data)),
+        Err(error) => {
+            let body = serde_json::json!({
+                "ok": false,
+                "error": error.to_string(),
+                "code": serde_json::to_value(&error).ok().and_then(|v| v["code"].as_str().map(str::to_string)),
+            });
+            LAST_RESPONSE.with(|cell| {
+                *cell.borrow_mut() = serde_json::to_vec(&body).unwrap_or_default();
+            });
+            0
         }
     }
 }
@@ -576,6 +661,60 @@ mod tests {
         let mv_json: serde_json::Value =
             LAST_RESPONSE.with(|c| serde_json::from_slice(&c.borrow()).unwrap());
         assert_eq!(mv_json["data"]["move_chinese"], "炮二平五");
+    }
+
+    fn direct_json(request: &[u8]) -> serde_json::Value {
+        handle_direct_json_request(request);
+        LAST_RESPONSE.with(|c| serde_json::from_slice(&c.borrow()).unwrap())
+    }
+
+    #[test]
+    fn direct_json_abi_serves_archive_browse_with_release_identity() {
+        let collection = direct_json(br#"{"op":"archive_collection"}"#);
+        assert_eq!(collection["ok"], true);
+        let release_id = collection["data"]["release"]["release_id"].clone();
+        assert!(release_id.is_string());
+
+        let games = direct_json(br#"{"op":"archive_games","offset":1,"limit":1}"#);
+        assert_eq!(games["data"]["total"], 2);
+        assert_eq!(
+            games["data"]["games"][0]["game_id"],
+            "sample-game-screen-horse-002"
+        );
+        assert_eq!(games["data"]["release"]["release_id"], release_id);
+
+        let player = direct_json(br#"{"op":"archive_player","player_id":"sample-player-003"}"#);
+        assert_eq!(player["data"]["games"]["total"], 1);
+
+        let detail = direct_json(
+            br#"{"op":"archive_game_detail","game_id":"sample-game-screen-horse-002"}"#,
+        );
+        assert_eq!(
+            detail["data"]["record"]["moves_uci"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+
+        let missing = direct_json(br#"{"op":"archive_game_detail","game_id":"nope"}"#);
+        assert_eq!(missing["ok"], false);
+        assert_eq!(missing["code"], "not_found");
+
+        let blank = direct_json(br#"{"op":"archive_position","fen":"  "}"#);
+        assert_eq!(blank["code"], "invalid_request");
+        let malformed = direct_json(br#"{"op":"archive_position","fen":"not a fen"}"#);
+        assert_eq!(malformed["code"], "invalid_request");
+        let null_fen = direct_json(br#"{"op":"archive_position","fen":null}"#);
+        assert_eq!(null_fen["code"], "invalid_request");
+
+        let search = direct_json(r#"{"op":"archive_search","query":"林明"}"#.as_bytes());
+        assert_eq!(search["data"]["players"].as_array().unwrap().len(), 2);
+        assert_eq!(search["data"]["release"]["release_id"], release_id);
+
+        let position = direct_json(br#"{"op":"archive_position"}"#);
+        assert_eq!(position["data"]["continuations"][0]["move_uci"], "h2e2");
+        assert_eq!(position["data"]["release"]["release_id"], release_id);
     }
 
     #[test]
