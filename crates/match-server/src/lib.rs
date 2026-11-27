@@ -464,91 +464,70 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(h.finalize())
 }
 
-fn extract_sqlite_file_path(sqlite_url: &str) -> Option<std::path::PathBuf> {
-    let rest = sqlite_url
-        .strip_prefix("sqlite://")
-        .or_else(|| sqlite_url.strip_prefix("sqlite:"))
-        .unwrap_or(sqlite_url);
-    let (path_part, query_part) = match rest.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (rest, ""),
-    };
-    if path_part.is_empty()
-        || path_part == ":memory:"
-        || query_part
-            .split('&')
-            .any(|kv| percent_decode(kv) == "mode=memory")
+/// Where a SQLite setting keeps its data, as the pool itself reads the setting.
+enum SqliteTarget {
+    /// One in-memory database, with the setting's options other than its mode and cache, which the pool decides.
+    Memory(Vec<(String, String)>),
+    /// A durable database file.
+    File(std::path::PathBuf),
+}
+
+/// Classifies a SQLite setting with the same parse the pool applies, so the owner lock and the pool always mean the
+/// same database however the setting is spelled. A durable `file:` URI is refused: SQLite would open the file it names,
+/// which the owner lock could not follow.
+fn sqlite_target(db_url: &str) -> Result<SqliteTarget, sqlx::Error> {
+    let any: sqlx::any::AnyConnectOptions = db_url.parse()?;
+    let options = sqlx::sqlite::SqliteConnectOptions::try_from(&any)?;
+    let name = options.get_filename().to_string_lossy().into_owned();
+    let pairs = || any.database_url.query_pairs();
+    if name.starts_with("file:sqlx-in-memory-")
+        || pairs().any(|(key, value)| key == "mode" && value == "memory")
     {
-        return None;
+        let kept = pairs()
+            .filter(|(key, _)| key != "mode" && key != "cache")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        return Ok(SqliteTarget::Memory(kept));
     }
-    // The file the SQLite driver opens is the percent-decoded name, so the owner lock is taken beside that same file
-    // whichever way the setting spells it.
-    Some(std::path::PathBuf::from(percent_decode(path_part)))
-}
-
-/// Decodes `%XX` escapes the way the SQLite driver reads a URL's file name and options; anything else is kept as is.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let hex = |b: u8| (b as char).to_digit(16);
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
-        {
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The URL the pool opens. The generic driver parses its URL again for every connection, and each parse of an
-/// in-memory SQLite URL names a new database, so that URL is resolved once here into one shared in-memory database that
-/// every pooled connection opens. The setting's other options are checked by the SQLite driver and kept.
-fn pool_url(db_url: &str, backend: Backend) -> Result<String, sqlx::Error> {
-    if backend != Backend::Sqlite || extract_sqlite_file_path(db_url).is_some() {
-        return Ok(db_url.to_string());
-    }
-    let _: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
-    let options = db_url
-        .split_once('?')
-        .map(|(_, query)| query)
-        .unwrap_or("")
-        .split('&')
-        .filter(|kv| {
-            // Options are judged by their decoded names, as the driver reads them.
-            let key = percent_decode(kv.split('=').next().unwrap_or(""));
-            !kv.is_empty() && key != "mode" && key != "cache"
-        })
-        .map(|kv| format!("&{kv}"))
-        .collect::<String>();
-    static IN_MEMORY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = IN_MEMORY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(format!(
-        "sqlite:file:jade-in-memory-{}-{seq}?mode=memory&cache=shared{options}",
-        std::process::id()
-    ))
-}
-
-fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>, sqlx::Error> {
-    if extract_sqlite_file_path(sqlite_url).is_none() {
-        return Ok(None);
-    }
-    // The lock sits beside the file the driver opens: the name its own parser reads from the setting.
-    let options: sqlx::sqlite::SqliteConnectOptions = sqlite_url.parse()?;
-    let db_path = options.get_filename().to_path_buf();
-    // SQLite reads a `file:` name as a URI and opens the file it names, which the owner lock could not follow, so a
-    // durable database is named by its plain file name.
-    if db_path.to_string_lossy().starts_with("file:") {
+    if name.starts_with("file:") {
         return Err(sqlx::Error::Configuration(
             "a durable SQLite database is named by its file name, not a file: URI".into(),
         ));
     }
+    Ok(SqliteTarget::File(std::path::PathBuf::from(name)))
+}
+
+/// The URL the pool opens. The generic driver parses its URL again for every connection, and each parse of an
+/// in-memory SQLite URL names a new database, so that URL is resolved once here into one shared in-memory database that
+/// every pooled connection opens, keeping the setting's other options.
+fn pool_url(db_url: &str, backend: Backend) -> Result<String, sqlx::Error> {
+    if backend != Backend::Sqlite {
+        return Ok(db_url.to_string());
+    }
+    let SqliteTarget::Memory(options) = sqlite_target(db_url)? else {
+        return Ok(db_url.to_string());
+    };
+    static IN_MEMORY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = IN_MEMORY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("mode", "memory")
+        .append_pair("cache", "shared");
+    for (key, value) in &options {
+        query.append_pair(key, value);
+    }
+    Ok(format!(
+        "sqlite:file:jade-in-memory-{}-{seq}?{}",
+        std::process::id(),
+        query.finish()
+    ))
+}
+
+fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>, sqlx::Error> {
+    // The lock sits beside the file the pool opens; an in-memory database belongs to this process alone.
+    let SqliteTarget::File(db_path) = sqlite_target(sqlite_url)? else {
+        return Ok(None);
+    };
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -3183,7 +3162,16 @@ mod session_cookie_tests {
         assert!(pool_url("sqlite::memory:?not_an_option=1", Backend::Sqlite).is_err());
         // An encoded spelling of `cache` is still the cache option, which the shared database decides.
         let url = pool_url("sqlite::memory:?%63ache=private", Backend::Sqlite).unwrap();
-        assert!(!url.contains("%63ache"), "{url}");
+        assert!(
+            !url.contains("%63ache") && !url.contains("private"),
+            "{url}"
+        );
+        // A repeated scheme prefix is still the in-memory database the driver reads.
+        assert!(
+            pool_url("sqlite:sqlite::memory:", Backend::Sqlite)
+                .unwrap()
+                .contains("mode=memory")
+        );
         assert!(
             super::parse_database_url("mysql://u:secret@h/game")
                 .unwrap_err()

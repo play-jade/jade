@@ -140,14 +140,20 @@ fn a_fixture_url_names_only_its_own_database() {
             .query_pairs()
             .any(|(k, v)| k == "application_name" && v == "t")
     );
-    let replaced = with_query(&url, &[("sslmode", "verify-full"), ("SSLMODE", "require")]);
+    // An existing option, however it is spelled, is replaced rather than joined by a second.
+    let replaced = with_query(
+        &format!("{url}&SSLMode=disable"),
+        &[("sslmode", "verify-full")],
+    );
+    let modes: Vec<(String, String)> = url::Url::parse(&replaced)
+        .unwrap()
+        .query_pairs()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("sslmode"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
     assert_eq!(
-        url::Url::parse(&replaced)
-            .unwrap()
-            .query_pairs()
-            .filter(|(k, _)| k.eq_ignore_ascii_case("sslmode"))
-            .count(),
-        2
+        modes,
+        vec![("sslmode".to_string(), "verify-full".to_string())]
     );
 }
 
@@ -2664,9 +2670,13 @@ async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
     // While it runs, the same file spelled another way is the same database, and a second server is refused.
     let respelled = format!("{}?mode=rwc", dir.join("game%2Edb").display());
     assert!(build_app_state(&respelled).await.is_err());
-    // So is the same file behind a repeated scheme prefix, which the driver strips.
+    // So is the same file behind a repeated scheme prefix or a trailing space, both of which the pool's parse removes:
+    // each meets the running owner's lock rather than being refused for its spelling.
+    let contended = |result: Result<_, sqlx::Error>| matches!(result, Err(sqlx::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock);
     let reprefixed = format!("sqlite:sqlite:{}?mode=rwc", dir.join("game.db").display());
-    assert!(build_app_state(&reprefixed).await.is_err());
+    assert!(contended(build_app_state(&reprefixed).await));
+    let spaced = format!("sqlite:{} ", dir.join("game.db").display());
+    assert!(contended(build_app_state(&spaced).await));
     drop(reopened);
     // A `file:` URI, which SQLite would open as the same file under a lock the server could not follow, is refused as
     // a setting, with no server running, before any lock is taken.
