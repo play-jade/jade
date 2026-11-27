@@ -2741,3 +2741,25 @@ async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
         "{refused}"
     );
 }
+
+#[tokio::test]
+async fn every_in_memory_spelling_is_one_database_shared_by_the_pool() {
+    for spelling in ["sqlite::memory:", "sqlite://:memory:", "sqlite:"] {
+        let state = build_app_state(spelling).await.unwrap();
+        // Two connections held at once: what one writes, the other reads.
+        let mut writer = state.db.acquire().await.unwrap();
+        let mut reader = state.db.acquire().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (account_id, display_name, created_at_ms) VALUES ('shared', 'Shared', 0)",
+        )
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        let seen: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM accounts WHERE account_id = 'shared'")
+                .fetch_one(&mut *reader)
+                .await
+                .unwrap();
+        assert_eq!(seen, 1, "{spelling}");
+    }
+}

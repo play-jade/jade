@@ -70,6 +70,12 @@ fn invalid_command_id() -> ApiError {
 /// (any letter case) is PostgreSQL; a `sqlite:` URL, or a bare file name as earlier settings allowed, is SQLite. Any
 /// other scheme is refused before anything touches the filesystem.
 pub fn parse_database_url(setting: &str) -> Result<(Backend, String), sqlx::Error> {
+    // A blank setting, such as an empty secret, is a missing database, never a request for one that forgets its data.
+    if setting.trim().is_empty() {
+        return Err(sqlx::Error::Configuration(
+            "no database is configured".into(),
+        ));
+    }
     // The error names the scheme alone: the setting may carry credentials, and startup errors reach the logs.
     let unsupported = |scheme: &str| {
         sqlx::Error::Configuration(format!("unsupported database URL scheme {scheme:?}").into())
@@ -510,6 +516,10 @@ fn sqlite_target(db_url: &str) -> Result<SqliteTarget, sqlx::Error> {
             "an in-memory database is named sqlite::memory:, not a file name with mode=memory",
         );
     }
+    // Storage is chosen by the file name alone: a VFS option can keep a named database in memory.
+    if pairs.iter().any(|(key, _)| key == "vfs") {
+        return refuse("a durable database takes no vfs option");
+    }
     let direct: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
     let any: sqlx::any::AnyConnectOptions = db_url.parse()?;
     let pooled = sqlx::sqlite::SqliteConnectOptions::try_from(&any)?;
@@ -517,7 +527,11 @@ fn sqlite_target(db_url: &str) -> Result<SqliteTarget, sqlx::Error> {
     if direct.get_filename() != file {
         return refuse("the file name reads differently to the pool, as with surrounding spaces");
     }
-    if file.as_os_str().is_empty() || file.to_string_lossy().starts_with("file:") {
+    // The in-memory name reached by decoding (such as %3Amemory%3A) is still the in-memory database, not a file.
+    if file.as_os_str().is_empty() || file == std::path::Path::new(":memory:") {
+        return refuse("the in-memory database is named sqlite::memory: plainly");
+    }
+    if file.to_string_lossy().starts_with("file:") {
         return refuse("a durable database is named by its file name, not a file: URI");
     }
     Ok(SqliteTarget::File(file.to_path_buf()))
@@ -3178,6 +3192,13 @@ mod session_cookie_tests {
             )
         );
         assert!(parse_database_url("mysql://h/game").is_err());
+        // A blank setting is a missing database, whatever whitespace it holds.
+        for blank in ["", " ", "\n"] {
+            assert!(matches!(
+                parse_database_url(blank),
+                Err(sqlx::Error::Configuration(_))
+            ));
+        }
     }
 
     #[test]
@@ -3212,6 +3233,8 @@ mod session_cookie_tests {
             "sqlite:game#test?mode=memory&cache=private",
             "sqlite:game.db?mode=memory",
             "sqlite:game.db ",
+            "sqlite:%3Amemory%3A",
+            "sqlite:/tmp/game.db?mode=rwc&vfs=memdb",
         ] {
             assert!(
                 matches!(
