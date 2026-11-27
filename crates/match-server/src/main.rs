@@ -1,4 +1,4 @@
-use jade_match_server::{build_app_state, build_router};
+use jade_match_server::{AllowedOrigins, build_app_state, build_router};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
@@ -28,13 +28,22 @@ async fn main() {
         .parse()
         .expect("valid JADE_BIND_ADDR");
 
+    // A hosted deployment names its own browser origins; local development keeps the local defaults. The setting is
+    // checked before the database is touched, so a mistyped one changes no stored state.
+    let allowed_origins = match std::env::var("JADE_ALLOWED_ORIGINS") {
+        Ok(setting) => AllowedOrigins::parse(&setting).expect("valid JADE_ALLOWED_ORIGINS"),
+        Err(std::env::VarError::NotPresent) => AllowedOrigins::local(),
+        Err(error) => panic!("JADE_ALLOWED_ORIGINS cannot be read: {error}"),
+    };
+
     // Bind the listening socket BEFORE acquiring DB ownership or running outage recovery!
     let listener = TcpListener::bind(bind_addr)
         .await
         .expect("bind match-server listener");
     let state = build_app_state(&db_url)
         .await
-        .expect("initialize match-server SQLx state");
+        .expect("initialize match-server SQLx state")
+        .with_allowed_origins(allowed_origins);
     let app = build_router(state);
 
     tracing::info!("Jade authoritative match server listening on http://{bind_addr}");

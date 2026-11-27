@@ -7,9 +7,9 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use jade_match_server::{
-    CoordMovePayload, CurrentSessionResponse, GuestSessionResponse, InvitationCreatedResponse,
-    JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest,
-    build_app_state, build_router, mark_interrupted_timed_matches_on_startup,
+    AllowedOrigins, CoordMovePayload, CurrentSessionResponse, GuestSessionResponse,
+    InvitationCreatedResponse, JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse,
+    PrivacyUpdateRequest, build_app_state, build_router, mark_interrupted_timed_matches_on_startup,
 };
 use tokio::io::DuplexStream;
 use tokio_tungstenite::{
@@ -2766,5 +2766,162 @@ async fn every_in_memory_spelling_is_one_database_shared_by_the_pool() {
                 .await
                 .unwrap();
         assert_eq!(seen, 1, "{spelling}");
+    }
+}
+
+#[tokio::test]
+async fn a_configured_origin_replaces_the_local_ones() {
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url)
+        .await
+        .unwrap()
+        .with_allowed_origins(AllowedOrigins::parse("https://play.example").unwrap());
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let stream_from = |origin: &str| {
+        let mut req = format!("ws://play.example/api/v1/matches/{match_id}/ws")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("Origin", origin.parse().unwrap());
+        req.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {}", red.access_token).parse().unwrap(),
+        );
+        req
+    };
+    assert!(
+        connect_ws_duplex(&app, stream_from("https://play.example"))
+            .await
+            .is_ok()
+    );
+    assert!(
+        connect_ws_duplex(&app, stream_from("http://localhost:3180"))
+            .await
+            .is_err(),
+        "the local default is no longer accepted"
+    );
+    // HTTP answers the configured origin's preflight, and no longer names the replaced local one.
+    let preflight = |origin: &str| {
+        Request::builder()
+            .method("OPTIONS")
+            .uri("/api/v1/invitations")
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let allowed = app
+        .clone()
+        .oneshot(preflight("https://play.example"))
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("https://play.example")
+    );
+    let replaced = app
+        .clone()
+        .oneshot(preflight("http://localhost:3180"))
+        .await
+        .unwrap();
+    assert!(
+        replaced
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
+    // A directory created for this run alone; the server runs inside it and opens a relative file name, so the files
+    // checked below are exactly the ones it would create.
+    let dir = loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let candidate =
+            std::env::temp_dir().join(format!("jade-origins-{}-{nanos}", std::process::id()));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot create {}: {e}", candidate.display()),
+        }
+    };
+    let start = |origins: &std::ffi::OsStr| {
+        let log = dir.join("stderr.log");
+        let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_jade-match-server"))
+            .current_dir(&dir)
+            .env_remove("DATABASE_URL_FILE")
+            .env("JADE_BIND_ADDR", "127.0.0.1:0")
+            .env("DATABASE_URL", "sqlite:game.db?mode=rwc")
+            .env("JADE_ALLOWED_ORIGINS", origins)
+            // A file, not a pipe, so a long panic report cannot block the server while it stops.
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap();
+        // Bounded: a server that started instead of stopping fails the test rather than hanging it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = server.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = server.kill();
+                panic!("the server started with a bad origins setting");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        (status, std::fs::read_to_string(&log).unwrap())
+    };
+    let settings: Vec<std::ffi::OsString> = [
+        Some(std::ffi::OsString::from("https://play.example,")),
+        non_unicode_setting(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    for setting in settings {
+        let (status, stderr) = start(&setting);
+        assert!(!status.success(), "{setting:?}");
+        assert!(
+            stderr.contains("JADE_ALLOWED_ORIGINS"),
+            "{setting:?}: {stderr}"
+        );
+        assert!(
+            !dir.join("game.db").exists(),
+            "{setting:?}: no database is created"
+        );
+        assert!(
+            !dir.join("game.db.owner.lock").exists(),
+            "{setting:?}: no owner lock is taken"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A setting that is present but not Unicode: invalid UTF-8 bytes on Unix, an unpaired surrogate on Windows.
+fn non_unicode_setting() -> Option<std::ffi::OsString> {
+    #[cfg(unix)]
+    {
+        Some(
+            <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![
+                b'h', b't', 0xff,
+            ]),
+        )
+    }
+    #[cfg(windows)]
+    {
+        Some(<std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0xD800]))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
     }
 }
