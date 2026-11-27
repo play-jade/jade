@@ -2850,7 +2850,6 @@ fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
             std::env::temp_dir().join(format!("jade-origins-{}-{nanos}", std::process::id()));
         match std::fs::create_dir(&candidate) {
             Ok(()) => break candidate,
-            // Only a name already taken is retried; any other failure is reported at once.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => panic!("cannot create {}: {e}", candidate.display()),
         }
