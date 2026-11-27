@@ -124,11 +124,12 @@ export function useBrowserSession() {
 
   /**
    * The session for an action: the one this tab confirmed, or a fresh check when it has none. An action never creates
-   * a guest; with no session it stops, and only opening a room or creating an invitation makes one.
+   * a guest; with no session it stops, and only opening a room or creating an invitation makes one. The check is
+   * read-only: only opening a page sets the cookie again, so a late answer here cannot restore a replaced cookie.
    */
   async function current(): Promise<BrowserSession> {
     if (known && known.expires_at_ms > Date.now()) return known
-    const session = await recover({ fresh: true })
+    const session = await recover({ fresh: true, readOnly: true })
     if (!session) throw new SessionEndedError()
     return session
   }

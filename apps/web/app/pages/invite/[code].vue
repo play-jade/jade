@@ -178,7 +178,7 @@ async function guestFetch(path: string, init: RequestInit = {}, mutation = false
   guestSession = session
   const resp = await send(session)
   if (!(await browserSession.refusedBy(resp))) return resp
-  const again = await browserSession.recover({ fresh: true })
+  const again = await browserSession.recover({ fresh: true, readOnly: true })
   if (!again) {
     const ended = new SessionEndedError()
     stopRoom(ended.message)
@@ -264,6 +264,38 @@ function newerPrivacy(matchId: string, revision: unknown): boolean {
  * A snapshot as the room shows it: everything it carries, except that an effective visibility older than the one
  * shown is kept as shown. HTTP replies and WebSocket frames can arrive in any order; the privacy revision orders them.
  */
+/** Whether `data` is a snapshot of `matchId` with the fields the room reads. */
+function isSnapshotOf(data: unknown, matchId: string | undefined): data is MatchSnapshot {
+  if (typeof data !== 'object' || data === null) return false
+  const d = data as Record<string, unknown>
+  return (
+    typeof d.match_id === 'string' &&
+    (matchId === undefined || d.match_id === matchId) &&
+    Number.isSafeInteger(d.seq) &&
+    typeof d.status === 'string' &&
+    typeof d.side_to_move === 'string' &&
+    typeof d.fen === 'string' &&
+    Array.isArray(d.moves_uci) &&
+    Array.isArray(d.moves_chinese)
+  )
+}
+
+/**
+ * Installs a snapshot from any route (stream, poll, or command reply) and reports whether its game state was taken.
+ * Game state older than the board shown is not taken, so a late HTTP reply cannot roll back a newer live move; a newer
+ * privacy state it carries is still taken.
+ */
+function install(snap: MatchSnapshot): boolean {
+  const current = snapshot.value
+  if (current && current.match_id === snap.match_id && snap.seq < current.seq) {
+    const read = ordered(snap)
+    snapshot.value = { ...current, visibility: read.visibility, privacy_revision: read.privacy_revision }
+    return false
+  }
+  snapshot.value = ordered(snap)
+  return true
+}
+
 function ordered(snap: MatchSnapshot): MatchSnapshot {
   // Another match (a rematch) starts its own order.
   if (snapshot.value?.match_id !== snap.match_id) shownPrivacy = null
@@ -506,14 +538,15 @@ function connectMatchWebSocket(matchId: string) {
     if (roomStopped.value) return
     try {
       const data = JSON.parse(String(ev.data))
-      if (data.match_id) {
+      if (isSnapshotOf(data, snapshot.value?.match_id)) {
         const prevLen = snapshot.value?.moves_uci.length ?? 0
-        snapshot.value = ordered(data as MatchSnapshot)
-        hydrateChoices(data as MatchSnapshot)
-        syncClocksFromSnapshot(snapshot.value)
-        if (snapshot.value.moves_uci.length > prevLen) {
+        const taken = install(data)
+        hydrateChoices(data)
+        if (roomStopped.value) return
+        if (taken) syncClocksFromSnapshot(snapshot.value!)
+        if (snapshot.value!.moves_uci.length > prevLen) {
           void percussionPlayer.play(material.value, 'place', soundEnabled.value, false)
-          const latestZh = snapshot.value.moves_chinese[snapshot.value.moves_chinese.length - 1]
+          const latestZh = snapshot.value!.moves_chinese[snapshot.value!.moves_chinese.length - 1]
           if (latestZh) lastAnnouncement.value = latestZh
         }
       }
@@ -569,30 +602,34 @@ async function recoverGapAndReconnect(matchId: string) {
     const since = snapshot.value?.seq ?? 0
     const resp = await guestFetch(`/api/v1/matches/${matchId}?since_seq=${since}`)
     if (roomStopped.value) return
+    // Whether the server has confirmed, in this recovery, that the browser still holds the room's guest.
+    let confirmed = false
     if (resp.ok) {
-      const snap = (await resp.json()) as MatchSnapshot
+      const snap: unknown = await resp.json().catch(() => null)
       // A read answered after the room stopped belongs to the guest it no longer holds; it is dropped.
-      if (roomStopped.value) return
-      snapshot.value = ordered(snap)
+      if (roomStopped.value || !isSnapshotOf(snap, matchId)) return
+      const taken = install(snap)
       hydrateChoices(snap)
-      syncClocksFromSnapshot(snap)
+      if (roomStopped.value) return
+      if (taken) syncClocksFromSnapshot(snapshot.value!)
       if (snap.status === 'finished') {
         connectionState.value = 'connected'
         return
       }
-    } else if (!(await confirmSessionOrStop())) {
+    } else {
       // A refused read can mean the browser's session ended or changed; the server says which, and the room stops
       // rather than keep a stream open for a guest the browser no longer holds.
-      return
+      if (!(await confirmSessionOrStop())) return
+      confirmed = true
     }
-    // Reopen a live WebSocket if none is currently open or connecting, deciding now and asking the server first, since
-    // a dropped stream can mean the session ended; keep `reconnecting` until `onopen` fires.
+    // Reopen a live WebSocket if none is open or connecting, deciding now and asking the server first (once per
+    // recovery), since a dropped stream can mean the session ended; keep `reconnecting` until `onopen` fires.
     const streamDown = () => !ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)
     if (
       !isUnmounted &&
       snapshot.value?.status !== 'finished' &&
       streamDown() &&
-      (await confirmSessionOrStop()) &&
+      (confirmed || (await confirmSessionOrStop())) &&
       // Another path may have reopened the stream while the server was asked.
       streamDown()
     ) {
@@ -655,15 +692,17 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
     errorBanner.value = data?.error?.message || `Command rejected (${resp.status})`
     return
   }
-  if (typeof data?.match_id !== 'string') {
-    // The command may have been played; the match is read again rather than guessed.
+  const matchId = snapshot.value?.match_id
+  if (!isSnapshotOf(data, matchId)) {
+    // The command may have been played; the room is left as it is and the match is read again rather than guessed.
     errorBanner.value = 'The reply to that move could not be read; showing the match as the server has it.'
-    void recoverGapAndReconnect(snapshot.value?.match_id ?? '')
+    if (matchId) void recoverGapAndReconnect(matchId)
     return
   }
-  snapshot.value = ordered(data as MatchSnapshot)
-  hydrateChoices(data as MatchSnapshot)
-  syncClocksFromSnapshot(snapshot.value)
+  const taken = install(data)
+  hydrateChoices(data)
+  if (roomStopped.value) return
+  if (taken) syncClocksFromSnapshot(snapshot.value!)
   await refreshBoard()
 }
 
@@ -693,7 +732,8 @@ async function handleBoardPlayMove(fromUci: string, toUci: string) {
     return
   }
 
-  if (!snapshot.value || snapshot.value.status !== 'playing') return
+  // A stopped room takes no live moves, and the reason it stopped stays in view.
+  if (!snapshot.value || snapshot.value.status !== 'playing' || roomStopped.value) return
   if (assignedSide.value !== snapshot.value.side_to_move) {
     errorBanner.value = 'Waiting for opponent move'
     return

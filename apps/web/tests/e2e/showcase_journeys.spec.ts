@@ -627,6 +627,12 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         },
         { times: 1 },
       )
+      // Its fallback snapshot reads too, so the assertion does not depend on how soon the stream opens.
+      await blkPage.route(/\/api\/v1\/matches\/[^/?]+(\?.*)?$/, async (route) => {
+        if (route.request().method() !== 'GET' || !stripRevision) return route.fallback()
+        const response = await route.fetch()
+        await route.fulfill({ response, json: withoutRevision(await response.text()) })
+      })
       await blkPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
         const server = stream.connectToServer()
         server.onMessage((message) =>
@@ -707,10 +713,12 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       const saveGate = new Promise<void>((resolve) => (releaseSave = resolve))
       let saveApplied: () => void = () => {}
       const applied = new Promise<void>((resolve) => (saveApplied = resolve))
+      let saveStatus = 0
       await redPage.route(
         /\/privacy$/,
         async (route) => {
           const response = await route.fetch()
+          saveStatus = response.status()
           saveApplied()
           await saveGate
           await route.fulfill({ response })
@@ -719,6 +727,7 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       )
       await redPage.getByLabel('Allow open dataset release').check()
       await applied
+      expect(saveStatus).toBe(200)
       await expect.poll(() => redStreams.length).toBeGreaterThan(0)
       await redContext.clearCookies()
       const opened = redStreams.length
@@ -728,8 +737,11 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       redPage.on('request', (request) => {
         if (request.method() === 'GET' && /\/api\/v1\/matches\/[^/?]+$/.test(request.url())) readsAfterStop++
       })
+      const delivered = redPage.waitForEvent('requestfinished', { predicate: (r) => r.url().endsWith('/privacy') })
       releaseSave()
-      await redPage.waitForTimeout(2_000)
+      await delivered
+      // The page has the late reply; its handler runs to completion before the checks below.
+      await redPage.waitForTimeout(1_000)
       expect(readsAfterStop).toBe(0)
       await expect(redPage.getByTestId('privacy-status')).not.toContainText('Open dataset release')
       await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
@@ -738,6 +750,69 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     } finally {
       await redContext.close()
       await blkContext.close()
+    }
+  })
+
+  test('12. A waiting room confirms its session before reopening its stream, and stops when it is gone', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const page = await context.newPage()
+      const events: string[] = []
+      const streams: WebSocketRoute[] = []
+      await page.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        streams.push(stream)
+        events.push('stream')
+        stream.connectToServer()
+      })
+      page.on('request', (request) => {
+        if (request.url().includes('/api/v1/auth/session?reissue=false')) events.push('probe')
+      })
+      await page.goto('/')
+      await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await page.getByTestId('create-invite-btn').click()
+      await page.waitForURL(/\/invite\/[a-z0-9]+/)
+      await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
+      await expect.poll(() => streams.length).toBe(1)
+
+      // The stream drops while a waiting-room poll's reply is held; once the reply lands, the room asks the server,
+      // read-only, before it opens a new stream.
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => (release = resolve))
+      let fetched: () => void = () => {}
+      const held = new Promise<void>((resolve) => (fetched = resolve))
+      await page.route(
+        /\/api\/v1\/matches\/[^/?]+\?since_seq=\d+$/,
+        async (route) => {
+          const response = await route.fetch()
+          fetched()
+          await gate
+          await route.fulfill({ response })
+        },
+        { times: 1 },
+      )
+      await held
+      events.length = 0
+      await streams[0]!.close()
+      release()
+      await expect.poll(() => streams.length).toBe(2)
+      expect(events.indexOf('probe')).toBeGreaterThanOrEqual(0)
+      expect(events.indexOf('probe')).toBeLessThan(events.indexOf('stream'))
+
+      // The session ends while the stream stays open: the next poll of the private room is refused, the room asks the
+      // server, and it stops and closes its stream.
+      let closedByPage = false
+      streams[1]!.onClose(() => {
+        closedByPage = true
+      })
+      await context.clearCookies()
+      await expect(page.getByTestId('match-error')).toContainText('session has ended')
+      await expect.poll(() => closedByPage).toBe(true)
+      await page.waitForTimeout(1_500)
+      expect(streams.length).toBe(2)
+    } finally {
+      await context.close()
     }
   })
 
