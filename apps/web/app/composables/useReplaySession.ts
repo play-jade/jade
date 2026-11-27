@@ -104,8 +104,11 @@ export function useReplaySession(options: ReplaySessionOptions) {
   let edits = 0
   /** Counts replacements of a retained line and Undos of them, so a late save knows whether it is still current. */
   let replacements = 0
-  /** The notice shown when a stored variation could not be removed; a later successful write makes it obsolete. */
-  let removalWarning: string | null = null
+  /**
+   * The notice shown when a stored variation could not be removed, with that draft's key; a later successful write or
+   * removal of the same key makes it obsolete, and one for another key says nothing about it.
+   */
+  let removalWarning: { key: string; text: string } | null = null
   let navigations = 0
   let writes = 0
   /** A position already handed back for extension; a second move validated against it is refused. */
@@ -254,8 +257,9 @@ export function useReplaySession(options: ReplaySessionOptions) {
     forgetStoredDraft()
   }
 
-  function clearRemovalWarning() {
-    if (removalWarning !== null && draftNotice.value === removalWarning) draftNotice.value = null
+  function clearRemovalWarning(key: string) {
+    if (removalWarning?.key !== key) return
+    if (draftNotice.value === removalWarning.text) draftNotice.value = null
     removalWarning = null
   }
 
@@ -271,10 +275,11 @@ export function useReplaySession(options: ReplaySessionOptions) {
       if (!result.ok && write === writes) {
         saveState.value = { state: 'unsaved', reason: result.reason }
         // With no line left the save status is hidden, so the failure is also a notice: a reload may bring it back.
-        removalWarning = `The saved variation could not be removed (${result.reason}); it may return on reload.`
-        draftNotice.value = removalWarning
+        const text = `The saved variation could not be removed (${result.reason}); it may return on reload.`
+        removalWarning = { key, text }
+        draftNotice.value = text
       }
-      if (result.ok) clearRemovalWarning()
+      if (result.ok) clearRemovalWarning(key)
       return result.ok
     })
   }
@@ -358,7 +363,7 @@ export function useReplaySession(options: ReplaySessionOptions) {
     const result = await saveReplayDraft({ ...snapshot.draft, recordedMovesDigest: digest })
     report(result.ok ? { state: 'saved' } : { state: 'unsaved', reason: result.reason })
     // A stored line replaces the row that could not be removed, so that warning no longer holds.
-    if (result.ok) clearRemovalWarning()
+    if (result.ok) clearRemovalWarning(snapshot.draft.draftId)
     return result.ok
   }
 

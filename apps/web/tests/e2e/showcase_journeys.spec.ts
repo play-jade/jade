@@ -361,6 +361,23 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     await expect(page.getByTestId('variation-notice')).toContainText('taken back')
     await expect(page.getByTestId('variation-resume')).toHaveCount(0)
     await expect.poll(() => storedDraftCount(page)).toBe(0)
+
+    // A removal the browser refuses stays visible as a notice, with no save status or export for a line that is gone.
+    await playBoardSquares(page, 'h2', 'e2')
+    await playBoardSquares(page, 'h9', 'g7')
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.evaluate(() => {
+      IDBObjectStore.prototype.delete = () => {
+        throw new Error('removal refused for this test')
+      }
+    })
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('variation-notice')).toContainText('could not be removed')
+    await expect(page.getByTestId('variation-export')).toHaveCount(0)
+    await expect(page.getByTestId('variation-unsaved')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toHaveCount(0)
   })
 
   test('7. Without browser storage, a variation reports it is not saved and still exports', async ({ page }) => {

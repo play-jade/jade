@@ -1247,6 +1247,33 @@ describe('replay session', () => {
     }
   })
 
+  it("keeps one draft's removal warning when another draft's write succeeds", async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const owner = ref<string | null>('guest-a')
+      const s = session({ persist: true, ownerScope: owner })
+      s.selectPly(1)
+      const release = heldDigest()
+      // Guest A's save is held at its digest while the session moves to guest B.
+      const saving = s.tryMove('b9c7')
+      await vi.waitFor(() => expect(release.isHolding()).toBe(true), { interval: 1 })
+      owner.value = 'guest-b'
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      vi.stubGlobal('indexedDB', undefined)
+      s.undoVariationMove()
+      await vi.waitFor(() => expect(s.draftNotice.value).toContain('could not be removed'), { interval: 1 })
+      vi.stubGlobal('indexedDB', memory)
+      release()
+      await saving
+      await vi.waitFor(() => expect(storedRows(memory).length).toBeGreaterThanOrEqual(1), { interval: 1 })
+      expect(s.draftNotice.value).toContain('could not be removed')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('keeps the retained line when a later replacement is undone before its save lands', async () => {
     const memory = memoryIndexedDb()
     vi.stubGlobal('indexedDB', memory)
@@ -1295,7 +1322,9 @@ describe('replay session', () => {
       const reopened = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: ref([...line.value]) })
       await reopened.restoreDraft()
       expect(reopened.draftNotice.value).toBeNull()
-      expect(reopened.variation.value?.movesUci ?? reopened.parked.value?.movesUci).toEqual(['b9c7'])
+      // The resumed variation comes back active, with the cursor brought to the end of the shortened record.
+      expect(reopened.cursor.value).toBe(2)
+      expect(reopened.variation.value?.movesUci).toEqual(['b9c7'])
     } finally {
       vi.unstubAllGlobals()
     }
