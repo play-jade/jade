@@ -2836,3 +2836,54 @@ async fn a_configured_origin_replaces_the_local_ones() {
             .is_none()
     );
 }
+
+#[test]
+fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("jade-origins-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("game.db");
+    let start = |origins: &std::ffi::OsStr| {
+        let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_jade-match-server"))
+            .env("JADE_BIND_ADDR", "127.0.0.1:0")
+            .env("DATABASE_URL", format!("sqlite:{}?mode=rwc", db.display()))
+            .env("JADE_ALLOWED_ORIGINS", origins)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Bounded: a server that started instead of stopping fails the test rather than hanging it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = server.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = server.kill();
+                panic!("the server started with a bad origins setting");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(&mut server.stderr.take().unwrap(), &mut stderr).unwrap();
+        (status, stderr)
+    };
+    let mut settings = vec![std::ffi::OsString::from("https://play.example,")];
+    #[cfg(unix)]
+    settings.push(
+        <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![b'h', b't', 0xff]),
+    );
+    for setting in settings {
+        let (status, stderr) = start(&setting);
+        assert!(!status.success(), "{setting:?}");
+        assert!(
+            stderr.contains("JADE_ALLOWED_ORIGINS"),
+            "{setting:?}: {stderr}"
+        );
+        assert!(!db.exists(), "{setting:?}: no database is created");
+        assert!(
+            !dir.join("game.db.owner.lock").exists(),
+            "{setting:?}: no owner lock is taken"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
