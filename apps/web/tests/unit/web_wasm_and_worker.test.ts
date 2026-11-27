@@ -582,6 +582,27 @@ describe('browser session', () => {
       expect(requests.filter((r) => r.startsWith('POST'))).toEqual([])
     }
   })
+
+  it('reports an ended session apart from an unavailable server', async () => {
+    const outcomeOf = async (answer: () => Promise<Response>) => {
+      vi.stubGlobal('useRuntimeConfig', () => ({ public: { matchServerUrl: 'http://127.0.0.1:4180' } }))
+      vi.stubGlobal('fetch', answer)
+      try {
+        return await useBrowserSession()
+          .current()
+          .then(() => 'session', (error: Error) => error.name)
+      } finally {
+        vi.unstubAllGlobals()
+      }
+    }
+    expect(await outcomeOf(async () => new Response('{}', { status: 401 }))).toBe('SessionEndedError')
+    expect(await outcomeOf(async () => new Response('{}', { status: 503 }))).toBe('SessionUnavailableError')
+    expect(
+      await outcomeOf(async () => {
+        throw new TypeError('network down')
+      }),
+    ).toBe('SessionUnavailableError')
+  })
 })
 
 describe('notation seeds', () => {

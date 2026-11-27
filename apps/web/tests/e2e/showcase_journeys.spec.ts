@@ -595,6 +595,84 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     }
   })
 
+  test('11. The sharing summary keeps the newest state when an older reply arrives last', async ({ browser }) => {
+    const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const redPage = await redContext.newPage()
+      const blkPage = await blkContext.newPage()
+      await redPage.goto('/')
+      await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await redPage.getByTestId('create-invite-btn').click()
+      await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      await blkPage.goto(new URL(redPage.url()).pathname)
+      await expect(blkPage.getByTestId('match-status-badge')).toContainText('You play black')
+      await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
+      for (const page of [redPage, blkPage]) await page.getByTestId('privacy-consent-card').locator('summary').click()
+      const saved = (page: typeof redPage) =>
+        page.waitForResponse((r) => r.url().endsWith('/privacy') && r.request().method() === 'POST')
+
+      /** Holds Red's next snapshot read: it is fetched now, so it carries the state now, and delivered on release. */
+      const holdRedRead = async () => {
+        let release: () => void = () => {}
+        const gate = new Promise<void>((resolve) => (release = resolve))
+        let fetched: () => void = () => {}
+        const captured = new Promise<void>((resolve) => (fetched = resolve))
+        await redPage.route(
+          /\/api\/v1\/matches\/[^/?]+$/,
+          async (route) => {
+            if (route.request().method() !== 'GET') return route.fallback()
+            const response = await route.fetch()
+            fetched()
+            await gate
+            await route.fulfill({ response })
+          },
+          { times: 1 },
+        )
+        return { captured, release: () => release() }
+      }
+      const blackChooses = async (visibility: string) => {
+        const save = saved(blkPage)
+        await blkPage.getByTestId('privacy-visibility').selectOption(visibility)
+        expect((await save).status()).toBe(200)
+      }
+
+      // Both choose public: the match is public.
+      let save = saved(redPage)
+      await redPage.getByTestId('privacy-visibility').selectOption('public')
+      expect((await save).status()).toBe(200)
+      await blackChooses('public')
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
+      // Red's read-back is captured while public; Black withdraws; the older public reply arrives last.
+      let held = await holdRedRead()
+      save = saved(redPage)
+      await redPage.getByLabel('Allow internal model training').check()
+      expect((await save).status()).toBe(200)
+      await held.captured
+      await blackChooses('private')
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Private')
+      held.release()
+      await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Private')
+
+      // The other direction: a private reply captured before Black shares again arrives after the public update.
+      held = await holdRedRead()
+      save = saved(redPage)
+      await redPage.getByLabel('Allow internal model training').uncheck()
+      expect((await save).status()).toBe(200)
+      await held.captured
+      await blackChooses('public')
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+      held.release()
+      await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+    } finally {
+      await redContext.close()
+      await blkContext.close()
+    }
+  })
+
   test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({
     page,
   }) => {

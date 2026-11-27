@@ -201,6 +201,10 @@ pub struct MatchSnapshotResponse {
     pub reason_code: Option<String>,
     pub visibility: Visibility,
     pub missing_events: Vec<CommittedEventRecord>,
+    /// Advances with every privacy save by either participant, read from the same row as `visibility`, so a client
+    /// shows the effective visibility of the newest snapshot it has, whichever route each snapshot came by.
+    #[serde(default)]
+    pub privacy_revision: i64,
     /// The viewer's own saved choices when the viewer holds a seat; the effective `visibility` needs both players.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_choices: Option<ParticipantChoices>,
@@ -247,7 +251,8 @@ pub struct PrivacyUpdateRequest {
     pub expected_revision: Option<i64>,
 }
 
-/// Adds the per-seat choice revisions to a database created before they existed; new databases have them already.
+/// Adds the per-seat choice revisions and the match's privacy revision to a database created before they existed;
+/// new databases have them already.
 async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error> {
     let columns: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('matches')")
         .fetch_all(db)
@@ -255,7 +260,11 @@ async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error
         .iter()
         .map(|row| row.get("name"))
         .collect();
-    for column in ["red_choices_revision", "black_choices_revision"] {
+    for column in [
+        "red_choices_revision",
+        "black_choices_revision",
+        "privacy_revision",
+    ] {
         if !columns.iter().any(|c| c == column) {
             sqlx::query(&format!(
                 "ALTER TABLE matches ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
@@ -751,6 +760,36 @@ async fn authenticate_request(
         code: "unauthenticated",
         message: "Missing session credential".to_string(),
     })
+}
+
+/// The session credential a request presents, in the order `authenticate_request` reads them: a bearer token, else
+/// the `jade_session` cookie.
+fn presented_session_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(tok) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Some(tok.trim().to_string());
+    }
+    session_cookie(headers).map(str::to_string)
+}
+
+/// Whether the session a live connection opened with still stands for `account_id`: present, unrevoked, unexpired.
+/// A failed read counts as not standing, so a connection never outlives a session it cannot confirm.
+async fn session_still_valid(db: &SqlitePool, session_id_hash: &str, account_id: &str) -> bool {
+    let Ok(Some(row)) = sqlx::query(
+        "SELECT account_id, revoked_at_ms, expires_at_ms FROM auth_sessions WHERE session_id_hash = ?",
+    )
+    .bind(session_id_hash)
+    .fetch_optional(db)
+    .await
+    else {
+        return false;
+    };
+    row.get::<String, _>("account_id") == account_id
+        && row.get::<Option<i64>, _>("revoked_at_ms").is_none()
+        && row.get::<i64, _>("expires_at_ms") >= now_utc_ms()
 }
 
 async fn lookup_session_account(
@@ -1375,6 +1414,7 @@ async fn update_match_privacy(
             {seat}_consent_research = COALESCE(?, {seat}_consent_research),
             {seat}_consent_dataset = COALESCE(?, {seat}_consent_dataset),
             {seat}_choices_revision = {seat}_choices_revision + 1,
+            privacy_revision = privacy_revision + 1,
             updated_at_ms = ?
          WHERE match_id = ? AND {seat}_choices_revision = ?"
     ))
@@ -1400,8 +1440,8 @@ async fn update_match_privacy(
                 .to_string(),
         });
     }
-    let choices_revision: i64 = sqlx::query_scalar(&format!(
-        "SELECT {seat}_choices_revision FROM matches WHERE match_id = ?"
+    let revisions = sqlx::query(&format!(
+        "SELECT {seat}_choices_revision AS choices_revision, privacy_revision FROM matches WHERE match_id = ?"
     ))
     .bind(&match_id)
     .fetch_one(&mut *tx)
@@ -1411,6 +1451,8 @@ async fn update_match_privacy(
         code: "db_error",
         message: e.to_string(),
     })?;
+    let choices_revision: i64 = revisions.get("choices_revision");
+    let privacy_revision: i64 = revisions.get("privacy_revision");
 
     let row = sqlx::query(
         "SELECT red_visibility_choice, black_visibility_choice,
@@ -1468,6 +1510,7 @@ async fn update_match_privacy(
     Ok(Json(serde_json::json!({
         "effective_visibility": effective,
         "choices_revision": choices_revision,
+        "privacy_revision": privacy_revision,
         "eligible_for_internal_training": policy.eligible_for_internal_training(),
         "eligible_for_published_research": policy.eligible_for_published_research(),
         "eligible_for_dataset_release": policy.eligible_for_dataset_release(),
@@ -1493,13 +1536,23 @@ async fn ws_match_stream(
         });
     }
     let account_id = authenticate_request(&state, &headers, false).await?;
+    // The connection keeps the session it opened with, so it ends when that session expires or is revoked.
+    let session_id_hash = presented_session_token(&headers)
+        .map(|tok| sha256_hex(&tok))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthenticated",
+            message: "Missing session credential".to_string(),
+        })?;
     check_match_read_access(&state.db, &match_id, Some(&account_id)).await?;
     let actor = ensure_match_actor(&state, &match_id).await?;
     let init_snap = load_match_snapshot(&state.db, &match_id, None).await?;
     let init_snap = redact_snapshot_for_viewer(&state.db, init_snap, Some(&account_id)).await?;
 
     let db = state.db.clone();
-    Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, db, actor, account_id, init_snap)))
+    Ok(ws.on_upgrade(move |socket| {
+        handle_ws_client(socket, db, actor, account_id, session_id_hash, init_snap)
+    }))
 }
 
 async fn handle_ws_client(
@@ -1507,6 +1560,7 @@ async fn handle_ws_client(
     db: SqlitePool,
     actor: MatchActorHandle,
     account_id: String,
+    session_id_hash: String,
     initial_snapshot: MatchSnapshotResponse,
 ) {
     let mut bcast_rx = actor.bcast.subscribe();
@@ -1522,6 +1576,11 @@ async fn handle_ws_client(
                 let Ok(snap) = bmsg else {
                     break;
                 };
+                // A connection whose session expired or was revoked receives nothing further.
+                if !session_still_valid(&db, &session_id_hash, &account_id).await {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
                 // Revalidate read access on every broadcast so spectators disconnect immediately if privacy is restored!
                 if check_match_read_access(&db, &snap.match_id, Some(&account_id)).await.is_err() {
                     let _ = socket.send(Message::Close(None)).await;
@@ -1542,6 +1601,13 @@ async fn handle_ws_client(
                 let Some(Ok(msg)) = incoming else {
                     break;
                 };
+                // A command from a connection whose session expired or was revoked is never acted on for the guest.
+                if matches!(msg, Message::Text(_))
+                    && !session_still_valid(&db, &session_id_hash, &account_id).await
+                {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
                 if let Message::Text(txt) = msg
                     && let Ok(cmd) = serde_json::from_str::<MatchCommandRequest>(&txt)
                 {
@@ -2539,6 +2605,7 @@ async fn load_match_snapshot(
         outcome: m.get("outcome"),
         reason_code: m.get("reason_code"),
         visibility: vis,
+        privacy_revision: m.get("privacy_revision"),
         missing_events,
         viewer_choices: None,
     })

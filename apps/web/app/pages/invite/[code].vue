@@ -3,7 +3,12 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
 import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
-import { matchServerBase, useBrowserSession, type BrowserSession } from '~/composables/useBrowserSession'
+import {
+  matchServerBase,
+  SessionEndedError,
+  useBrowserSession,
+  type BrowserSession,
+} from '~/composables/useBrowserSession'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -30,6 +35,8 @@ interface MatchSnapshot {
   outcome: string | null
   reason_code: string | null
   visibility: 'private' | 'unlisted' | 'public'
+  /** Advances with every privacy save by either participant; orders the effective `visibility` across snapshots. */
+  privacy_revision?: number
   /** This participant's own saved choices; the effective `visibility` needs both players. */
   viewer_choices?: {
     side: 'red' | 'black'
@@ -157,7 +164,12 @@ async function guestFetch(path: string, init: RequestInit = {}, mutation = false
     })
   if (roomStopped.value) throw new Error(ANOTHER_GUEST)
   const bound = guestSession
-  const session = await browserSession.current()
+  // A session the server confirms has ended stops the room, so nothing queued or reconnecting acts or reads for it; a
+  // network failure only fails this request.
+  const session = await browserSession.current().catch((error: unknown) => {
+    if (error instanceof SessionEndedError) stopRoom(error.message)
+    throw error
+  })
   // The room belongs to the guest that opened it; a browser now holding another guest stops rather than act for it.
   if (bound && session.account_id !== bound.account_id) {
     stopRoom()
@@ -167,7 +179,11 @@ async function guestFetch(path: string, init: RequestInit = {}, mutation = false
   const resp = await send(session)
   if (!(await browserSession.refusedBy(resp))) return resp
   const again = await browserSession.recover({ fresh: true })
-  if (!again) throw new Error('Your guest session has ended; reload to continue as a new guest')
+  if (!again) {
+    const ended = new SessionEndedError()
+    stopRoom(ended.message)
+    throw ended
+  }
   if (again.account_id !== session.account_id) {
     stopRoom()
     throw new Error(ANOTHER_GUEST)
@@ -205,6 +221,27 @@ const choicesLocked = computed(
 )
 /** The revision of the choices the controls show: a save is made against exactly what the player saw. */
 let shownRevision = -1
+/** The match and privacy revision of the effective visibility shown; an older one never replaces it. */
+let shownPrivacy: { matchId: string; revision: number } | null = null
+
+/** Whether a privacy state at `revision` for `matchId` is at least as new as the one shown; if so it becomes the one shown. */
+function newerPrivacy(matchId: string, revision: unknown): boolean {
+  if (!Number.isSafeInteger(revision)) return shownPrivacy?.matchId !== matchId
+  if (shownPrivacy?.matchId === matchId && (revision as number) < shownPrivacy.revision) return false
+  shownPrivacy = { matchId, revision: revision as number }
+  return true
+}
+
+/**
+ * A snapshot as the room shows it: everything it carries, except that an effective visibility older than the one
+ * shown is kept as shown. HTTP replies and WebSocket frames can arrive in any order; the privacy revision orders them.
+ */
+function ordered(snap: MatchSnapshot): MatchSnapshot {
+  // Another match (a rematch) starts its own order.
+  if (snapshot.value?.match_id !== snap.match_id) shownPrivacy = null
+  if (newerPrivacy(snap.match_id, snap.privacy_revision) || !snapshot.value) return snap
+  return { ...snap, visibility: snapshot.value.visibility, privacy_revision: snapshot.value.privacy_revision }
+}
 /**
  * True until the controls show a validated personal snapshot, and again whenever the saved choices could not be read
  * back; the controls stay locked meanwhile, so no change is made against choices that are not confirmed.
@@ -215,9 +252,9 @@ const roomStopped = ref(false)
 
 /** Stops the room: no further requests, and the original guest's live stream closes, so nothing more of the match
  * reaches this browser under the guest it no longer holds. */
-function stopRoom() {
+function stopRoom(reason = ANOTHER_GUEST) {
   roomStopped.value = true
-  errorBanner.value = ANOTHER_GUEST
+  errorBanner.value = reason
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
@@ -284,25 +321,15 @@ async function refreshChoices(): Promise<boolean> {
     const resp = await guestFetch(`/api/v1/matches/${matchId}`)
     const snap = resp.ok ? ((await resp.json().catch(() => null)) as MatchSnapshot | null) : null
     if (roomStopped.value) return false
-    // A current read of this seat with an unknown effective visibility shows it as not confirmed; an older read, or
-    // another seat's, never changes the summary.
-    if (
-      snap &&
-      snapshot.value &&
-      !VISIBILITIES.includes(snap.visibility) &&
-      wellFormedChoices(snap.viewer_choices) &&
-      snap.viewer_choices.side === assignedSide.value &&
-      snap.viewer_choices.revision >= shownRevision
-    ) {
-      snapshot.value = { ...snapshot.value, visibility: snap.visibility }
-    }
     // Only a snapshot actually shown counts as confirmed; one ignored as older or malformed does not.
     const shown = snap ? hydrateChoices(snap) : false
     if (roomStopped.value) return false
-    if (snap && shown) {
-      if (snapshot.value) snapshot.value = { ...snapshot.value, visibility: snap.visibility }
-      return true
+    // The effective visibility follows the newest privacy revision, whichever participant's change it shows.
+    if (snap && snapshot.value) {
+      const read = ordered(snap)
+      snapshot.value = { ...snapshot.value, visibility: read.visibility, privacy_revision: read.privacy_revision }
     }
+    if (snap && shown) return true
     // A read superseded by a newer snapshot already shown leaves that newer confirmation in place.
     if (
       snap &&
@@ -345,7 +372,7 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
       true,
     )
     const ack = (await resp.json().catch(() => null)) as
-      | { effective_visibility?: unknown; choices_revision?: unknown }
+      | { effective_visibility?: unknown; choices_revision?: unknown; privacy_revision?: unknown }
       | null
     if (resp.status === 409) {
       outcome = `${CHOICE_LABELS[field]} was not saved: your choices changed in another tab. Showing what is saved now.`
@@ -358,8 +385,13 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
     ) {
       // A save advances the revision by exactly one; any other acknowledgment is not adopted.
       shownRevision = madeAgainst + 1
-      if (snapshot.value) {
-        snapshot.value = { ...snapshot.value, visibility: ack.effective_visibility as MatchSnapshot['visibility'] }
+      // The acknowledgment's effective visibility is shown only if no newer privacy state has been shown meanwhile.
+      if (snapshot.value && newerPrivacy(snapshot.value.match_id, ack.privacy_revision)) {
+        snapshot.value = {
+          ...snapshot.value,
+          visibility: ack.effective_visibility as MatchSnapshot['visibility'],
+          privacy_revision: ack.privacy_revision as number,
+        }
       }
       // The effective visibility is shown in one place, the summary above, which the read-back keeps current.
       outcome = `${CHOICE_LABELS[field]} saved. Sharing takes effect only when both players choose it.`
@@ -430,7 +462,7 @@ function connectMatchWebSocket(matchId: string) {
       const data = JSON.parse(String(ev.data))
       if (data.match_id) {
         const prevLen = snapshot.value?.moves_uci.length ?? 0
-        snapshot.value = data as MatchSnapshot
+        snapshot.value = ordered(data as MatchSnapshot)
         hydrateChoices(snapshot.value)
         syncClocksFromSnapshot(snapshot.value)
         if (snapshot.value.moves_uci.length > prevLen) {
@@ -470,7 +502,7 @@ async function recoverGapAndReconnect(matchId: string) {
       const snap = (await resp.json()) as MatchSnapshot
       // A read answered after the room stopped belongs to the guest it no longer holds; it is dropped.
       if (roomStopped.value) return
-      snapshot.value = snap
+      snapshot.value = ordered(snap)
       hydrateChoices(snap)
       syncClocksFromSnapshot(snap)
       if (snap.status === 'finished') {
@@ -504,7 +536,7 @@ async function joinAndSubscribe() {
     }
     const joined = await joinResp.json()
     assignedSide.value = joined.assigned_side
-    snapshot.value = joined.snapshot as MatchSnapshot
+    snapshot.value = ordered(joined.snapshot as MatchSnapshot)
     hydrateChoices(snapshot.value)
     if (assignedSide.value === 'black') {
       redBelow.value = false
@@ -539,7 +571,7 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
     errorBanner.value = data?.error?.message || `Command rejected (${resp.status})`
     return
   }
-  snapshot.value = data as MatchSnapshot
+  snapshot.value = ordered(data as MatchSnapshot)
   hydrateChoices(snapshot.value)
   syncClocksFromSnapshot(snapshot.value)
   await refreshBoard()

@@ -18,6 +18,14 @@ export class SessionUnavailableError extends Error {
   }
 }
 
+/** The match server confirmed this browser has no session (expired, revoked, or never created); not a network error. */
+export class SessionEndedError extends SessionUnavailableError {
+  constructor(message = 'Your guest session has ended; reload to continue as a new guest') {
+    super(message)
+    this.name = 'SessionEndedError'
+  }
+}
+
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 function isSession(value: unknown): value is BrowserSession {
@@ -118,7 +126,7 @@ export function useBrowserSession() {
   async function current(): Promise<BrowserSession> {
     if (known && known.expires_at_ms > Date.now()) return known
     const session = await recover({ fresh: true })
-    if (!session) throw new SessionUnavailableError('Your guest session has ended; reload to continue as a new guest')
+    if (!session) throw new SessionEndedError()
     return session
   }
 

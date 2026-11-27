@@ -1677,7 +1677,12 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
     let _ = std::fs::remove_file(&path);
     let old_schema = include_str!("../../../db/game/0001_initial_game_schema.sql")
         .lines()
-        .filter(|line| !line.contains("_choices_revision") && !line.contains("advance a revision"))
+        .filter(|line| {
+            !line.contains("_choices_revision")
+                && !line.contains("advance a revision")
+                && !line.contains("privacy_revision")
+                && !line.contains("Advances with every privacy save")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     {
@@ -1704,6 +1709,7 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
         .unwrap();
     assert!(after.iter().any(|c| c == "red_choices_revision"));
     assert!(after.iter().any(|c| c == "black_choices_revision"));
+    assert!(after.iter().any(|c| c == "privacy_revision"));
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1751,4 +1757,207 @@ async fn concurrent_saves_of_one_revision_apply_once() {
     );
     drop(app);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_privacy_revision_advances_for_either_participant() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    assert_eq!(
+        snapshot_for(&app, &red.access_token, &match_id)
+            .await
+            .privacy_revision,
+        0
+    );
+
+    // Red's save advances both Red's own revision and the match's privacy revision, and the reply carries both.
+    let saved: serde_json::Value = json_body(
+        save_choices(
+            &app,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(saved["choices_revision"], 1);
+    assert_eq!(saved["privacy_revision"], 1);
+
+    // Black's save changes the effective visibility without touching Red's revision; Red's next snapshot still
+    // shows a newer privacy revision, so a client can order it after the earlier one.
+    let saved: serde_json::Value = json_body(
+        save_choices(
+            &app,
+            &blk.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(saved["choices_revision"], 1);
+    assert_eq!(saved["privacy_revision"], 2);
+    let red_view = snapshot_for(&app, &red.access_token, &match_id).await;
+    assert_eq!(red_view.visibility, Visibility::Public);
+    assert_eq!(red_view.privacy_revision, 2);
+    assert_eq!(red_view.viewer_choices.unwrap().revision, 1);
+
+    // Black withdraws: the match is private again, at a newer privacy revision than the public snapshot.
+    save_choices(
+        &app,
+        &blk.access_token,
+        &match_id,
+        Visibility::Private,
+        [false; 3],
+    )
+    .await;
+    let red_view = snapshot_for(&app, &red.access_token, &match_id).await;
+    assert_eq!(red_view.visibility, Visibility::Private);
+    assert_eq!(red_view.privacy_revision, 3);
+    assert_eq!(red_view.viewer_choices.unwrap().revision, 1);
+}
+
+/// Opens the match's live stream as the bearer of `token` and reads its first snapshot.
+async fn open_stream(
+    app: &axum::Router,
+    token: &str,
+    match_id: &str,
+) -> WebSocketStream<DuplexStream> {
+    let mut req = format!("ws://localhost:3180/api/v1/matches/{match_id}/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let mut ws = connect_ws_duplex(app, req).await.unwrap();
+    let first = ws.next().await.unwrap().unwrap();
+    assert!(first.is_text(), "the stream opens with a snapshot");
+    ws
+}
+
+/// What a live stream delivers next: a snapshot's sequence number, or `None` once the server ends the stream.
+async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("the server answers within five seconds");
+    match frame {
+        Some(Ok(Message::Text(text))) => {
+            let snap: MatchSnapshotResponse = serde_json::from_str(&text).unwrap();
+            Some(snap.seq)
+        }
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn an_open_stream_ends_with_its_session() {
+    use sha2::Digest;
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let hash = |token: &str| hex::encode(sha2::Sha256::digest(token.as_bytes()));
+    let mv = |match_id: &str, command_id: &str, seq: u64, from: [u8; 2], to: [u8; 2]| {
+        MatchCommandRequest::Move {
+            protocol: 1,
+            match_id: match_id.to_string(),
+            command_id: command_id.to_string(),
+            expected_seq: seq,
+            mv: CoordMovePayload { from, to },
+        }
+    };
+
+    // 1. Red's session expires while Red's stream is open: Black's move reaches Black's stream, never Red's.
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let mut red_ws = open_stream(&app, &red.access_token, &match_id).await;
+    let mut blk_ws = open_stream(&app, &blk.access_token, &match_id).await;
+    assert_eq!(
+        post_command(
+            &app,
+            &red.access_token,
+            &match_id,
+            &mv(&match_id, "r1", 0, [7, 0], [6, 2])
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(next_delivery(&mut red_ws).await, Some(1));
+    assert_eq!(next_delivery(&mut blk_ws).await, Some(1));
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE session_id_hash = $1")
+        .bind(hash(&red.access_token))
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        post_command(
+            &app,
+            &blk.access_token,
+            &match_id,
+            &mv(&match_id, "b1", 1, [7, 9], [6, 7])
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(next_delivery(&mut blk_ws).await, Some(2));
+    assert_eq!(
+        next_delivery(&mut red_ws).await,
+        None,
+        "an expired session receives no further state"
+    );
+
+    // 2. Black's session is revoked while Black's stream is open: a command on it is not acted on for Black.
+    let (red2, _) = new_guest(&app, "Red 2").await;
+    let (blk2, _) = new_guest(&app, "Black 2").await;
+    let match_id = start_match(&app, &red2.access_token, &blk2.access_token).await;
+    let mut blk_ws = open_stream(&app, &blk2.access_token, &match_id).await;
+    assert_eq!(
+        post_command(
+            &app,
+            &red2.access_token,
+            &match_id,
+            &mv(&match_id, "r1", 0, [7, 0], [6, 2])
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(next_delivery(&mut blk_ws).await, Some(1));
+    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE session_id_hash = $1")
+        .bind(hash(&blk2.access_token))
+        .execute(&db)
+        .await
+        .unwrap();
+    blk_ws
+        .send(Message::Text(
+            serde_json::to_string(&mv(&match_id, "b1", 1, [7, 9], [6, 7]))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_delivery(&mut blk_ws).await,
+        None,
+        "a revoked session's stream ends"
+    );
+    let after = snapshot_for(&app, &red2.access_token, &match_id).await;
+    assert_eq!(after.seq, 1, "the revoked session's move was not played");
+}
+
+/// The match snapshot as the bearer of `token` sees it.
+async fn snapshot_for(app: &axum::Router, token: &str, match_id: &str) -> MatchSnapshotResponse {
+    let req = Request::builder()
+        .uri(format!("/api/v1/matches/{match_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    json_body(app.clone().oneshot(req).await.unwrap()).await
 }
