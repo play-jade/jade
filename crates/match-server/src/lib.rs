@@ -788,8 +788,16 @@ async fn session_still_valid(db: &SqlitePool, session_id_hash: &str, account_id:
         return false;
     };
     row.get::<String, _>("account_id") == account_id
-        && row.get::<Option<i64>, _>("revoked_at_ms").is_none()
-        && row.get::<i64, _>("expires_at_ms") >= now_utc_ms()
+        && session_is_live(
+            row.get("revoked_at_ms"),
+            row.get("expires_at_ms"),
+            now_utc_ms(),
+        )
+}
+
+/// One rule for every transport: a session is live until it is revoked or its expiry instant arrives.
+fn session_is_live(revoked_at_ms: Option<i64>, expires_at_ms: i64, now_ms: i64) -> bool {
+    revoked_at_ms.is_none() && expires_at_ms > now_ms
 }
 
 async fn lookup_session_account(
@@ -814,9 +822,11 @@ async fn lookup_session_account(
         message: "Session not found".to_string(),
     })?;
 
-    let revoked: Option<i64> = row.get("revoked_at_ms");
-    let expires: i64 = row.get("expires_at_ms");
-    if revoked.is_some() || expires < now_utc_ms() {
+    if !session_is_live(
+        row.get("revoked_at_ms"),
+        row.get("expires_at_ms"),
+        now_utc_ms(),
+    ) {
         return Err(ApiError {
             status: StatusCode::UNAUTHORIZED,
             code: "session_expired_or_revoked",
@@ -1564,6 +1574,11 @@ async fn handle_ws_client(
     initial_snapshot: MatchSnapshotResponse,
 ) {
     let mut bcast_rx = actor.bcast.subscribe();
+    // The opening snapshot was read during the upgrade; a session that ended meanwhile does not receive it.
+    if !session_still_valid(&db, &session_id_hash, &account_id).await {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    }
     let _ = socket
         .send(Message::Text(
             serde_json::to_string(&initial_snapshot).unwrap().into(),

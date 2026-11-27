@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type { Page } from '@playwright/test'
+import type { Page, WebSocketRoute } from '@playwright/test'
 import { expect, test } from '@playwright/test'
 
 const VISUAL_REF_DIR = resolve(process.cwd(), '../../docs/visual-reference')
@@ -595,12 +595,18 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     }
   })
 
-  test('11. The sharing summary keeps the newest state when an older reply arrives last', async ({ browser }) => {
+  test('11. The sharing summary keeps the newest state, and a room stops when its session ends', async ({ browser }) => {
     const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
     const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
     try {
       const redPage = await redContext.newPage()
       const blkPage = await blkContext.newPage()
+      // Red's live streams pass through to the server; the test can drop the current one as a network would.
+      const redStreams: WebSocketRoute[] = []
+      await redPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        redStreams.push(stream)
+        stream.connectToServer()
+      })
       await redPage.goto('/')
       await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
       await redPage.getByTestId('create-invite-btn').click()
@@ -667,6 +673,17 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       held.release()
       await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
       await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
+      // Red's session ends on the server while the page still holds it; when the stream drops, the room asks the
+      // server, learns the session has ended, and stops instead of reconnecting.
+      await expect.poll(() => redStreams.length).toBeGreaterThan(0)
+      await redContext.clearCookies()
+      const opened = redStreams.length
+      await redStreams[opened - 1]!.close()
+      await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
+      await redPage.waitForTimeout(2_000)
+      expect(redStreams.length).toBe(opened)
+      await expect(redPage.getByTestId('privacy-visibility')).toBeDisabled()
     } finally {
       await redContext.close()
       await blkContext.close()

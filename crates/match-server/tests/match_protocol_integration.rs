@@ -1840,17 +1840,22 @@ async fn open_stream(
     ws
 }
 
-/// What a live stream delivers next: a snapshot's sequence number, or `None` once the server ends the stream.
+/// What a live stream delivers next: a snapshot's sequence number, or `None` once the server closes or ends the
+/// stream. Ping and pong frames are passed over; any other frame fails the test.
 async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
-        .await
-        .expect("the server answers within five seconds");
-    match frame {
-        Some(Ok(Message::Text(text))) => {
-            let snap: MatchSnapshotResponse = serde_json::from_str(&text).unwrap();
-            Some(snap.seq)
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("the server answers within five seconds");
+        match frame {
+            Some(Ok(Message::Text(text))) => {
+                let snap: MatchSnapshotResponse = serde_json::from_str(&text).unwrap();
+                return Some(snap.seq);
+            }
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+            Some(Ok(other)) => panic!("unexpected frame on a match stream: {other:?}"),
         }
-        _ => None,
     }
 }
 
