@@ -178,6 +178,20 @@
       "zh-Hant-TW": "和棋",
       "zh-Hant-HK": "和棋"
     },
+    "outcome.red_wins": {
+      "en-US": "Red wins",
+      "en-GB": "Red wins",
+      "zh-Hans-CN": "红方胜",
+      "zh-Hant-TW": "紅方勝",
+      "zh-Hant-HK": "紅方勝"
+    },
+    "outcome.black_wins": {
+      "en-US": "Black wins",
+      "en-GB": "Black wins",
+      "zh-Hans-CN": "黑方胜",
+      "zh-Hant-TW": "黑方勝",
+      "zh-Hant-HK": "黑方勝"
+    },
     "action.resign": {
       "en-US": "Resign",
       "en-GB": "Resign",

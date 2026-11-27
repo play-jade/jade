@@ -262,8 +262,7 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(page.getByTestId('archive-provenance-banner')).toContainText(
         'jade-public-sample-fixtures-v1',
       )
-      await expect(page.getByTestId('continuation-table')).toContainText('炮二平五')
-      await expect(page.getByTestId('explorer-source-label')).toContainText('Sample Archive')
+      await expect(page.getByTestId('archive-game-list').locator('li')).toHaveCount(2)
 
       // Verify both disambiguated `林明` records appear distinctly in SSR HTML
       const playerItems = page.locator('[data-testid="player-list"] li')
@@ -276,10 +275,43 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         fullPage: false,
       })
 
+      // A game's own route renders its board and the archive's continuations without JavaScript.
+      await page.goto('/archive/g/sample-game-central-cannon-001')
+      await expect(page.getByTestId('archive-provenance-banner')).toContainText('jade-public-sample-fixtures-v1')
+      await expect(page.getByTestId('continuation-table')).toContainText('炮二平五')
+      await expect(page.getByTestId('explorer-source-label')).toContainText('Sample Archive')
+      await expect(page.getByTestId('archive-move-list')).toContainText('C2=5')
+
       // Navigate to player profile with JS disabled
       await page.goto('/players/sample-player-001')
       await expect(page.getByTestId('player-profile-page')).toContainText('赵汝权')
       await expect(page.getByTestId('player-profile-page')).toContainText('Chiu, Yu Kuen')
+
+      // A page past the player's last game says so and links back to it.
+      await page.goto('/players/sample-player-001?offset=25')
+      await expect(page.getByTestId('player-games-past-end')).toContainText("this player's 1 games")
+      await page.getByTestId('player-games-past-end').getByRole('link').click()
+      await expect(page.getByTestId('player-game-list').locator('li')).toHaveCount(1)
+      await expect(page.getByTestId('player-game-list').getByRole('link')).toHaveAttribute(
+        'href',
+        '/archive/g/sample-game-central-cannon-001',
+      )
+
+      // A search submitted without scripts keeps the game page shown.
+      await page.goto('/archive?offset=1')
+      await expect(page.getByTestId('archive-game-list').locator('li')).toHaveCount(1)
+      await page.getByTestId('player-search-input').fill('Ming')
+      await page.getByTestId('player-search-btn').click()
+      await expect(page).toHaveURL(/offset=1/)
+      await expect(page).toHaveURL(/q=Ming/)
+      await expect(page.getByTestId('player-list').locator('li')).toHaveCount(2)
+      await expect(page.getByTestId('player-list').locator('li[data-player-id="sample-player-003"]')).toHaveCount(1)
+      await expect(page.getByTestId('player-list').locator('li[data-player-id="sample-player-004"]')).toHaveCount(1)
+      await expect(page.getByTestId('archive-game-list').getByRole('link')).toHaveCount(1)
+      await expect(page.getByTestId('archive-game-list').getByRole('link')).toHaveAttribute(
+        'href',
+        '/archive/g/sample-game-screen-horse-002',
+      )
     } finally {
       await noJsContext.close()
     }
@@ -401,6 +433,94 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     expect(draft.variationOriginPly).toBe(1)
   })
 
+  test('8. Archive game: choose, reload its URL, try a recorded continuation and the engine, return, recover', async ({
+    page,
+  }) => {
+    // Choose the first sample game from the collection; its route is stable.
+    await page.goto('/archive')
+    await page.getByTestId('archive-game-list').getByRole('link').first().click()
+    await page.waitForURL(/\/archive\/g\/sample-game-central-cannon-001/)
+    await expect(page.getByTestId('archive-recorded-result')).toBeVisible()
+
+    // Step to ply 3; reloading the URL keeps the position.
+    const moves = page.getByTestId('archive-move')
+    await moves.nth(2).click()
+    await page.waitForURL(/ply=3/)
+    await page.reload()
+    await expect(page.getByTestId('archive-ply')).toContainText('3 /')
+    const recordedText = await page.getByTestId('archive-move-list').innerText()
+
+    // The other sample game continued 3… b9c7 here: trying it starts a variation, then the engine extends it.
+    await page.locator('[data-testid="continuation-row"][data-move="b9c7"]').click()
+    const variationMoves = page.getByTestId('variation-moves').locator('li')
+    await expect(variationMoves).toHaveCount(1)
+    await page.getByTestId('engine-toggle-btn').click()
+    await expect(page.getByTestId('engine-play-best')).toBeVisible({ timeout: 10_000 })
+    await page.getByTestId('engine-play-best').click()
+    await expect(variationMoves).toHaveCount(2)
+    await expect(page.getByTestId('variation-saving')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+
+    // Return to the recorded game: the record is unchanged and the variation waits to resume.
+    await page.getByTestId('variation-return').click()
+    await expect(page.getByTestId('variation-resume')).toBeVisible()
+    await expect(page.getByTestId('variation-saving')).toHaveCount(0)
+    expect(await page.getByTestId('archive-move-list').innerText()).toBe(recordedText)
+
+    // After a reload the kept variation comes back to resume, with both moves.
+    await page.reload()
+    await expect(page.getByTestId('variation-resume')).toBeVisible({ timeout: 10_000 })
+    await page.getByTestId('variation-resume').click()
+    await expect(page.getByTestId('variation-moves').locator('li')).toHaveCount(2)
+
+    // The home page links to the kept variation.
+    await page.goto('/')
+    await page.getByTestId('kept-archive-variation-link').click()
+    await page.waitForURL(/\/archive\/g\/sample-game-central-cannon-001/)
+    await expect(page.getByTestId('variation-moves').locator('li')).toHaveCount(2, { timeout: 10_000 })
+  })
+
+  test('9. Archive history: one position by two move orders, and search restored by Back', async ({ page }) => {
+    // Game 1 plays 4. i9h9 5. i0h0 6. b9c7. A variation from ply 3 plays the same moves in another order, reaching
+    // the same position; the recorded ply 6 is a different replay state, so its continuations load for it.
+    await page.goto('/archive/g/sample-game-central-cannon-001?ply=3')
+    const lineMoves = page.getByTestId('variation-moves').locator('li')
+    await page.locator('[data-testid="continuation-row"][data-move="b9c7"]').click()
+    await expect(lineMoves).toHaveCount(1)
+    await playBoardSquares(page, 'i0', 'h0')
+    await expect(lineMoves).toHaveCount(2)
+    await playBoardSquares(page, 'i9', 'h9')
+    await expect(lineMoves).toHaveCount(3)
+    const c3c4 = page.locator('[data-testid="continuation-row"][data-move="c3c4"]')
+    await expect(c3c4).toBeVisible()
+    // Selecting recorded ply 6 parks the variation and shows the recorded state, whose own lookup offers c3c4.
+    await page.getByTestId('archive-move').nth(5).click()
+    await expect(page.getByTestId('archive-move').nth(5)).toHaveAttribute('aria-current', 'step')
+    await expect(page.getByTestId('variation-resume')).toBeVisible()
+    await expect(c3c4).toBeVisible()
+
+    // A capture on the archive board is announced in the board's live region.
+    await page.goto('/archive/g/sample-game-central-cannon-001?ply=0')
+    await playBoardSquares(page, 'h2', 'h9')
+    await expect(page.getByTestId('variation-moves').locator('li')).toHaveCount(1)
+    await expect(page.locator('[aria-live="polite"]').filter({ hasText: 'capture' })).toHaveCount(1)
+
+    // A submitted search lives in the URL: Back restores the earlier query in the box and in the results.
+    await page.goto('/archive')
+    await page.getByTestId('player-search-input').fill('Chiu')
+    await page.getByTestId('player-search-btn').click()
+    await expect(page).toHaveURL(/q=Chiu/)
+    await expect(page.getByTestId('player-list').locator('li')).toHaveCount(1)
+    await page.getByTestId('player-search-input').fill('Ming')
+    await page.getByTestId('player-search-btn').click()
+    await expect(page).toHaveURL(/q=Ming/)
+    await expect(page.getByTestId('player-list').locator('li')).toHaveCount(2)
+    await page.goBack()
+    await expect(page).toHaveURL(/q=Chiu/)
+    await expect(page.getByTestId('player-search-input')).toHaveValue('Chiu')
+    await expect(page.getByTestId('player-list').locator('li')).toHaveCount(1)
+  })
+
   test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({
     page,
   }) => {
@@ -410,7 +530,7 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       if (m.type() === 'error') pageErrors.push(m.text())
     })
     await page.setViewportSize({ width: 1000, height: 640 })
-    await page.goto('/archive')
+    await page.goto('/archive/g/sample-game-central-cannon-001')
 
     await expect(page).toHaveTitle('Jade')
     await expect(page.getByTestId('brand-home-link')).toHaveText('Jade')

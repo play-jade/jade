@@ -2,7 +2,8 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
-import { loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
+import { useArchiveProvider } from '~/utils/archive-provider'
+import { latestArchiveDraft, loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
 import { capturedFaces, plateOrder, sideName, type Side } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
@@ -116,7 +117,25 @@ onMounted(async () => {
   // The kept variation reapplies only to the game it was made on, so it is read after the game.
   await nextTick()
   await session.restoreDraft()
+  void findKeptArchiveVariation()
 })
+
+/** The archive game whose variation this device kept most recently, linked from the home page. */
+const keptArchiveVariation = ref<{ gameId: string; title: string } | null>(null)
+
+async function findKeptArchiveVariation() {
+  const draft = await latestArchiveDraft()
+  if (!draft) return
+  const detail = await useArchiveProvider()
+    .gameDetail(draft.sourceId)
+    .catch(() => null)
+  // The game opens at the archive's current release; its variation returns only when that is the draft's release.
+  if (!detail || detail.release.release_id !== draft.sourceRevision) return
+  keptArchiveVariation.value = {
+    gameId: draft.sourceId,
+    title: `${detail.summary.red_display_name} – ${detail.summary.black_display_name}`,
+  }
+}
 
 watch(
   mainlineMovesUci,
@@ -278,11 +297,13 @@ const displayedMoves = computed(() => {
 const verdictBanner = computed(() => {
   const adj = boardData.value?.snapshot.adjudication
   if (!adj) return null
-  if (adj.reason === 'checkmate') return `${t('outcome.checkmate')} — ${adj.detail}`
-  if (adj.reason === 'stalemate') return `${t('outcome.no_legal_moves_loss')} — ${adj.detail}`
-  if (adj.reason === 'perpetual_check') return `${t('outcome.perpetual_check_loss')} — ${adj.detail}`
-  if (adj.reason === 'perpetual_chase') return `${t('outcome.perpetual_chase_loss')} — ${adj.detail}`
-  return `${adj.outcome}: ${adj.detail}`
+  // The result names the winner in the reader's locale, beside the core's reason (`xiangqi_core::ReasonCode`). A
+  // draw is shown as a draw; its rule has no glossary term yet, so no untranslated code is shown with it.
+  if (adj.outcome === 'draw') return t('outcome.draw')
+  const winner = adj.outcome === 'red_win' ? t('outcome.red_wins') : t('outcome.black_wins')
+  const reasonKey = `outcome.${adj.reason}`
+  const known = ['checkmate', 'no_legal_moves_loss', 'perpetual_check_loss', 'perpetual_chase_loss']
+  return known.includes(adj.reason) ? `${winner} — ${t(reasonKey)}` : winner
 })
 
 const sideToMove = computed<Side>(() => (boardData.value?.snapshot.side_to_move === 'black' ? 'black' : 'red'))
@@ -399,6 +420,14 @@ const moveRows = computed(() => {
           @export="exportVariation"
         />
 
+        <p v-if="keptArchiveVariation" class="kept-archive-variation" data-testid="kept-archive-variation">
+          Your variation in
+          <NuxtLink :to="`/archive/g/${keptArchiveVariation.gameId}`" data-testid="kept-archive-variation-link">
+            {{ keptArchiveVariation.title }}
+          </NuxtLink>
+          is kept on this device.
+        </p>
+
         <ol v-if="displayedMoves.length > 0" class="jade-move-list" data-testid="move-list">
           <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
             <span class="jade-move-number">{{ row.number }}</span>
@@ -504,6 +533,12 @@ const moveRows = computed(() => {
   display: flex;
   gap: 2px;
   padding-top: 8px;
+}
+
+.kept-archive-variation {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--jade-muted);
 }
 
 .invite {
