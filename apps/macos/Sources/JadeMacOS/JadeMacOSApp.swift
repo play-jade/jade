@@ -38,6 +38,11 @@ struct JadeMacOSLauncher {
             print("MACOS_COREGRAPHICS_PROOF_OK: \(outPath)")
             return
         }
+        if args.contains("--replay-list-proof") {
+            try HeadlessReplayListProof.run()
+            print("MACOS_REPLAY_LIST_PROOF_OK")
+            return
+        }
         NSApplication.shared.setActivationPolicy(.regular)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -479,7 +484,9 @@ final class MacBoardController: ObservableObject {
     var replayPlayers: (red: String, black: String)? {
         replayInfo.map { ($0.redName, $0.blackName) }
     }
-    private let replayStore = ReplayDraftStore.applicationSupport()
+    private let replayStore: ReplayDraftStore?
+    /// Where the open replay's game and ply are remembered between launches; nil remembers nothing.
+    private let defaults: UserDefaults?
     private static let lastReplayGameKey = "jade.replay.lastGameId"
     private static let lastReplayPlyKey = "jade.replay.lastPly"
     private static let startFen = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
@@ -493,12 +500,18 @@ final class MacBoardController: ObservableObject {
     let repoRoot: String
     private(set) var session: FfiGameSession
     private let audio: MacPieceAudioEngine
-    private let offlineStore = AppleOfflineSqliteStore(
-        directory: NSTemporaryDirectory(),
-        filename: "jade_macos_offline.sqlite3"
-    )
+    private let offlineStore: AppleOfflineSqliteStore
 
-    init() {
+    /// With `scratch`, everything this controller stores stays under that directory and no replay position is
+    /// remembered, so a headless proof never reads or changes what a Jade someone uses has kept.
+    init(scratch: URL? = nil) {
+        replayStore = scratch.map { ReplayDraftStore(directory: $0.appendingPathComponent("replay-drafts", isDirectory: true)) }
+            ?? ReplayDraftStore.applicationSupport()
+        defaults = scratch == nil ? .standard : nil
+        offlineStore = AppleOfflineSqliteStore(
+            directory: scratch?.path ?? NSTemporaryDirectory(),
+            filename: "jade_macos_offline.sqlite3"
+        )
         let root = resolveJadeRepoRoot()
         self.repoRoot = root
         LamplitTheme.registerFonts(repoRoot: root)
@@ -506,8 +519,8 @@ final class MacBoardController: ObservableObject {
         self.session = try! FfiGameSession(rulesProfile: "program-2023.11-v1")
         loadOfflineGameFromStore()
         // A replay open when the app quit comes back at the same game and position.
-        if let gameId = UserDefaults.standard.string(forKey: Self.lastReplayGameKey) {
-            openSampleGame(id: gameId, ply: UserDefaults.standard.integer(forKey: Self.lastReplayPlyKey))
+        if let gameId = defaults?.string(forKey: Self.lastReplayGameKey) {
+            openSampleGame(id: gameId, ply: defaults?.integer(forKey: Self.lastReplayPlyKey))
         }
     }
 
@@ -547,7 +560,7 @@ final class MacBoardController: ObservableObject {
               let rootFen = record["initial_fen"] as? String,
               let moves = record["moves_uci"] as? [String] else {
             statusLine = "The sample game \(id) could not be opened"
-            UserDefaults.standard.removeObject(forKey: Self.lastReplayGameKey)
+            defaults?.removeObject(forKey: Self.lastReplayGameKey)
             return
         }
         let next = ReplaySession(
@@ -564,7 +577,7 @@ final class MacBoardController: ObservableObject {
         replayRecordedNotated = notate(moves, from: rootFen)
         selectedUci = nil
         legalDestUcis.removeAll()
-        UserDefaults.standard.set(id, forKey: Self.lastReplayGameKey)
+        defaults?.set(id, forKey: Self.lastReplayGameKey)
         syncReplay()
     }
 
@@ -576,8 +589,8 @@ final class MacBoardController: ObservableObject {
         replayVariationNotated = []
         selectedUci = nil
         legalDestUcis.removeAll()
-        UserDefaults.standard.removeObject(forKey: Self.lastReplayGameKey)
-        UserDefaults.standard.removeObject(forKey: Self.lastReplayPlyKey)
+        defaults?.removeObject(forKey: Self.lastReplayGameKey)
+        defaults?.removeObject(forKey: Self.lastReplayPlyKey)
         loadOfflineGameFromStore()
     }
 
@@ -621,7 +634,7 @@ final class MacBoardController: ObservableObject {
         } else {
             replayVariationNotated = []
         }
-        UserDefaults.standard.set(replay.cursor, forKey: Self.lastReplayPlyKey)
+        defaults?.set(replay.cursor, forKey: Self.lastReplayPlyKey)
         replayRevision += 1
         refreshStatus()
     }
@@ -1055,23 +1068,33 @@ struct ReplayColumn: View {
                 Text(info.event).font(.system(size: 13, weight: .semibold))
                 Text(info.provenance).font(.system(size: 11)).foregroundStyle(LamplitTheme.vermilionOnDark)
                 recordFacts(info, replay: replay)
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        plyButton(0, "Start", current: !replay.isInVariation && replay.cursor == 0)
-                        ForEach(Array(controller.replayRecordedNotated.enumerated()), id: \.offset) { index, text in
-                            let ply = index + 1
-                            plyButton(ply, "\((index / 2) + 1)\(index % 2 == 0 ? "." : "…") \(text)",
-                                      current: !replay.isInVariation && replay.cursor == ply)
+                // The list keeps its place across one game's replay changes and brings the shown ply into view, so
+                // stepping through a long game never loses it off the end of the list. A game opened in its place
+                // gets a list of its own, which starts from that game's shown ply and not from the last game's place.
+                ScrollViewReader { list in
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            plyButton(0, "Start", current: !replay.isInVariation && replay.cursor == 0).id(0)
+                            ForEach(Array(controller.replayRecordedNotated.enumerated()), id: \.offset) { index, text in
+                                let ply = index + 1
+                                plyButton(ply, "\((index / 2) + 1)\(index % 2 == 0 ? "." : "…") \(text)",
+                                          current: !replay.isInVariation && replay.cursor == ply)
+                                    .id(ply)
+                            }
                         }
                     }
+                    .onAppear { if !replay.isInVariation { list.scrollTo(replay.cursor, anchor: .center) } }
+                    .onChange(of: controller.replayRevision) {
+                        if let shown = controller.replay, !shown.isInVariation { list.scrollTo(shown.cursor) }
+                    }
                 }
+                .id(ObjectIdentifier(replay))
                 variationSection(replay)
                 Rectangle().fill(LamplitTheme.hairline).frame(height: 1)
                 statusSection(replay)
             }
             .padding(.trailing, 40)
             .padding(.bottom, 96)
-            .id(controller.replayRevision)
         }
     }
 
@@ -1370,6 +1393,180 @@ final class MacCoreGraphicsBoardNSView: NSView {
             return el
         }
         setAccessibilityChildren(axElements)
+    }
+}
+
+/// Hosts the real replay column off screen and steps through a sample game: the move list appears with the shown ply in
+/// view, keeps its place between plies already in view, brings a far ply into view, redraws its rows for the ply that
+/// is shown, stays at its top while a variation is shown, and starts afresh for each game opened in it.
+enum HeadlessReplayListProof {
+    struct Failure: Error, CustomStringConvertible { let description: String }
+
+    static func run() throws {
+        // The controller keeps what it stores under a scratch directory of this run and remembers no replay position,
+        // so the proof never reads or changes what a Jade someone uses has kept.
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jade-replay-list-proof-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let controller = MacBoardController(scratch: scratch)
+        // The proof plays moves, and must play no piece sound on the machine it runs on.
+        controller.soundEnabled = false
+        guard let game = controller.sampleGames().first else { throw Failure(description: "no sample game") }
+        controller.openSampleGame(id: game.id, ply: 0)
+        guard let plies = controller.replay?.recordedMovesUci.count, plies >= 4 else {
+            throw Failure(description: "the sample game is too short to scroll")
+        }
+
+        // An expected change is awaited, within a bound; a place that must not change is read after the same pause.
+        func pause() { RunLoop.main.run(until: Date().addingTimeInterval(0.5)) }
+        func expect(_ what: @autoclosure () -> String, _ reached: () throws -> Bool) throws {
+            let deadline = Date().addingTimeInterval(10)
+            while try !reached() {
+                guard Date() < deadline else { throw Failure(description: what()) }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+        }
+        func scrollView(in view: NSView) -> NSScrollView? {
+            if let found = view as? NSScrollView { return found }
+            return view.subviews.lazy.compactMap(scrollView(in:)).first
+        }
+        /// The real column, hosted off screen in a window of its own, at a height that leaves its list a few rows.
+        func hostColumn(height: CGFloat = 420) throws -> (window: NSWindow, host: NSView) {
+            let host = NSHostingView(rootView: ReplayColumn(controller: controller).frame(width: 320, height: height))
+            let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 320, height: height),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            // Closed by the proof and released by its last reference, never by the close itself.
+            window.isReleasedWhenClosed = false
+            window.orderBack(nil)
+            var seen = "no scroll view"
+            try expect("the hosted move list cannot prove scrolling: \(seen)") {
+                guard let list = scrollView(in: host), let rows = list.documentView else { return false }
+                seen = "rows \(rows.frame.height) high in a view \(list.contentView.bounds.height) high"
+                return list.contentView.bounds.height >= 56 && rows.frame.height > list.contentView.bounds.height + 40
+            }
+            return (window, host)
+        }
+        /// Plays a legal move at the shown position as a reader does, by its two squares, and returns it.
+        func playLegalMove() throws -> String {
+            guard let move = (try? controller.session.summary())?.legalMovesUci.first, move.utf8.count == 4 else {
+                throw Failure(description: "the shown position has no legal move to play")
+            }
+            let squares = Array(move.utf8)
+            controller.activateSquare(file: Int(squares[0]) - 97, rank: Int(squares[1]) - 48)
+            controller.activateSquare(file: Int(squares[2]) - 97, rank: Int(squares[3]) - 48)
+            return move
+        }
+        // Each reading finds the column's list afresh: a column rebuilt since the last one has another list.
+        func offset(_ host: NSView) -> CGFloat { scrollView(in: host)?.contentView.bounds.origin.y ?? -1 }
+        /// Whether the column has its list, with rows, at the very top. A column without one is not at its top.
+        func atTop(_ host: NSView) -> Bool {
+            guard let list = scrollView(in: host), list.documentView != nil else { return false }
+            return list.contentView.bounds.origin.y < 0.5
+        }
+        /// Whether the list's last row lies wholly inside the view: the view reaches the end of the rows.
+        func showsLastRow(_ host: NSView) -> Bool {
+            guard let list = scrollView(in: host), let rows = list.documentView else { return false }
+            return list.contentView.bounds.maxY >= rows.frame.height - 0.5
+        }
+        // What the column draws, to tell a list whose rows were redrawn for the new ply from one left as it was.
+        func drawn(_ host: NSView) -> Data? {
+            guard let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+            host.cacheDisplay(in: host.bounds, to: image)
+            return image.tiffRepresentation
+        }
+
+        let (window, host) = try hostColumn()
+        guard let list = scrollView(in: host) else { throw Failure(description: "the move list has no scroll view") }
+        defer { window.close() }
+
+        // Scrolled to a place of the reader's own, the list stays exactly there when a ply already in view is
+        // selected: a list rebuilt for each change would lose the place.
+        let rowHeight = (list.documentView?.frame.height ?? 0) / CGFloat(plies + 1)
+        let ownPlace: CGFloat = 40
+        list.contentView.scroll(to: NSPoint(x: 0, y: ownPlace))
+        list.reflectScrolledClipView(list.contentView)
+        pause()
+        guard abs(offset(host) - ownPlace) < 0.5 else {
+            throw Failure(description: "the list could not be put at a place of the reader's own (offset \(offset(host)))")
+        }
+        let drawnBefore = drawn(host)
+        controller.replaySelectPly(Int(ownPlace / rowHeight) + 2)
+        try expect("the list does not draw a selected ply that is in view as shown") { drawn(host) != drawnBefore }
+        pause()
+        guard abs(offset(host) - ownPlace) < 0.5 else {
+            throw Failure(description: "selecting a ply already in view moved the list (offset \(ownPlace) -> \(offset(host)))")
+        }
+
+        // The last ply is off the view from there, and selecting it brings its whole row into view.
+        guard !showsLastRow(host) else { throw Failure(description: "the last ply is already in view from the reader's place") }
+        controller.replaySelectPly(plies)
+        try expect("selecting the last ply did not bring its row into view") { showsLastRow(host) }
+        let atEnd = offset(host)
+        guard let drawnAtEnd = drawn(host) else { throw Failure(description: "the column could not be drawn") }
+
+        // A step to the neighbouring ply, already in view, leaves the list where it is and redraws its rows.
+        controller.replaySelectPly(plies - 1)
+        try expect("the list still draws the last ply as shown after a step to its neighbour") { drawn(host) != drawnAtEnd }
+        pause()
+        guard abs(offset(host) - atEnd) < 0.5 else {
+            throw Failure(description: "a step to the neighbouring ply moved the list (offset \(atEnd) -> \(offset(host)))")
+        }
+        controller.replaySelectPly(plies)
+        try expect("returning to the last ply does not draw the list as it was drawn there before") { drawn(host) == drawnAtEnd }
+
+        // A column that appears while the last ply is shown has that ply in view from the start.
+        let (lastWindow, lastHost) = try hostColumn()
+        defer { lastWindow.close() }
+        try expect("the column appeared without its shown ply, the last, in view") { showsLastRow(lastHost) }
+
+        // With a variation shown from the last ply, no recorded row is the shown one, so a column that appears then
+        // stays at its top.
+        let move = try playLegalMove()
+        guard controller.replay?.isInVariation == true, controller.replay?.cursor == plies else {
+            throw Failure(description: "playing \(move) at the last ply did not start a variation there")
+        }
+        // The variation's own section takes room from the list, so this column is hosted taller.
+        let (variationWindow, variationHost) = try hostColumn(height: 480)
+        defer { variationWindow.close() }
+        pause()
+        guard atTop(variationHost) else {
+            throw Failure(description: "a column that appeared with a variation shown scrolled to a recorded ply (offset \(offset(variationHost)))")
+        }
+        // Extending the variation changes the replay, and the list still does not jump to a recorded ply.
+        let drawnInVariation = drawn(variationHost)
+        let revisionInVariation = controller.replayRevision
+        let reply = try playLegalMove()
+        guard controller.replay?.variation?.movesUci == [move, reply], controller.replayRevision > revisionInVariation else {
+            throw Failure(description: "playing \(reply) did not extend the variation")
+        }
+        try expect("extending the variation with \(reply) did not change what the column draws") {
+            drawn(variationHost) != drawnInVariation
+        }
+        pause()
+        guard atTop(variationHost) else {
+            throw Failure(description: "extending a variation scrolled the list to a recorded ply (offset \(offset(variationHost)))")
+        }
+
+        // Another game opened in a column already on screen starts at its own shown ply, and the first game, opened
+        // again with its variation restored, starts at the top: neither inherits the other's place. The column
+        // used is the one just seen at its top, so each place it reaches is one it was seen not to hold before.
+        let games = controller.sampleGames()
+        guard games.count >= 2 else { throw Failure(description: "the sample archive has no second game") }
+        controller.openSampleGame(id: games[1].id)
+        guard controller.replay?.isInVariation == false else { throw Failure(description: "the second game opened in a variation") }
+        try expect("the second game did not open with its shown ply, the last, in view") {
+            offset(variationHost) > 20 && showsLastRow(variationHost)
+        }
+        controller.openSampleGame(id: game.id)
+        guard controller.replay?.isInVariation == true else {
+            throw Failure(description: "the first game did not come back with its variation shown")
+        }
+        try expect("a game opened with a variation shown inherited the last game's place (offset \(offset(variationHost)))") {
+            atTop(variationHost)
+        }
+        print("replay list offsets: last ply \(atEnd), reader's place \(ownPlace), variation shown \(offset(variationHost))")
     }
 }
 
