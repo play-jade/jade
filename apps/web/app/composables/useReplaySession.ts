@@ -184,7 +184,8 @@ export function useReplaySession(options: ReplaySessionOptions) {
       // A new variation replaces the retained one, which stays in memory until the replacement is stored.
       const superseded = parked.value
       variation.value = { originPly: cursor.value, movesUci: [uci] }
-      if ((await persist()) && parked.value === superseded) parked.value = null
+      // An Undo meanwhile removed the replacement and stored the retained line again, so that line then stays.
+      if ((await persist()) && parked.value === superseded && variation.value) parked.value = null
       return { kind: 'variation', applied }
     }
     await persist()
@@ -248,7 +249,11 @@ export function useReplaySession(options: ReplaySessionOptions) {
     const key = replayDraftId(source.kind, source.id, ownerScope.value)
     void enqueue(key, async () => {
       const result = await deleteReplayDraft(key)
-      if (!result.ok && write === writes) saveState.value = { state: 'unsaved', reason: result.reason }
+      if (!result.ok && write === writes) {
+        saveState.value = { state: 'unsaved', reason: result.reason }
+        // With no line left the save status is hidden, so the failure is also a notice: a reload may bring it back.
+        draftNotice.value = `The saved variation could not be removed (${result.reason}); it may return on reload.`
+      }
       return result.ok
     })
   }
@@ -392,6 +397,11 @@ export function useReplaySession(options: ReplaySessionOptions) {
       const now = options.source.value
       return now !== null && replayDraftId(now.kind, now.id, ownerScope.value) === draftId
     }
+    // Earlier saves and removals of this key in the tab finish first, so a restore never reads a row already replaced.
+    await writeChains.get(draftId)?.then(
+      () => undefined,
+      () => undefined,
+    )
     const read = await loadReplayDraft(draftId)
     if (!stillCurrent()) return
     if (read.status === 'unavailable') {
@@ -433,6 +443,8 @@ export function useReplaySession(options: ReplaySessionOptions) {
     (length, before) => {
       const line = variation.value ?? parked.value
       if (length === before || !line) return
+      // A selected ply past the shortened record is not on it; the stored cursor must be one restore accepts.
+      if (activeMode.value === 'recorded' && cursor.value > length) cursor.value = length
       if (line.originPly <= Math.min(length, before)) {
         void persist()
         return
@@ -440,7 +452,7 @@ export function useReplaySession(options: ReplaySessionOptions) {
       edits++
       variation.value = null
       parked.value = null
-      if (cursor.value > length) cursor.value = length
+      cursor.value = Math.min(cursor.value, length, line.originPly)
       draftNotice.value = 'The variation started from a move that was taken back, so it was removed.'
       forgetStoredDraft()
     },

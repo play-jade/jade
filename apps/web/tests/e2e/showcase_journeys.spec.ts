@@ -328,6 +328,39 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     await page.reload()
     await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
     await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+
+    // Undo on the board takes back a variation's only move, and a reload does not bring it back.
+    await playBoardSquares(page, 'h2', 'e2')
+    await playBoardSquares(page, 'h9', 'g7')
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+    await expect.poll(() => storedDraftCount(page)).toBe(0)
+    await page.reload()
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.getByTestId('move-list')).toContainText('H8+7')
+    await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+
+    // Undo of a game move after the kept variation's start stores it again, so a reload still offers it.
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.getByTestId('variation-return').click()
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('move-list')).not.toContainText('H8+7')
+    await expect(page.getByTestId('variation-saving')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.reload()
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.getByTestId('variation-resume')).toBeVisible({ timeout: 10_000 })
+
+    // Undo of the move it started from removes it, says so, and leaves nothing stored.
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('variation-notice')).toContainText('taken back')
+    await expect(page.getByTestId('variation-resume')).toHaveCount(0)
+    await expect.poll(() => storedDraftCount(page)).toBe(0)
   })
 
   test('7. Without browser storage, a variation reports it is not saved and still exports', async ({ page }) => {
