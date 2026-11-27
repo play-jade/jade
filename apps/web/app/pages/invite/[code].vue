@@ -308,6 +308,24 @@ function refreshConfirmation() {
 }
 
 /**
+ * A snapshot the room could not read still says the match changed if it names the shown match at a newer version:
+ * the sharing shown may be superseded, so it stays unconfirmed until a readable snapshot that new.
+ */
+function noteUnreadable(data: unknown) {
+  if (typeof data !== 'object' || data === null || !snapshot.value) return
+  const d = data as Record<string, unknown>
+  const version = d.state_version
+  if (
+    d.match_id === snapshot.value.match_id &&
+    Number.isSafeInteger(version) &&
+    (!shownVersion || (version as number) > shownVersion.version)
+  ) {
+    requiredVersion = Math.max(requiredVersion, version as number)
+    refreshConfirmation()
+  }
+}
+
+/**
  * Installs a snapshot from the stream or any HTTP reply and reports whether it was taken. The server advances a match's
  * state version with every change it stores, so a snapshot of the shown match is taken only when its version is newer:
  * whatever order the routes deliver them in, the room never goes back. Within one turn (same sequence and phase) the
@@ -324,10 +342,7 @@ function install(snap: MatchSnapshot): boolean {
   // A snapshot whose effective visibility cannot be read is not shown. A newer one means the visibility shown may be
   // superseded, so it stays unconfirmed until a valid snapshot that new; a stale one changes nothing.
   if (!VISIBILITIES.includes(snap.visibility)) {
-    if (sameMatch && versioned && (!shownVersion || (version as number) > shownVersion.version)) {
-      requiredVersion = Math.max(requiredVersion, version as number)
-      refreshConfirmation()
-    }
+    noteUnreadable(snap)
     return false
   }
   if (current && sameMatch) {
@@ -341,7 +356,14 @@ function install(snap: MatchSnapshot): boolean {
       return false
     }
   }
-  const sameTurn = current !== null && sameMatch && current.seq === snap.seq && current.status === snap.status
+  // The turn continues while the phase, the side to move, and the moves are unchanged (a draw offer or a takeback
+  // request adds an event but not a turn), so its clocks only run down.
+  const sameTurn =
+    current !== null &&
+    sameMatch &&
+    current.status === snap.status &&
+    current.side_to_move === snap.side_to_move &&
+    current.moves_uci.length === snap.moves_uci.length
   snapshot.value = snap
   shownVersion = versioned ? { matchId: snap.match_id, version: version as number } : null
   refreshConfirmation()
@@ -350,20 +372,24 @@ function install(snap: MatchSnapshot): boolean {
   return true
 }
 
-/** Brings the running clock, and only it, down to a reading of the same turn when that reading is lower. */
+/**
+ * Brings the running clock, and only it, down to a reading of the same turn when that reading is lower than the clock
+ * as it stands now (projected from its anchor, not the last frame drawn).
+ */
 function lowerRunningClock(snap: MatchSnapshot) {
   if (snap.status !== 'playing') return
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const elapsed = Math.max(0, now - clockAnchorPerfMs)
   if (snap.side_to_move === 'red') {
     const incoming = snap.red_remaining_ms
-    if (incoming !== null && displayRedMs.value !== null && incoming < displayRedMs.value) {
+    if (incoming !== null && baseRedMs !== null && incoming < baseRedMs - elapsed) {
       baseRedMs = incoming
       clockAnchorPerfMs = now
       displayRedMs.value = incoming
     }
   } else {
     const incoming = snap.black_remaining_ms
-    if (incoming !== null && displayBlackMs.value !== null && incoming < displayBlackMs.value) {
+    if (incoming !== null && baseBlackMs !== null && incoming < baseBlackMs - elapsed) {
       baseBlackMs = incoming
       clockAnchorPerfMs = now
       displayBlackMs.value = incoming
@@ -454,6 +480,7 @@ async function refreshChoices(): Promise<boolean> {
     const read: unknown = resp.ok ? await resp.json().catch(() => null) : null
     // A read of another match, or one missing what the room reads, is a failed read: none of it is used.
     const snap = isSnapshotOf(read, matchId) ? read : null
+    if (!snap) noteUnreadable(read)
     if (roomStopped.value) return false
     // Only a snapshot actually shown counts as confirmed; one ignored as older or malformed does not.
     const shown = snap ? hydrateChoices(snap) : false
@@ -595,7 +622,8 @@ function connectMatchWebSocket(matchId: string) {
     if (roomStopped.value) return
     try {
       const data = JSON.parse(String(ev.data))
-      if (isSnapshotOf(data, snapshot.value?.match_id)) {
+      if (!isSnapshotOf(data, snapshot.value?.match_id)) noteUnreadable(data)
+      else {
         const prevLen = snapshot.value?.moves_uci.length ?? 0
         install(data)
         hydrateChoices(data)
@@ -665,7 +693,8 @@ async function recoverGapAndReconnect(matchId: string) {
       // A read answered after the room stopped belongs to the guest it no longer holds; it is dropped.
       if (roomStopped.value) return
       // An unreadable read installs nothing, and the stream can still be reopened below.
-      if (isSnapshotOf(snap, matchId)) {
+      if (!isSnapshotOf(snap, matchId)) noteUnreadable(snap)
+      else {
         install(snap)
         hydrateChoices(snap)
         if (roomStopped.value) return
@@ -756,6 +785,7 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
   }
   const matchId = snapshot.value?.match_id
   if (!isSnapshotOf(data, matchId)) {
+    noteUnreadable(data)
     // The command may have been played; the room is left as it is and the match is read again rather than guessed.
     errorBanner.value = 'The reply to that move could not be read; showing the match as the server has it.'
     if (matchId) void recoverGapAndReconnect(matchId)

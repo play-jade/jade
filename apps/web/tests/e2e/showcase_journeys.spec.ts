@@ -824,6 +824,25 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect.poll(seconds).toBeLessThanOrEqual(running - 29)
       expect(await clockSeconds('red')).toBe(stoppedBefore)
 
+      // A newer snapshot of the same turn is taken, and its older, higher reading gives no time back.
+      const current = JSON.parse(lastRedFrame)
+      const version: number = current.state_version
+      const send = (frame: object) => redStreams[redStreams.length - 1]!.send(JSON.stringify(frame))
+      const runningNow = await seconds()
+      send({ ...current, state_version: version + 1, visibility: 'unlisted', black_remaining_ms: (runningNow + 20) * 1000 })
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Unlisted')
+      expect(await seconds()).toBeLessThanOrEqual(runningNow)
+
+      // A newer frame without a readable visibility leaves sharing unconfirmed; an older readable one does not confirm
+      // it, and a readable one that new does.
+      send({ ...current, state_version: version + 3, visibility: null })
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      send({ ...current, state_version: version + 2, visibility: 'public' })
+      await redPage.waitForTimeout(300)
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      send({ ...current, state_version: version + 3, visibility: 'public' })
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
       // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
       let releaseSave: () => void = () => {}
       const saveGate = new Promise<void>((resolve) => (releaseSave = resolve))
@@ -955,6 +974,33 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect.poll(() => closedByPage).toBe(true)
       await page.waitForTimeout(1_500)
       expect(streams.length).toBe(2)
+    } finally {
+      await context.close()
+    }
+  })
+
+  test('13. A room whose opening snapshot cannot be read says so and opens no stream', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const page = await context.newPage()
+      const streams: WebSocketRoute[] = []
+      await page.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        streams.push(stream)
+        stream.connectToServer()
+      })
+      await page.route(/\/api\/v1\/invitations\/[^/]+\/join$/, async (route) => {
+        const response = await route.fetch()
+        const body = await response.json()
+        body.snapshot.visibility = 'unknown'
+        await route.fulfill({ response, json: body })
+      })
+      await page.goto('/')
+      await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await page.getByTestId('create-invite-btn').click()
+      await page.waitForURL(/\/invite\/[a-z0-9]+/)
+      await expect(page.getByTestId('match-error')).toContainText('cannot read')
+      await page.waitForTimeout(1_500)
+      expect(streams.length).toBe(0)
     } finally {
       await context.close()
     }
