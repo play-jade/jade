@@ -31,7 +31,10 @@ cargo test --workspace                                 # rules, notation, geomet
 cargo run --release -p jade-asset-pipeline -- --verify # board art, glyphs, audio and manifest
 ./dev/build-engines.sh                                 # native UCI engine and mobile bridge
 pnpm --dir apps/web build && pnpm --dir apps/web exec playwright test
+PLAYWRIGHT_BASE_URL=https://<host> pnpm --dir apps/web exec playwright test  # the journeys against a deployed origin
 ```
+
+Against a deployed origin the suite starts no servers, adds a journey that checks the match API and its stream are served by that origin, and expects the deployment to serve the sample archive, as journeys 4, 5, 8 and 9 read its two games.
 
 Changes go through [Bosun](../bosun.yaml); see [`AGENTS.md`](../AGENTS.md) for the evidence each change carries.
 

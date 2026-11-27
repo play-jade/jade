@@ -8,8 +8,12 @@ const repoRoot = resolve(currentDir, '../..')
 const fastTargetDir = existsSync('/tmp/jade-target-core') ? '/tmp/jade-target-core' : undefined
 
 // With PLAYWRIGHT_BASE_URL set, the journeys run against that deployed origin (its match server and web application
-// behind one host) and start no local servers.
+// behind one host) and start no local servers. A set but empty or relative value is refused rather than read as unset,
+// so a qualification run never falls back to local servers.
 const deployedOrigin = process.env.PLAYWRIGHT_BASE_URL
+if (deployedOrigin !== undefined && !URL.canParse(deployedOrigin)) {
+  throw new Error(`PLAYWRIGHT_BASE_URL must be the deployed origin's absolute URL, not ${JSON.stringify(deployedOrigin)}`)
+}
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -17,10 +21,10 @@ export default defineConfig({
   workers: 1,
   timeout: 45_000,
   use: {
-    baseURL: deployedOrigin || 'http://127.0.0.1:3180',
+    baseURL: deployedOrigin ?? 'http://127.0.0.1:3180',
     trace: 'off',
   },
-  webServer: deployedOrigin ? [] : [
+  webServer: deployedOrigin !== undefined ? [] : [
     {
       command: 'cargo run -p jade-match-server',
       cwd: repoRoot,

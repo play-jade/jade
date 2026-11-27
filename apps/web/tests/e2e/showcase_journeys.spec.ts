@@ -37,6 +37,39 @@ async function playBoardSquares(page: Page, fromSq: string, toSq: string) {
 }
 
 test.describe('Jade Slice A Web Showcase Journeys', () => {
+  test('15. A deployed origin serves the match API and its stream itself', async ({ browser }) => {
+    const deployedOrigin = process.env.PLAYWRIGHT_BASE_URL
+    test.skip(deployedOrigin === undefined, 'runs only against a deployed origin (PLAYWRIGHT_BASE_URL)')
+    const origin = new URL(deployedOrigin!)
+    const socketScheme = origin.protocol === 'https:' ? 'wss:' : 'ws:'
+    const context = await browser.newContext()
+    const matchRequests: URL[] = []
+    const sockets: URL[] = []
+    context.on('request', (request) => {
+      const url = new URL(request.url())
+      if (url.pathname.startsWith('/api/v1/')) matchRequests.push(url)
+    })
+    const page = await context.newPage()
+    page.on('websocket', (socket) => sockets.push(new URL(socket.url())))
+    try {
+      // An invitation takes a guest session and a new match over HTTP, and its waiting room opens the match stream.
+      await page.goto('/')
+      await page.getByTestId('create-invite-btn').click()
+      await page.waitForURL(/\/invite\/[a-z0-9]+/)
+      await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
+      await expect.poll(() => sockets.length).toBeGreaterThan(0)
+
+      expect(matchRequests.length).toBeGreaterThan(0)
+      for (const url of matchRequests) expect(url.origin, url.href).toBe(origin.origin)
+      for (const url of sockets) {
+        expect(url.protocol, url.href).toBe(socketScheme)
+        expect(url.host, url.href).toBe(origin.host)
+      }
+    } finally {
+      await context.close()
+    }
+  })
+
   test('0. Home board renders on first load without any interaction', async ({ page, request }) => {
     const ssr = await request.get('/')
     const html = await ssr.text()
