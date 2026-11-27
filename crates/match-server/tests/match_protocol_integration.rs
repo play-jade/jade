@@ -2839,16 +2839,29 @@ async fn a_configured_origin_replaces_the_local_ones() {
 
 #[test]
 fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
-    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("jade-origins-{}-{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let db = dir.join("game.db");
+    // A directory created for this run alone; the server runs inside it and opens a relative file name, so the files
+    // checked below are exactly the ones it would create.
+    let dir = loop {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let candidate =
+            std::env::temp_dir().join(format!("jade-origins-{}-{nanos}", std::process::id()));
+        if std::fs::create_dir(&candidate).is_ok() {
+            break candidate;
+        }
+    };
     let start = |origins: &std::ffi::OsStr| {
+        let log = dir.join("stderr.log");
         let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_jade-match-server"))
+            .current_dir(&dir)
+            .env_remove("DATABASE_URL_FILE")
             .env("JADE_BIND_ADDR", "127.0.0.1:0")
-            .env("DATABASE_URL", format!("sqlite:{}?mode=rwc", db.display()))
+            .env("DATABASE_URL", "sqlite:game.db?mode=rwc")
             .env("JADE_ALLOWED_ORIGINS", origins)
-            .stderr(std::process::Stdio::piped())
+            // A file, not a pipe, so a long panic report cannot block the server while it stops.
+            .stderr(std::fs::File::create(&log).unwrap())
             .spawn()
             .unwrap();
         // Bounded: a server that started instead of stopping fails the test rather than hanging it.
@@ -2863,15 +2876,15 @@ fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
-        let mut stderr = String::new();
-        std::io::Read::read_to_string(&mut server.stderr.take().unwrap(), &mut stderr).unwrap();
-        (status, stderr)
+        (status, std::fs::read_to_string(&log).unwrap())
     };
-    let mut settings = vec![std::ffi::OsString::from("https://play.example,")];
-    #[cfg(unix)]
-    settings.push(
-        <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![b'h', b't', 0xff]),
-    );
+    let settings: Vec<std::ffi::OsString> = [
+        Some(std::ffi::OsString::from("https://play.example,")),
+        non_unicode_setting(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     for setting in settings {
         let (status, stderr) = start(&setting);
         assert!(!status.success(), "{setting:?}");
@@ -2879,11 +2892,30 @@ fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
             stderr.contains("JADE_ALLOWED_ORIGINS"),
             "{setting:?}: {stderr}"
         );
-        assert!(!db.exists(), "{setting:?}: no database is created");
+        assert!(
+            !dir.join("game.db").exists(),
+            "{setting:?}: no database is created"
+        );
         assert!(
             !dir.join("game.db.owner.lock").exists(),
             "{setting:?}: no owner lock is taken"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A setting that is present but not UTF-8, which only Unix environments can hold.
+fn non_unicode_setting() -> Option<std::ffi::OsString> {
+    #[cfg(unix)]
+    {
+        Some(
+            <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![
+                b'h', b't', 0xff,
+            ]),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
