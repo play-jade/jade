@@ -59,17 +59,20 @@ const emit = defineEmits<{
       <span v-if="props.willReplaceDraft" class="variation-note">A new variation replaces it.</span>
     </template>
 
-    <span v-if="props.saveState.state === 'saved'" class="variation-note" data-testid="variation-saved">
-      Saved on this device
-    </span>
-    <span v-else-if="props.saveState.state === 'pending'" class="variation-note" data-testid="variation-saving">
-      Saving…
-    </span>
-    <template v-else-if="props.saveState.state === 'unsaved'">
-      <span class="variation-warn" data-testid="variation-unsaved">Not saved: {{ props.saveState.reason }}</span>
+    <!-- The save status and export describe a line; with none shown, only a notice says what happened. -->
+    <template v-if="props.variation || props.parked">
+      <span v-if="props.saveState.state === 'saved'" class="variation-note" data-testid="variation-saved">
+        Saved on this device
+      </span>
+      <span v-else-if="props.saveState.state === 'pending'" class="variation-note" data-testid="variation-saving">
+        Saving…
+      </span>
+      <template v-else-if="props.saveState.state === 'unsaved'">
+        <span class="variation-warn" data-testid="variation-unsaved">Not saved: {{ props.saveState.reason }}</span>
       <button type="button" class="jade-pill-btn" data-testid="variation-export" @click="emit('export')">
-        Export variation
-      </button>
+          Export variation
+        </button>
+      </template>
     </template>
 
     <ol v-if="lineMoves.length > 0" class="variation-moves" data-testid="variation-moves" aria-label="Variation moves">
