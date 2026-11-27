@@ -187,6 +187,32 @@ async fn durable_test_db(label: &str) -> TestDb {
     }
 }
 
+/// A started 10+5 match between two new guests on a fresh test database, with direct access to that database.
+struct TestMatch {
+    test_db: TestDb,
+    db: sqlx::AnyPool,
+    app: axum::Router,
+    red: GuestSessionResponse,
+    match_id: String,
+}
+
+async fn test_match() -> TestMatch {
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    TestMatch {
+        test_db,
+        db,
+        app,
+        red,
+        match_id,
+    }
+}
+
 async fn json_body<T: serde::de::DeserializeOwned>(resp: axum::response::Response) -> T {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
@@ -2215,13 +2241,13 @@ async fn a_read_only_session_check_sets_no_cookie() {
 
 #[tokio::test]
 async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
-    let test_db = test_db().await;
-    let state = build_app_state(&test_db.url).await.unwrap();
-    let db = state.db.clone();
-    let app = build_router(state);
-    let (red, _) = new_guest(&app, "Red").await;
-    let (blk, _) = new_guest(&app, "Black").await;
-    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let TestMatch {
+        test_db: _test_db,
+        db,
+        app,
+        red,
+        match_id,
+    } = test_match().await;
     let mv = MatchCommandRequest::Move {
         protocol: 1,
         match_id: match_id.clone(),
@@ -2524,13 +2550,13 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
 
 #[tokio::test]
 async fn command_ids_have_one_bound_on_every_backend() {
-    let test_db = test_db().await;
-    let state = build_app_state(&test_db.url).await.unwrap();
-    let db = state.db.clone();
-    let app = build_router(state);
-    let (red, _) = new_guest(&app, "Red").await;
-    let (blk, _) = new_guest(&app, "Black").await;
-    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let TestMatch {
+        test_db: _test_db,
+        db,
+        app,
+        red,
+        match_id,
+    } = test_match().await;
     let mv = |id: String| MatchCommandRequest::Move {
         protocol: 1,
         match_id: match_id.clone(),
