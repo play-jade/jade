@@ -472,29 +472,55 @@ enum SqliteTarget {
     File(std::path::PathBuf),
 }
 
-/// Classifies a SQLite setting with the same parse the pool applies, so the owner lock and the pool always mean the
-/// same database however the setting is spelled. A durable `file:` URI is refused: SQLite would open the file it names,
-/// which the owner lock could not follow.
+/// Classifies a SQLite setting by one explicit grammar, so the owner lock and the pool always mean the same database:
+/// after the `sqlite:` prefixes the driver strips, `:memory:` or an empty name is the in-memory database, and anything
+/// else is a durable file named plainly. A setting that could be read two ways is refused rather than guessed at: a
+/// `#`, `mode=memory` beside a file name, a `file:` URI (SQLite would open the file it names, which the owner lock
+/// could not follow), or a file name that the SQLite parser and the pool's parse read differently.
 fn sqlite_target(db_url: &str) -> Result<SqliteTarget, sqlx::Error> {
-    let any: sqlx::any::AnyConnectOptions = db_url.parse()?;
-    let options = sqlx::sqlite::SqliteConnectOptions::try_from(&any)?;
-    let name = options.get_filename().to_string_lossy().into_owned();
-    let pairs = || any.database_url.query_pairs();
-    if name.starts_with("file:sqlx-in-memory-")
-        || pairs().any(|(key, value)| key == "mode" && value == "memory")
-    {
-        let kept = pairs()
+    let refuse = |why: &str| {
+        Err(sqlx::Error::Configuration(
+            format!("unsupported SQLite database setting: {why}").into(),
+        ))
+    };
+    let rest = db_url
+        .trim_start_matches("sqlite://")
+        .trim_start_matches("sqlite:");
+    let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if db_url.contains('#') {
+        return refuse("a '#' can be read as a fragment or as part of the name");
+    }
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    let memory_mode = pairs
+        .iter()
+        .any(|(key, value)| key == "mode" && value == "memory");
+    if name == ":memory:" || name.is_empty() {
+        // The driver checks the options; the pool opens one shared in-memory database in their place.
+        let _: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
+        let kept = pairs
+            .into_iter()
             .filter(|(key, _)| key != "mode" && key != "cache")
-            .map(|(key, value)| (key.into_owned(), value.into_owned()))
             .collect();
         return Ok(SqliteTarget::Memory(kept));
     }
-    if name.starts_with("file:") {
-        return Err(sqlx::Error::Configuration(
-            "a durable SQLite database is named by its file name, not a file: URI".into(),
-        ));
+    if memory_mode {
+        return refuse(
+            "an in-memory database is named sqlite::memory:, not a file name with mode=memory",
+        );
     }
-    Ok(SqliteTarget::File(std::path::PathBuf::from(name)))
+    let direct: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
+    let any: sqlx::any::AnyConnectOptions = db_url.parse()?;
+    let pooled = sqlx::sqlite::SqliteConnectOptions::try_from(&any)?;
+    let file = pooled.get_filename();
+    if direct.get_filename() != file {
+        return refuse("the file name reads differently to the pool, as with surrounding spaces");
+    }
+    if file.as_os_str().is_empty() || file.to_string_lossy().starts_with("file:") {
+        return refuse("a durable database is named by its file name, not a file: URI");
+    }
+    Ok(SqliteTarget::File(file.to_path_buf()))
 }
 
 /// The URL the pool opens. The generic driver parses its URL again for every connection, and each parse of an
@@ -3166,12 +3192,35 @@ mod session_cookie_tests {
             !url.contains("%63ache") && !url.contains("private"),
             "{url}"
         );
-        // A repeated scheme prefix is still the in-memory database the driver reads.
-        assert!(
-            pool_url("sqlite:sqlite::memory:", Backend::Sqlite)
-                .unwrap()
-                .contains("mode=memory")
-        );
+        // Every spelling of the in-memory database the driver reads is one shared in-memory database.
+        for memory in [
+            "sqlite::memory:",
+            "sqlite://:memory:",
+            "sqlite:",
+            "sqlite:sqlite::memory:",
+        ] {
+            assert!(
+                pool_url(memory, Backend::Sqlite)
+                    .unwrap()
+                    .contains("mode=memory"),
+                "{memory}"
+            );
+        }
+        // Settings that could be read two ways are refused, never turned into volatile or mislocked storage.
+        for ambiguous in [
+            "sqlite:file:sqlx-in-memory-backup.db?mode=rwc",
+            "sqlite:game#test?mode=memory&cache=private",
+            "sqlite:game.db?mode=memory",
+            "sqlite:game.db ",
+        ] {
+            assert!(
+                matches!(
+                    pool_url(ambiguous, Backend::Sqlite),
+                    Err(sqlx::Error::Configuration(_))
+                ),
+                "{ambiguous}"
+            );
+        }
         assert!(
             super::parse_database_url("mysql://u:secret@h/game")
                 .unwrap_err()

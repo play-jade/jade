@@ -2670,13 +2670,16 @@ async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
     // While it runs, the same file spelled another way is the same database, and a second server is refused.
     let respelled = format!("{}?mode=rwc", dir.join("game%2Edb").display());
     assert!(build_app_state(&respelled).await.is_err());
-    // So is the same file behind a repeated scheme prefix or a trailing space, both of which the pool's parse removes:
-    // each meets the running owner's lock rather than being refused for its spelling.
+    // So is the same file behind a repeated scheme prefix, which meets the running owner's lock; a trailing space,
+    // which the pool and the SQLite parser read differently, is refused as a setting.
     let contended = |result: Result<_, sqlx::Error>| matches!(result, Err(sqlx::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock);
     let reprefixed = format!("sqlite:sqlite:{}?mode=rwc", dir.join("game.db").display());
     assert!(contended(build_app_state(&reprefixed).await));
     let spaced = format!("sqlite:{} ", dir.join("game.db").display());
-    assert!(contended(build_app_state(&spaced).await));
+    assert!(matches!(
+        build_app_state(&spaced).await,
+        Err(sqlx::Error::Configuration(_))
+    ));
     drop(reopened);
     // A `file:` URI, which SQLite would open as the same file under a lock the server could not follow, is refused as
     // a setting, with no server running, before any lock is taken.
