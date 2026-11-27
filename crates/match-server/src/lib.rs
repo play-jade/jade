@@ -1893,7 +1893,6 @@ async fn expire_active_clock_if_due(
         Some(winner),
         Some("timeout"),
         now_utc_ms(),
-        false,
     )
     .await?;
     *turn_started_mono = None;
@@ -2143,7 +2142,6 @@ async fn process_single_command(
                     Some(winner),
                     Some("timeout"),
                     received_utc_ms,
-                    false,
                 )
                 .await?;
                 *turn_started_mono = None;
@@ -2220,7 +2218,6 @@ async fn process_single_command(
                 outcome_str.as_deref(),
                 reason_str.as_deref(),
                 received_utc_ms,
-                true,
             )
             .await?;
 
@@ -2255,7 +2252,6 @@ async fn process_single_command(
                 Some(winner),
                 Some("resignation"),
                 received_utc_ms,
-                false,
             )
             .await?;
             *draw_offered_by = None;
@@ -2277,7 +2273,6 @@ async fn process_single_command(
                 None,
                 None,
                 received_utc_ms,
-                false,
             )
             .await?;
             *draw_offered_by = Some(actor_side);
@@ -2306,7 +2301,6 @@ async fn process_single_command(
                 Some("draw"),
                 Some("agreed_draw"),
                 received_utc_ms,
-                false,
             )
             .await?;
             *draw_offered_by = None;
@@ -2343,7 +2337,6 @@ async fn process_single_command(
                 None,
                 None,
                 received_utc_ms,
-                false,
             )
             .await?;
             *takeback_requested_by = Some(actor_side);
@@ -2388,7 +2381,6 @@ async fn process_single_command(
                 None,
                 None,
                 received_utc_ms,
-                true,
             )
             .await?;
             *game = staged_game;
@@ -2421,6 +2413,12 @@ fn map_verdict(verdict: &Option<Adjudication>) -> (&'static str, Option<String>,
     ("finished", Some(out.to_string()), Some(reason))
 }
 
+/// Whether a committed event begins a new turn: a move or an accepted takeback after which play goes on. Offers,
+/// requests, and events that end the game add to the record without a turn.
+fn starts_turn(event_type: &str, next_status: &str) -> bool {
+    next_status == "playing" && matches!(event_type, "move" | "takeback_accepted")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn commit_match_event_tx(
     db: &SqlitePool,
@@ -2437,8 +2435,8 @@ async fn commit_match_event_tx(
     outcome: Option<&str>,
     reason_code: Option<&str>,
     utc_ms: i64,
-    starts_turn: bool,
 ) -> Result<(), ApiError> {
+    let starts_turn = starts_turn(event_type, next_status);
     let mut tx = db.begin().await.map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: "db_error",
@@ -2938,6 +2936,26 @@ pub fn server_ready() -> bool {
 
 #[cfg(test)]
 mod session_cookie_tests {
+    #[test]
+    fn only_a_move_or_accepted_takeback_that_continues_play_starts_a_turn() {
+        assert!(super::starts_turn("move", "playing"));
+        assert!(super::starts_turn("takeback_accepted", "playing"));
+        assert!(
+            !super::starts_turn("move", "finished"),
+            "a game-ending move starts no turn"
+        );
+        for event in [
+            "draw_offered",
+            "takeback_requested",
+            "resigned",
+            "draw_accepted",
+            "timeout",
+        ] {
+            assert!(!super::starts_turn(event, "playing"), "{event}");
+            assert!(!super::starts_turn(event, "finished"), "{event}");
+        }
+    }
+
     #[test]
     fn a_session_is_live_until_its_expiry_instant() {
         assert!(super::session_is_live(None, 1_000, 999));

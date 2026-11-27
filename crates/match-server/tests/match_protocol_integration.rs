@@ -2168,15 +2168,22 @@ async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a
     let after_move = view(app.clone()).await;
     assert_eq!(generation(&after_move), 2);
 
-    // A privacy save and a takeback request change the match but not the turn.
-    save_choices(
-        &app,
-        &red.access_token,
-        &match_id,
-        Visibility::Public,
-        [false; 3],
-    )
-    .await;
+    // A privacy save and a takeback request each change the match but not the turn.
+    assert_eq!(
+        save_choices(
+            &app,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let saved = view(app.clone()).await;
+    assert!(saved.state_version > after_move.state_version);
+    assert_eq!(generation(&saved), 2);
     command(
         MatchCommandRequest::RequestTakeback {
             protocol: 1,
@@ -2188,7 +2195,7 @@ async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a
     )
     .await;
     let requested = view(app.clone()).await;
-    assert!(requested.state_version > after_move.state_version);
+    assert!(requested.state_version > saved.state_version);
     assert_eq!(generation(&requested), 2);
 
     // The accepted takeback returns the turn to Red, and the same move played again starts Black's turn anew: the

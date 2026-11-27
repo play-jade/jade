@@ -1024,11 +1024,20 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       const watcher = await redContext.newPage()
       const watcherStreams: WebSocketRoute[] = []
       let cutOff = false
+      // Later the watcher also stands in for a client of a server that sends no turn generation.
+      let withoutGeneration = false
+      let lastFrame = ''
       await watcher.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
         watcherStreams.push(stream)
         const server = stream.connectToServer()
         server.onMessage((message) => {
-          if (!cutOff) stream.send(message)
+          if (cutOff) return
+          if (typeof message !== 'string') return stream.send(message)
+          lastFrame = message
+          if (!withoutGeneration) return stream.send(message)
+          const frame = JSON.parse(message)
+          delete frame.turn_generation
+          stream.send(JSON.stringify(frame))
         })
       })
       await watcher.goto(room)
@@ -1041,18 +1050,37 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await redPage.getByTestId('btn-request-takeback').click()
       await blkPage.getByTestId('btn-accept-takeback').click()
       await expect(redPage.getByTestId('match-moves-card')).not.toContainText('C2=5')
-      await redPage.waitForTimeout(3_000)
+      // Red thinks longer than the increment plus a displayed second, so the replacement move leaves Red a different
+      // time from the first one, and the watcher's stale reading is observably stale.
+      await redPage.waitForTimeout(7_500)
       await playBoardSquares(redPage, 'h2', 'e2')
       await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
+      const clock = async (page: typeof redPage, side: 'red' | 'black') =>
+        (await page.getByTestId(`clock-${side}`).innerText()).trim()
+      expect(await clock(watcher, 'red')).not.toBe(await clock(redPage, 'red'))
 
       // It reconnects: the snapshot looks like the turn it was timing, but it is a new turn, so the watcher takes its
       // clocks, Red's credited time included.
       await watcherStreams[watcherStreams.length - 1]!.close()
       cutOff = false
       await expect.poll(() => watcherStreams.length).toBeGreaterThan(1)
-      await expect
-        .poll(async () => (await watcher.getByTestId('clock-red').innerText()).trim())
-        .toBe((await redPage.getByTestId('clock-red').innerText()).trim())
+      await expect.poll(() => clock(watcher, 'red')).toBe(await clock(redPage, 'red'))
+
+      // From a server that names no turns, a move is still read as a new turn by side to move and moves.
+      withoutGeneration = true
+      await playBoardSquares(blkPage, 'h9', 'g7')
+      await expect(watcher.getByTestId('match-moves-card')).toContainText('H8+7')
+      await expect.poll(() => clock(watcher, 'black')).toBe(await clock(blkPage, 'black'))
+      withoutGeneration = false
+
+      // A frame whose turn generation is invalid is not shown and does not use up its version: the valid frame of the
+      // same version that follows it is the one shown.
+      const frame = JSON.parse(lastFrame)
+      const stream = watcherStreams[watcherStreams.length - 1]!
+      const next = frame.state_version + 1
+      stream.send(JSON.stringify({ ...frame, state_version: next, turn_generation: -1, visibility: 'unlisted' }))
+      stream.send(JSON.stringify({ ...frame, state_version: next, visibility: 'public' }))
+      await expect(watcher.getByTestId('privacy-effective')).toContainText('Public')
     } finally {
       await redContext.close()
       await blkContext.close()
