@@ -71,13 +71,16 @@ export function useBrowserSession() {
   /**
    * The browser's existing session, or null only when the server answers that it has none (expired, revoked, or
    * never created). Any other failure throws, so it is never mistaken for an absent session. With `fresh`, the server
-   * is asked even when this tab confirmed a session before, as every page does when it opens.
+   * is asked even when this tab confirmed a session before, as every page does when it opens. With `readOnly`, the
+   * server does not set the cookie again.
    */
-  async function recover(options: { fresh?: boolean } = {}): Promise<BrowserSession | null> {
+  async function recover(options: { fresh?: boolean; readOnly?: boolean } = {}): Promise<BrowserSession | null> {
     if (!options.fresh && known && known.expires_at_ms > Date.now()) return known
     let resp: Response
     try {
-      resp = await fetch(`${base}/api/v1/auth/session`, { credentials: 'include', cache: 'no-store' })
+      // A read-only check leaves the cookie as it is, so a late answer cannot restore a cookie another tab replaced.
+      const query = options.readOnly ? '?reissue=false' : ''
+      resp = await fetch(`${base}/api/v1/auth/session${query}`, { credentials: 'include', cache: 'no-store' })
     } catch (error) {
       throw new SessionUnavailableError(`The match server did not answer: ${String(error)}`)
     }

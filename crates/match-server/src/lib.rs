@@ -645,9 +645,17 @@ async fn create_guest_session(
 /// browser keeps its guest. A missing, expired, or revoked cookie session is `401` and creates nothing. The cookie
 /// is reissued with the session's remaining lifetime, so a cookie set before it carried one outlives a closed
 /// browser too, without extending the session. The answer is personal and never stored by a cache.
+/// `reissue=false` makes the session check read-only: it answers without setting the cookie again, so a check
+/// whose answer arrives after another tab replaced the cookie cannot restore the old one.
+#[derive(Deserialize)]
+struct SessionCheckQuery {
+    reissue: Option<bool>,
+}
+
 async fn current_session(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(check): Query<SessionCheckQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let unauthenticated = |message: &str| ApiError {
         status: StatusCode::UNAUTHORIZED,
@@ -680,10 +688,12 @@ async fn current_session(
     }
     let mut out = HeaderMap::new();
     // A positive remaining lifetime rounds up, so a session with under a second left is not deleted early.
-    out.insert(
-        axum::http::header::SET_COOKIE,
-        session_cookie_header(token, cookie_max_age_s(remaining_ms)),
-    );
+    if check.reissue != Some(false) {
+        out.insert(
+            axum::http::header::SET_COOKIE,
+            session_cookie_header(token, cookie_max_age_s(remaining_ms)),
+        );
+    }
     out.insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -2906,6 +2916,14 @@ pub fn server_ready() -> bool {
 
 #[cfg(test)]
 mod session_cookie_tests {
+    #[test]
+    fn a_session_is_live_until_its_expiry_instant() {
+        assert!(super::session_is_live(None, 1_000, 999));
+        assert!(!super::session_is_live(None, 1_000, 1_000));
+        assert!(!super::session_is_live(None, 1_000, 1_001));
+        assert!(!super::session_is_live(Some(500), 1_000, 999));
+    }
+
     #[test]
     fn cookie_lifetime_rounds_a_live_session_up() {
         assert_eq!(super::cookie_max_age_s(1), 1);

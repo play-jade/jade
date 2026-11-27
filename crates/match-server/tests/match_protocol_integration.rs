@@ -1843,20 +1843,22 @@ async fn open_stream(
 /// What a live stream delivers next: a snapshot's sequence number, or `None` once the server closes or ends the
 /// stream. Ping and pong frames are passed over; any other frame fails the test.
 async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
-            .await
-            .expect("the server answers within five seconds");
-        match frame {
-            Some(Ok(Message::Text(text))) => {
-                let snap: MatchSnapshotResponse = serde_json::from_str(&text).unwrap();
-                return Some(snap.seq);
+    // One deadline for the whole wait, so control frames cannot extend it.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let snap: MatchSnapshotResponse = serde_json::from_str(&text).unwrap();
+                    return Some(snap.seq);
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                Some(Ok(other)) => panic!("unexpected frame on a match stream: {other:?}"),
             }
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-            Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
-            Some(Ok(other)) => panic!("unexpected frame on a match stream: {other:?}"),
         }
-    }
+    })
+    .await
+    .expect("the server answers within five seconds")
 }
 
 #[tokio::test]
@@ -1965,4 +1967,70 @@ async fn snapshot_for(app: &axum::Router, token: &str, match_id: &str) -> MatchS
         .body(Body::empty())
         .unwrap();
     json_body(app.clone().oneshot(req).await.unwrap()).await
+}
+
+#[tokio::test]
+async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
+    use sha2::Digest;
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state.clone());
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    // The session is revoked after the upgrade is accepted and before the 101 reaches the client, so the stream's
+    // handler starts with a session that has already ended.
+    let blk_hash = hex::encode(sha2::Sha256::digest(blk.access_token.as_bytes()));
+    let revoking = build_router(state).layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let db = db.clone();
+            let hash = blk_hash.clone();
+            async move {
+                let resp = next.run(req).await;
+                if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+                    sqlx::query(
+                        "UPDATE auth_sessions SET revoked_at_ms = 1 WHERE session_id_hash = $1",
+                    )
+                    .bind(hash)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                }
+                resp
+            }
+        },
+    ));
+    let mut req = format!("ws://localhost:3180/api/v1/matches/{match_id}/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", blk.access_token).parse().unwrap(),
+    );
+    let mut ws = connect_ws_duplex(&revoking, req).await.unwrap();
+    assert_eq!(
+        next_delivery(&mut ws).await,
+        None,
+        "no snapshot for a session that ended"
+    );
+}
+
+#[tokio::test]
+async fn a_read_only_session_check_sets_no_cookie() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+    let (_guest, cookie) = new_guest(&app, "Guest").await;
+    let check = |query: &'static str| {
+        Request::builder()
+            .uri(format!("/api/v1/auth/session{query}"))
+            .header("cookie", cookie.clone())
+            .body(Body::empty())
+            .unwrap()
+    };
+    let reissued = app.clone().oneshot(check("")).await.unwrap();
+    assert_eq!(reissued.status(), StatusCode::OK);
+    assert!(reissued.headers().contains_key("set-cookie"));
+    let read_only = app.clone().oneshot(check("?reissue=false")).await.unwrap();
+    assert_eq!(read_only.status(), StatusCode::OK);
+    assert!(!read_only.headers().contains_key("set-cookie"));
 }

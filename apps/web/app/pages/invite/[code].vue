@@ -224,8 +224,8 @@ let shownRevision = -1
 /** The match and privacy revision of the effective visibility shown; an older one never replaces it. */
 let shownPrivacy: { matchId: string; revision: number } | null = null
 
-/** What the summary shows when no snapshot has confirmed the effective visibility with a privacy revision. */
-const UNCONFIRMED_VISIBILITY = 'unconfirmed' as unknown as MatchSnapshot['visibility']
+/** Whether the shown effective visibility came from a snapshot with a valid privacy revision and a known value. */
+const visibilityConfirmed = ref(false)
 
 /** Whether a privacy state at `revision` for `matchId` is at least as new as the one shown; if so it becomes the one shown. */
 function newerPrivacy(matchId: string, revision: unknown): boolean {
@@ -243,12 +243,16 @@ function newerPrivacy(matchId: string, revision: unknown): boolean {
 function ordered(snap: MatchSnapshot): MatchSnapshot {
   // Another match (a rematch) starts its own order.
   if (snapshot.value?.match_id !== snap.match_id) shownPrivacy = null
-  if (newerPrivacy(snap.match_id, snap.privacy_revision)) return snap
+  if (newerPrivacy(snap.match_id, snap.privacy_revision)) {
+    visibilityConfirmed.value = VISIBILITIES.includes(snap.visibility)
+    return snap
+  }
   // A newer confirmed state stays; with none confirmed, the effective visibility is shown as not confirmed.
   if (shownPrivacy && snapshot.value) {
     return { ...snap, visibility: snapshot.value.visibility, privacy_revision: snapshot.value.privacy_revision }
   }
-  return { ...snap, visibility: UNCONFIRMED_VISIBILITY }
+  visibilityConfirmed.value = false
+  return snap
 }
 /**
  * True until the controls show a validated personal snapshot, and again whenever the saved choices could not be read
@@ -399,6 +403,7 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
       shownRevision = madeAgainst + 1
       // The acknowledgment's effective visibility is shown only if no newer privacy state has been shown meanwhile.
       if (snapshot.value && newerPrivacy(snapshot.value.match_id, ack.privacy_revision)) {
+        visibilityConfirmed.value = true
         snapshot.value = {
           ...snapshot.value,
           visibility: ack.effective_visibility as MatchSnapshot['visibility'],
@@ -416,6 +421,11 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
     // The controls stay locked through the read-back below, until the saved choices are shown.
     reconciling.value = true
     savingChoice.value = false
+  }
+  // A reply that arrives after the room stopped tells the player nothing; the reason it stopped stays in view.
+  if (roomStopped.value) {
+    reconciling.value = false
+    return
   }
   privacyStatusMsg.value = outcome
   try {
@@ -508,17 +518,21 @@ async function recoverGapAndReconnect(matchId: string) {
   if (isUnmounted || reconnectingInFlight || roomStopped.value) return
   reconnectingInFlight = true
   try {
-    // A dropped stream can mean the session ended, so the server is asked afresh before the room reads or reconnects:
-    // a confirmed absence stops the room, and a network failure leaves it retrying.
-    const fresh = await browserSession.recover({ fresh: true })
-    if (roomStopped.value) return
-    if (!fresh) {
-      stopRoom(new SessionEndedError().message)
-      return
-    }
-    if (guestSession && fresh.account_id !== guestSession.account_id) {
-      stopRoom()
-      return
+    // A dropped stream can mean the session ended, so before reopening it the server is asked afresh, without setting
+    // the cookie again: a confirmed absence stops the room, and a network failure leaves it retrying. A routine poll
+    // with the stream open asks nothing extra.
+    const reopening = !ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)
+    if (reopening) {
+      const fresh = await browserSession.recover({ fresh: true, readOnly: true })
+      if (roomStopped.value) return
+      if (!fresh) {
+        stopRoom(new SessionEndedError().message)
+        return
+      }
+      if (guestSession && fresh.account_id !== guestSession.account_id) {
+        stopRoom()
+        return
+      }
     }
     const since = snapshot.value?.seq ?? 0
     const resp = await guestFetch(`/api/v1/matches/${matchId}?since_seq=${since}`)
@@ -587,10 +601,11 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
       true,
     )
   } catch (err) {
-    errorBanner.value = err instanceof Error ? err.message : String(err)
+    // A failure after the room stopped leaves the reason it stopped in view.
+    if (!roomStopped.value) errorBanner.value = err instanceof Error ? err.message : String(err)
     return
   }
-  const data = await resp.json()
+  const data = await resp.json().catch(() => null)
   // A reply that arrives after the room stopped is for a session the room no longer holds; it is dropped.
   if (roomStopped.value) return
   if (!resp.ok) {
@@ -986,13 +1001,15 @@ function showPly(ply: number | null) {
         <summary data-testid="privacy-effective">
           Privacy ·
           {{
-            snapshot?.visibility === 'public'
-              ? 'Public'
-              : snapshot?.visibility === 'unlisted'
-                ? 'Unlisted'
-                : snapshot?.visibility === 'private'
-                  ? 'Private'
-                  : 'Not confirmed'
+            !visibilityConfirmed
+              ? 'Not confirmed'
+              : snapshot?.visibility === 'public'
+                ? 'Public'
+                : snapshot?.visibility === 'unlisted'
+                  ? 'Unlisted'
+                  : snapshot?.visibility === 'private'
+                    ? 'Private'
+                    : 'Not confirmed'
           }}
         </summary>
         <p class="privacy-note">

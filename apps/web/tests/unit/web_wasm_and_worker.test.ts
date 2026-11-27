@@ -583,6 +583,26 @@ describe('browser session', () => {
     }
   })
 
+  it('asks for a read-only check only when told to', async () => {
+    const urls: string[] = []
+    vi.stubGlobal('useRuntimeConfig', () => ({ public: { matchServerUrl: 'http://127.0.0.1:4180' } }))
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      return new Response('{}', { status: 401 })
+    })
+    try {
+      const session = useBrowserSession()
+      await session.recover({ fresh: true })
+      await session.recover({ fresh: true, readOnly: true })
+      expect(urls).toEqual([
+        'http://127.0.0.1:4180/api/v1/auth/session',
+        'http://127.0.0.1:4180/api/v1/auth/session?reissue=false',
+      ])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('reports an ended session apart from an unavailable server', async () => {
     const outcomeOf = async (answer: () => Promise<Response>) => {
       vi.stubGlobal('useRuntimeConfig', () => ({ public: { matchServerUrl: 'http://127.0.0.1:4180' } }))
