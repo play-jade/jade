@@ -539,6 +539,13 @@ fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>
     let Some(db_path) = extract_sqlite_file_path(sqlite_url) else {
         return Ok(None);
     };
+    // SQLite reads a `file:` name as a URI and opens the file it names, which the owner lock could not follow, so a
+    // durable database is named by its plain file name.
+    if db_path.to_string_lossy().starts_with("file:") {
+        return Err(sqlx::Error::Configuration(
+            "a durable SQLite database is named by its file name, not a file: URI".into(),
+        ));
+    }
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
     {

@@ -9,7 +9,7 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use jade_match_server::{
     CoordMovePayload, CurrentSessionResponse, GuestSessionResponse, InvitationCreatedResponse,
     JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest,
-    build_app_state, build_router,
+    build_app_state, build_router, mark_interrupted_timed_matches_on_startup,
 };
 use tokio::io::DuplexStream;
 use tokio_tungstenite::{
@@ -54,25 +54,56 @@ impl Drop for TestDb {
         }
         if let Some((admin, name)) = self.postgres.take() {
             // Dropping runs outside the test's runtime, on a thread of its own; FORCE ends sessions still open.
-            let _ = std::thread::spawn(move || {
+            let dropped = std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .unwrap();
+                    .map_err(|e| e.to_string())?;
                 runtime.block_on(async {
-                    if let Ok(mut conn) =
-                        <sqlx::AnyConnection as sqlx::Connection>::connect(&admin).await
-                    {
-                        let _ =
-                            sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
-                                .execute(&mut conn)
-                                .await;
-                    }
-                });
+                    let mut conn = <sqlx::AnyConnection as sqlx::Connection>::connect(&admin)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                        .execute(&mut conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("{name}: {e}"))
+                })
             })
-            .join();
+            .join()
+            .unwrap_or_else(|_| Err("the cleanup thread panicked".to_string()));
+            if let Err(error) = dropped {
+                let report = format!("test database was not dropped: {error}");
+                // A test already failing reports the leftover; a passing one fails, naming it.
+                if std::thread::panicking() {
+                    eprintln!("{report}");
+                } else {
+                    panic!("{report}");
+                }
+            }
         }
     }
+}
+
+/// A URL component with its `%XX` escapes decoded, as the database drivers read it.
+fn decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let hex = |b: u8| (b as char).to_digit(16);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Sets query options on a URL, replacing any it already has with the same names; values are percent-encoded.
@@ -92,7 +123,7 @@ fn with_query(url: &str, set: &[(&str, &str)]) -> String {
         .split('&')
         .filter(|kv| !kv.is_empty())
         .filter(|kv| {
-            let key = kv.split('=').next().unwrap_or("");
+            let key = decoded(kv.split('=').next().unwrap_or(""));
             !set.iter().any(|(name, _)| key.eq_ignore_ascii_case(name))
         })
         .map(str::to_string)
@@ -139,11 +170,7 @@ async fn fresh_postgres() -> Option<TestDb> {
         .split('&')
         .filter(|kv| {
             !kv.is_empty()
-                && !kv
-                    .split('=')
-                    .next()
-                    .unwrap_or("")
-                    .eq_ignore_ascii_case("dbname")
+                && !decoded(kv.split('=').next().unwrap_or("")).eq_ignore_ascii_case("dbname")
         })
         .collect();
     let url = if options.is_empty() {
@@ -151,11 +178,21 @@ async fn fresh_postgres() -> Option<TestDb> {
     } else {
         format!("{server}/{name}?{}", options.join("&"))
     };
-    Some(TestDb {
+    let db = TestDb {
         url,
-        postgres: Some((admin, name)),
+        postgres: Some((admin, name.clone())),
         dir: None,
-    })
+    };
+    // No test receives a fixture that reaches any database but its own.
+    let mut check = <sqlx::AnyConnection as sqlx::Connection>::connect(&db.url)
+        .await
+        .unwrap();
+    let reached: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&mut check)
+        .await
+        .unwrap();
+    assert_eq!(reached, name, "the fixture URL reaches its own database");
+    Some(db)
 }
 
 /// The database a test runs on: a fresh PostgreSQL database when one is configured, else private in-memory SQLite.
@@ -2453,7 +2490,9 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
         return;
     };
     let url = pg.url.clone();
-    let first = build_router(build_app_state(&url).await.unwrap());
+    let first_state = build_app_state(&url).await.unwrap();
+    let first_db = first_state.db.clone();
+    let first = build_router(first_state);
     let (red, _) = new_guest(&first, "Red").await;
     let (blk, _) = new_guest(&first, "Black").await;
     // An untimed match, so the new owner's startup recovery leaves it playing and only the fence can refuse the write.
@@ -2539,6 +2578,18 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
         "Red's choices were not saved"
     );
     assert_eq!(choices_after.visibility, choices_before.visibility);
+    // Startup recovery run through the stale server's pool interrupts nothing the new owner is timing.
+    let (red2, _) = new_guest(&second, "Red 2").await;
+    let (blk2, _) = new_guest(&second, "Black 2").await;
+    let timed = start_match(&second, &red2.access_token, &blk2.access_token).await;
+    assert!(
+        mark_interrupted_timed_matches_on_startup(&first_db)
+            .await
+            .is_err()
+    );
+    let timed_now = snapshot_for(&second, &red2.access_token, &timed).await;
+    assert_eq!(timed_now.status, "playing");
+    assert_eq!(timed_now.seq, 0);
     // The new owner plays the same move.
     assert_eq!(
         post_command(&second, &red.access_token, &match_id, &mv)
@@ -2618,6 +2669,9 @@ async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
     // While it runs, the same file spelled another way is the same database, and a second server is refused.
     let respelled = format!("{}?mode=rwc", dir.join("game%2Edb").display());
     assert!(build_app_state(&respelled).await.is_err());
+    // A `file:` URI, which SQLite would open as the same file under a lock the server could not follow, is refused.
+    let uri = format!("sqlite:file:{}?mode=rwc", dir.join("game.db").display());
+    assert!(build_app_state(&uri).await.is_err());
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2649,10 +2703,18 @@ async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
             .unwrap();
     assert!(encrypted);
     drop(state);
-    // Checked only against the public authorities the server ships with, an unknown certificate is refused.
+    // Checked against an unrelated authority, the server's certificate is refused during verification.
+    let other_ca = std::env::var("JADE_TEST_POSTGRES_OTHER_CA")
+        .expect("JADE_TEST_POSTGRES_OTHER_CA names an authority unrelated to the server's");
+    let refused = build_app_state(&with_query(
+        &url,
+        &[("sslmode", "verify-full"), ("sslrootcert", &other_ca)],
+    ))
+    .await
+    .err()
+    .expect("a certificate from another authority is refused");
     assert!(
-        build_app_state(&with_query(&url, &[("sslmode", "verify-full")]))
-            .await
-            .is_err()
+        refused.to_string().contains("invalid peer certificate"),
+        "{refused}"
     );
 }
