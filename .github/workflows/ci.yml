@@ -88,7 +88,13 @@ jobs:
           pnpm --dir apps/web test:unit
           pnpm --dir apps/web build
           pnpm --dir apps/web exec playwright install --with-deps chromium
-          pnpm --dir apps/web test:e2e
+          # The journeys keep their matches in memory even when the shell names a database: nothing may appear there.
+          printf 'sqlite:%s?mode=rwc\n' "$RUNNER_TEMP/journeys-must-not-write.db" > "$RUNNER_TEMP/journeys-database-url"
+          DATABASE_URL="sqlite:$RUNNER_TEMP/journeys-must-not-write.db?mode=rwc" DATABASE_URL_FILE="$RUNNER_TEMP/journeys-database-url" \
+            pnpm --dir apps/web test:e2e
+          if ls "$RUNNER_TEMP"/journeys-must-not-write.db* >/dev/null 2>&1; then
+            echo "the browser journeys wrote to the database that DATABASE_URL_FILE names"; exit 1
+          fi
 
   apple-macos-and-ios:
     name: Apple (macOS AppKit/SwiftUI & iOS/iPadOS UIKit/SwiftUI)
