@@ -1680,8 +1680,8 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
         .filter(|line| {
             !line.contains("_choices_revision")
                 && !line.contains("advance a revision")
-                && !line.contains("privacy_revision")
-                && !line.contains("Advances with every privacy save")
+                && !line.contains("state_version")
+                && !line.contains("Advances with every change to the match")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1709,7 +1709,7 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
         .unwrap();
     assert!(after.iter().any(|c| c == "red_choices_revision"));
     assert!(after.iter().any(|c| c == "black_choices_revision"));
-    assert!(after.iter().any(|c| c == "privacy_revision"));
+    assert!(after.iter().any(|c| c == "state_version"));
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1760,20 +1760,18 @@ async fn concurrent_saves_of_one_revision_apply_once() {
 }
 
 #[tokio::test]
-async fn the_privacy_revision_advances_for_either_participant() {
+async fn the_state_version_advances_with_every_change_by_either_participant() {
     let state = build_app_state("sqlite::memory:").await.unwrap();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
     let (blk, _) = new_guest(&app, "Black").await;
     let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
-    assert_eq!(
-        snapshot_for(&app, &red.access_token, &match_id)
-            .await
-            .privacy_revision,
-        0
-    );
+    let joined = snapshot_for(&app, &red.access_token, &match_id)
+        .await
+        .state_version;
+    assert!(joined > 0, "a seat joining is a change");
 
-    // Red's save advances both Red's own revision and the match's privacy revision, and the reply carries both.
+    // Red's save advances Red's own revision and the match's version; the reply carries the version it wrote.
     let saved: serde_json::Value = json_body(
         save_choices(
             &app,
@@ -1786,29 +1784,32 @@ async fn the_privacy_revision_advances_for_either_participant() {
     )
     .await;
     assert_eq!(saved["choices_revision"], 1);
-    assert_eq!(saved["privacy_revision"], 1);
+    let after_red = saved["state_version"].as_i64().unwrap();
+    assert!(after_red > joined);
+    assert_eq!(
+        snapshot_for(&app, &red.access_token, &match_id)
+            .await
+            .state_version,
+        after_red
+    );
 
     // Black's save changes the effective visibility without touching Red's revision; Red's next snapshot still
-    // shows a newer privacy revision, so a client can order it after the earlier one.
-    let saved: serde_json::Value = json_body(
-        save_choices(
-            &app,
-            &blk.access_token,
-            &match_id,
-            Visibility::Public,
-            [false; 3],
-        )
-        .await,
+    // carries a newer version, so a client can order it after the earlier one.
+    save_choices(
+        &app,
+        &blk.access_token,
+        &match_id,
+        Visibility::Public,
+        [false; 3],
     )
     .await;
-    assert_eq!(saved["choices_revision"], 1);
-    assert_eq!(saved["privacy_revision"], 2);
     let red_view = snapshot_for(&app, &red.access_token, &match_id).await;
     assert_eq!(red_view.visibility, Visibility::Public);
-    assert_eq!(red_view.privacy_revision, 2);
+    assert!(red_view.state_version > after_red);
     assert_eq!(red_view.viewer_choices.unwrap().revision, 1);
 
-    // Black withdraws: the match is private again, at a newer privacy revision than the public snapshot.
+    // Black withdraws: the match is private again, at a newer version than the public snapshot.
+    let public_version = red_view.state_version;
     save_choices(
         &app,
         &blk.access_token,
@@ -1819,8 +1820,33 @@ async fn the_privacy_revision_advances_for_either_participant() {
     .await;
     let red_view = snapshot_for(&app, &red.access_token, &match_id).await;
     assert_eq!(red_view.visibility, Visibility::Private);
-    assert_eq!(red_view.privacy_revision, 3);
+    assert!(red_view.state_version > public_version);
     assert_eq!(red_view.viewer_choices.unwrap().revision, 1);
+
+    // A move is a change too.
+    let before_move = red_view.state_version;
+    let mv = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "v1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    assert_eq!(
+        post_command(&app, &red.access_token, &match_id, &mv)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        snapshot_for(&app, &red.access_token, &match_id)
+            .await
+            .state_version
+            > before_move
+    );
 }
 
 /// Opens the match's live stream as the bearer of `token` and reads its first snapshot.

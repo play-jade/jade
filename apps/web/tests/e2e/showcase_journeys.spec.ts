@@ -603,20 +603,24 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       const blkPage = await blkContext.newPage()
       // Red's live streams pass through to the server; the test can drop the current one as a network would.
       const redStreams: WebSocketRoute[] = []
+      let withholdRedFrames = false
       await redPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
         redStreams.push(stream)
-        stream.connectToServer()
+        const server = stream.connectToServer()
+        server.onMessage((message) => {
+          if (!withholdRedFrames) stream.send(message)
+        })
       })
       await redPage.goto('/')
       await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
       await redPage.getByTestId('create-invite-btn').click()
       await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
-      // Black's first snapshots arrive without a privacy revision, as from a server that does not send one.
+      // Black's first snapshots arrive without a state version, as from a server that does not send one.
       let stripRevision = true
       const withoutRevision = (text: string) => {
         const data = JSON.parse(text)
-        if (data.snapshot) delete data.snapshot.privacy_revision
-        delete data.privacy_revision
+        if (data.snapshot) delete data.snapshot.state_version
+        delete data.state_version
         return data
       }
       await blkPage.route(
@@ -709,6 +713,8 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       // Red's session ends on the server while the page still holds it; when the stream drops, the room asks the
       // server, learns the session has ended, and stops instead of reconnecting.
       // A successful command reply that lacks a clock is not installed: the room says so and reads the match again.
+      // Red's stream withholds the move, so Red can catch up only through that read.
+      withholdRedFrames = true
       await redPage.route(
         /\/commands$/,
         async (route) => {
@@ -724,6 +730,35 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(blkPage.getByTestId('match-moves-card')).toContainText('C2=5')
       await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
       await expect(redPage.locator('body')).not.toContainText('NaN')
+      withholdRedFrames = false
+
+      // The same state arriving again changes nothing: Red's move reaches Red's stream first, the stream drops, and the
+      // late reply to the move does not wind Black's running clock back.
+      await playBoardSquares(blkPage, 'h9', 'g7')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('H8+7')
+      let releaseReply: () => void = () => {}
+      const replyGate = new Promise<void>((resolve) => (releaseReply = resolve))
+      await redPage.route(
+        /\/commands$/,
+        async (route) => {
+          const response = await route.fetch()
+          await replyGate
+          await route.fulfill({ response })
+        },
+        { times: 1 },
+      )
+      await playBoardSquares(redPage, 'b0', 'c2')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('2.H8+7')
+      await redStreams[redStreams.length - 1]!.close()
+      await redPage.waitForTimeout(2_500)
+      const seconds = async () => {
+        const [m, sec] = (await redPage.getByTestId('clock-black').innerText()).trim().split(':').map(Number)
+        return m! * 60 + sec!
+      }
+      const beforeReply = await seconds()
+      releaseReply()
+      await redPage.waitForTimeout(800)
+      expect(await seconds()).toBeLessThanOrEqual(beforeReply)
 
       // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
       let releaseSave: () => void = () => {}
@@ -804,16 +839,18 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       const gate = new Promise<void>((resolve) => (release = resolve))
       let fetched: () => void = () => {}
       const held = new Promise<void>((resolve) => (fetched = resolve))
-      await page.route(
-        /\/api\/v1\/matches\/[^/?]+\?since_seq=\d+$/,
-        async (route) => {
-          const response = await route.fetch()
+      // Every poll answers with an unreadable snapshot meanwhile: nothing is installed, and the stream still reopens.
+      let breakPolls = true
+      let firstPoll = true
+      await page.route(/\/api\/v1\/matches\/[^/?]+\?since_seq=\d+$/, async (route) => {
+        if (!breakPolls) return route.fallback()
+        if (firstPoll) {
+          firstPoll = false
           fetched()
           await gate
-          await route.fulfill({ response })
-        },
-        { times: 1 },
-      )
+        }
+        await route.fulfill({ status: 200, json: { match_id: 'another-match', status: 'finished' } })
+      })
       // The probe's answer is held too: no new stream opens until the server has said the session stands.
       let answer: () => void = () => {}
       const answerGate = new Promise<void>((resolve) => (answer = resolve))
@@ -840,6 +877,8 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect.poll(() => streams.length).toBe(2)
       expect(events.indexOf('probe')).toBeGreaterThanOrEqual(0)
       expect(events.indexOf('probe')).toBeLessThan(events.indexOf('stream'))
+      await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
+      breakPolls = false
 
       // The session ends while the stream stays open: the next poll of the private room is refused, the room asks the
       // server, and it stops and closes its stream.

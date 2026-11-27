@@ -59,8 +59,8 @@ CREATE TABLE IF NOT EXISTS matches (
     -- Each participant's choices advance a revision on every save, so an older save cannot overwrite a newer one.
     red_choices_revision INTEGER NOT NULL DEFAULT 0,
     black_choices_revision INTEGER NOT NULL DEFAULT 0,
-    -- Advances with every privacy save by either participant, so the effective visibility is shown newest-first.
-    privacy_revision INTEGER NOT NULL DEFAULT 0,
+    -- Advances with every change to the match's stored state, so clients show the newest snapshot they hold.
+    state_version INTEGER NOT NULL DEFAULT 0,
     rematch_of_match_id TEXT,
     next_rematch_id TEXT,
     created_at_ms INTEGER NOT NULL,

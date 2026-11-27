@@ -201,10 +201,11 @@ pub struct MatchSnapshotResponse {
     pub reason_code: Option<String>,
     pub visibility: Visibility,
     pub missing_events: Vec<CommittedEventRecord>,
-    /// Advances with every privacy save by either participant, read from the same row as `visibility`, so a client
-    /// shows the effective visibility of the newest snapshot it has, whichever route each snapshot came by.
+    /// Advances with every change to the match's stored state (a seat, a move, the clocks, an outcome, either
+    /// participant's privacy save, a rematch), read from the same row as everything else, so a client installs only a
+    /// snapshot newer than the one it shows, whichever route each came by.
     #[serde(default)]
-    pub privacy_revision: i64,
+    pub state_version: i64,
     /// The viewer's own saved choices when the viewer holds a seat; the effective `visibility` needs both players.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_choices: Option<ParticipantChoices>,
@@ -251,7 +252,7 @@ pub struct PrivacyUpdateRequest {
     pub expected_revision: Option<i64>,
 }
 
-/// Adds the per-seat choice revisions and the match's privacy revision to a database created before they existed;
+/// Adds the per-seat choice revisions and the match's state version to a database created before they existed;
 /// new databases have them already.
 async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error> {
     let columns: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('matches')")
@@ -263,7 +264,7 @@ async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error
     for column in [
         "red_choices_revision",
         "black_choices_revision",
-        "privacy_revision",
+        "state_version",
     ] {
         if !columns.iter().any(|c| c == column) {
             sqlx::query(&format!(
@@ -503,7 +504,7 @@ pub async fn mark_interrupted_timed_matches_on_startup(
         .await?;
 
         sqlx::query(
-            "UPDATE matches SET current_seq = ?, status = 'interrupted', outcome = 'interrupted',
+            "UPDATE matches SET state_version = state_version + 1, current_seq = ?, status = 'interrupted', outcome = 'interrupted',
              reason_code = 'server_interruption', turn_started_utc_ms = NULL, updated_at_ms = ?
              WHERE match_id = ?",
         )
@@ -1038,7 +1039,7 @@ async fn join_invitation(
             None
         };
         let res = sqlx::query(
-            "UPDATE matches SET red_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND red_account_id IS NULL",
+            "UPDATE matches SET state_version = state_version + 1, red_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND red_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
@@ -1071,7 +1072,7 @@ async fn join_invitation(
             None
         };
         let res = sqlx::query(
-            "UPDATE matches SET black_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND black_account_id IS NULL",
+            "UPDATE matches SET state_version = state_version + 1, black_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND black_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
@@ -1428,13 +1429,12 @@ async fn update_match_privacy(
         });
     };
     let updated = sqlx::query(&format!(
-        "UPDATE matches SET
+        "UPDATE matches SET state_version = state_version + 1,
             {seat}_visibility_choice = COALESCE(?, {seat}_visibility_choice),
             {seat}_consent_training = COALESCE(?, {seat}_consent_training),
             {seat}_consent_research = COALESCE(?, {seat}_consent_research),
             {seat}_consent_dataset = COALESCE(?, {seat}_consent_dataset),
             {seat}_choices_revision = {seat}_choices_revision + 1,
-            privacy_revision = privacy_revision + 1,
             updated_at_ms = ?
          WHERE match_id = ? AND {seat}_choices_revision = ?"
     ))
@@ -1461,7 +1461,7 @@ async fn update_match_privacy(
         });
     }
     let revisions = sqlx::query(&format!(
-        "SELECT {seat}_choices_revision AS choices_revision, privacy_revision FROM matches WHERE match_id = ?"
+        "SELECT {seat}_choices_revision AS choices_revision, state_version FROM matches WHERE match_id = ?"
     ))
     .bind(&match_id)
     .fetch_one(&mut *tx)
@@ -1472,7 +1472,7 @@ async fn update_match_privacy(
         message: e.to_string(),
     })?;
     let choices_revision: i64 = revisions.get("choices_revision");
-    let privacy_revision: i64 = revisions.get("privacy_revision");
+    let state_version: i64 = revisions.get("state_version");
 
     let row = sqlx::query(
         "SELECT red_visibility_choice, black_visibility_choice,
@@ -1530,7 +1530,7 @@ async fn update_match_privacy(
     Ok(Json(serde_json::json!({
         "effective_visibility": effective,
         "choices_revision": choices_revision,
-        "privacy_revision": privacy_revision,
+        "state_version": state_version,
         "eligible_for_internal_training": policy.eligible_for_internal_training(),
         "eligible_for_published_research": policy.eligible_for_published_research(),
         "eligible_for_dataset_release": policy.eligible_for_dataset_release(),
@@ -2449,7 +2449,7 @@ async fn commit_match_event_tx(
     })?;
 
     sqlx::query(
-        "UPDATE matches SET
+        "UPDATE matches SET state_version = state_version + 1,
             current_seq = ?, current_fen = ?, status = ?,
             red_remaining_ms = ?, black_remaining_ms = ?,
             turn_started_utc_ms = ?, outcome = ?, reason_code = ?, updated_at_ms = ?
@@ -2630,7 +2630,7 @@ async fn load_match_snapshot(
         outcome: m.get("outcome"),
         reason_code: m.get("reason_code"),
         visibility: vis,
-        privacy_revision: m.get("privacy_revision"),
+        state_version: m.get("state_version"),
         missing_events,
         viewer_choices: None,
     })
@@ -2761,7 +2761,7 @@ async fn create_or_get_rematch(
         message: e.to_string(),
     })?;
 
-    sqlx::query("UPDATE matches SET next_rematch_id = ?, updated_at_ms = ? WHERE match_id = ?")
+    sqlx::query("UPDATE matches SET state_version = state_version + 1, next_rematch_id = ?, updated_at_ms = ? WHERE match_id = ?")
         .bind(&new_match_id)
         .bind(ts)
         .bind(&match_id)
