@@ -37,6 +37,64 @@ async fn connect_ws_duplex(
     Ok(ws)
 }
 
+static TEST_DB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A fresh database on the PostgreSQL server `JADE_TEST_POSTGRES_URL` names (a URL ending in a database to connect to
+/// for administration, such as `postgres://jade@127.0.0.1:55432/postgres`), or `None` when it names none.
+async fn fresh_postgres_url() -> Option<String> {
+    let admin = std::env::var("JADE_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|u| !u.is_empty())?;
+    sqlx::any::install_default_drivers();
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = format!("jade_test_{}_{seq}", std::process::id());
+    let mut conn = <sqlx::AnyConnection as sqlx::Connection>::connect(&admin)
+        .await
+        .expect("connect to the PostgreSQL test server");
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut conn)
+        .await
+        .expect("create a test database");
+    let (server, _) = admin.rsplit_once('/').expect("a URL that names a database");
+    Some(format!("{server}/{name}"))
+}
+
+/// The database a test runs on: a fresh PostgreSQL database when one is configured, else private in-memory SQLite.
+async fn test_db_url() -> String {
+    fresh_postgres_url()
+        .await
+        .unwrap_or_else(|| "sqlite::memory:".to_string())
+}
+
+/// A database that outlives one server, for restart and concurrent-writer tests: a fresh PostgreSQL database when one
+/// is configured, else a new SQLite file, removed with its directory when the test ends.
+struct DurableTestDb {
+    url: String,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for DurableTestDb {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+async fn durable_test_db(label: &str) -> DurableTestDb {
+    if let Some(url) = fresh_postgres_url().await {
+        return DurableTestDb { url, dir: None };
+    }
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("jade-{label}-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("game.sqlite3");
+    DurableTestDb {
+        url: format!("sqlite://{}?mode=rwc", path.display()),
+        dir: Some(dir),
+    }
+}
+
 async fn json_body<T: serde::de::DeserializeOwned>(resp: axum::response::Response) -> T {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
@@ -185,7 +243,7 @@ async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, Str
 
 #[tokio::test]
 async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state);
 
     let (red_guest, red_cookie) = new_guest(&app, "Red Host").await;
@@ -372,7 +430,7 @@ async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
 
 #[tokio::test]
 async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state);
 
     let (red, _) = new_guest(&app, "Red").await;
@@ -624,7 +682,7 @@ async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent(
 
 #[tokio::test]
 async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state);
 
     let (red, _) = new_guest(&app, "WS Red").await;
@@ -741,7 +799,7 @@ async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
 
 #[tokio::test]
 async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state.clone());
 
     let (red, _) = new_guest(&app, "Red").await;
@@ -922,7 +980,7 @@ async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
 
 #[tokio::test]
 async fn slice_b_takeback_rematch_pgn_export_app_links_and_outage_interruption() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state.clone());
 
     // 1. Universal Links & Android App Links `.well-known` association endpoints
@@ -1153,15 +1211,8 @@ async fn slice_b_takeback_rematch_pgn_export_app_links_and_outage_interruption()
 
 #[tokio::test]
 async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protection() {
-    let tmp_db = format!(
-        "/tmp/jade_owner_lock_test_{}.db",
-        std::process::id()
-            ^ (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos())
-    );
-    let sqlite_url = format!("sqlite:{tmp_db}?mode=rwc");
+    let db = durable_test_db("owner").await;
+    let sqlite_url = db.url.clone();
 
     let state1 = build_app_state(&sqlite_url).await.unwrap();
     let app1 = build_router(state1.clone());
@@ -1322,8 +1373,7 @@ async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protect
         .unwrap();
     assert_eq!(hijack_resp.status(), StatusCode::FORBIDDEN);
 
-    let _ = std::fs::remove_file(&tmp_db);
-    let _ = std::fs::remove_file(format!("{tmp_db}.owner.lock"));
+    drop(db);
 }
 
 /// Reads a match snapshot as the holder of `cookie` (or anonymously).
@@ -1355,7 +1405,7 @@ async fn session_as(app: &axum::Router, cookie: Option<&str>) -> axum::response:
 
 #[tokio::test]
 async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
 
@@ -1615,7 +1665,7 @@ async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
     );
 
     // 6. A revoked cookie session recovers nothing.
-    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE account_id = ?")
+    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE account_id = $1")
         .bind(&blk.account_id)
         .execute(&db)
         .await
@@ -1631,7 +1681,7 @@ async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
         .unwrap()
         .as_millis() as i64;
     let soon = now_ms + 90_000;
-    sqlx::query("UPDATE auth_sessions SET expires_at_ms = ? WHERE account_id = ?")
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = $1 WHERE account_id = $2")
         .bind(soon)
         .bind(&red.account_id)
         .execute(&db)
@@ -1651,7 +1701,7 @@ async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
     assert_eq!(partial.expires_at_ms, soon);
 
     // 7. An expired session recovers nothing and no longer reads the private replay.
-    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE account_id = ?")
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE account_id = $1")
         .bind(&red.account_id)
         .execute(&db)
         .await
@@ -1719,14 +1769,9 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
 
 #[tokio::test]
 async fn concurrent_saves_of_one_revision_apply_once() {
-    // A file-backed database, so the two saves run on separate connections and compete for the write lock.
-    let dir = std::env::temp_dir().join(format!("jade-concurrent-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("game.sqlite3");
-    let _ = std::fs::remove_file(&path);
-    let state = build_app_state(&format!("sqlite://{}?mode=rwc", path.display()))
-        .await
-        .unwrap();
+    // A durable database, so the two saves run on separate connections and compete for the write lock.
+    let db = durable_test_db("concurrent").await;
+    let state = build_app_state(&db.url).await.unwrap();
     let app = build_router(state);
     let (red, _red_cookie) = new_guest(&app, "Red").await;
     let (blk, _blk_cookie) = new_guest(&app, "Black").await;
@@ -1759,12 +1804,12 @@ async fn concurrent_saves_of_one_revision_apply_once() {
         revision + 1
     );
     drop(app);
-    let _ = std::fs::remove_dir_all(&dir);
+    drop(db);
 }
 
 #[tokio::test]
 async fn the_state_version_advances_with_every_change_by_either_participant() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
     let (blk, _) = new_guest(&app, "Black").await;
@@ -1893,7 +1938,7 @@ async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
 #[tokio::test]
 async fn an_open_stream_ends_with_its_session() {
     use sha2::Digest;
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2001,7 +2046,7 @@ async fn snapshot_for(app: &axum::Router, token: &str, match_id: &str) -> MatchS
 #[tokio::test]
 async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
     use sha2::Digest;
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state.clone());
     let (red, _) = new_guest(&app, "Red").await;
@@ -2048,7 +2093,7 @@ async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
 
 #[tokio::test]
 async fn a_read_only_session_check_sets_no_cookie() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let app = build_router(state);
     let (_guest, cookie) = new_guest(&app, "Guest").await;
     let check = |query: &'static str| {
@@ -2068,7 +2113,7 @@ async fn a_read_only_session_check_sets_no_cookie() {
 
 #[tokio::test]
 async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let state = build_app_state(&test_db_url().await).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2095,7 +2140,7 @@ async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
     sqlx::query(
         "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
          SELECT match_id, seq + 1, 'planted', actor_side, event_type, payload_json, created_at_ms
-         FROM match_events WHERE match_id = ? AND seq = 1",
+         FROM match_events WHERE match_id = $1 AND seq = 1",
     )
     .bind(&match_id)
     .execute(&db)
@@ -2121,11 +2166,8 @@ async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
 
 #[tokio::test]
 async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a_restart() {
-    let dir = std::env::temp_dir().join(format!("jade-turns-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("game.sqlite3");
-    let _ = std::fs::remove_file(&path);
-    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let db = durable_test_db("turns").await;
+    let url = db.url.clone();
     let state = build_app_state(&url).await.unwrap();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2223,5 +2265,54 @@ async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a
     let after_restart = snapshot_for(&restarted, &red.access_token, &match_id).await;
     assert_eq!(generation(&after_restart), 4);
     drop(restarted);
-    let _ = std::fs::remove_dir_all(&dir);
+    drop(db);
+}
+
+#[tokio::test]
+async fn an_existing_postgres_database_gains_the_added_counters_at_startup() {
+    // Runs only against a configured PostgreSQL server; the SQLite form of this check is the test above.
+    let Some(url) = fresh_postgres_url().await else {
+        return;
+    };
+    let old_schema = include_str!("../../../db/game/0001_initial_game_schema.sql")
+        .lines()
+        .filter(|line| {
+            !line.contains("_choices_revision")
+                && !line.contains("advance a revision")
+                && !line.contains("state_version")
+                && !line.contains("Advances with every change to the match")
+                && !line.contains("turn_generation")
+                && !line.contains("Advances only when a new turn begins")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let columns = |pool: sqlx::AnyPool| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'matches'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    {
+        let pool = sqlx::AnyPool::connect(&url).await.unwrap();
+        sqlx::raw_sql(&old_schema).execute(&pool).await.unwrap();
+        let before = columns(pool.clone()).await;
+        assert!(
+            !before
+                .iter()
+                .any(|c| c.ends_with("_choices_revision") || c == "state_version")
+        );
+        pool.close().await;
+    }
+    let state = build_app_state(&url).await.unwrap();
+    let after = columns(state.db.clone()).await;
+    for added in [
+        "red_choices_revision",
+        "black_choices_revision",
+        "state_version",
+        "turn_generation",
+    ] {
+        assert!(after.iter().any(|c| c == added), "{added}");
+    }
 }

@@ -5,3 +5,4 @@ pnpm = "12.15.0"
 "aqua:go-task/task" = "3.54.0"
 "github:pithecene/bosun" = { version = "0.28.1", os = ["linux", "macos"] }
 sccache = "0.19.0"
+postgres = "18.7"
