@@ -296,23 +296,57 @@ function isSnapshotOf(data: unknown, matchId: string | undefined): data is Match
   )
 }
 
+/** A version this room's own save wrote; the effective visibility shown stays unconfirmed until a snapshot that new. */
+let awaitingVersion: number | null = null
+
 /**
- * Installs a snapshot from the stream or any HTTP reply and reports whether it was taken. The server advances a
- * match's state version with every change it stores, so a snapshot of the shown match is taken only when its version
- * is newer: whatever order the routes deliver them in, the room never goes back, and the same state arriving again
- * (with clocks read at another moment) changes nothing. Another match (a rematch) starts its own order.
+ * Installs a snapshot from the stream or any HTTP reply and reports whether it was taken; a taken snapshot sets the
+ * clocks too. The server advances a match's state version with every change it stores, so a snapshot of the shown match
+ * is taken only when its version is newer: whatever order the routes deliver them in, the room never goes back. The
+ * same version again is the same stored state, read at another moment, so it can only bring a running clock down to
+ * the server's fresher reading. A server that sends no version is ordered by event sequence instead. Another match (a
+ * rematch) starts its own order.
  */
 function install(snap: MatchSnapshot): boolean {
+  const current = snapshot.value
+  const sameMatch = current?.match_id === snap.match_id
+  // A snapshot with an unknown effective visibility is malformed; it does not use up its version, so a valid copy of
+  // the same state can still be shown.
+  if (!VISIBILITIES.includes(snap.visibility)) {
+    if (sameMatch) visibilityConfirmed.value = false
+    return false
+  }
   const version = snap.state_version
   const versioned = Number.isSafeInteger(version) && (version as number) >= 0
-  if (snapshot.value && shownVersion?.matchId === snap.match_id && (!versioned || (version as number) <= shownVersion.version)) {
-    return false
+  if (current && sameMatch) {
+    if (shownVersion) {
+      if (!versioned || (version as number) < shownVersion.version) return false
+      if (version === shownVersion.version) {
+        lowerRunningClock(snap)
+        return false
+      }
+    } else if (snap.seq < current.seq) {
+      return false
+    }
+  } else {
+    awaitingVersion = null
   }
   snapshot.value = snap
   shownVersion = versioned ? { matchId: snap.match_id, version: version as number } : null
+  const caughtUp = versioned && (awaitingVersion === null || (version as number) >= awaitingVersion)
+  if (caughtUp) awaitingVersion = null
   // A snapshot without a version cannot be ordered, so its effective visibility is shown as not confirmed.
-  visibilityConfirmed.value = versioned && VISIBILITIES.includes(snap.visibility)
+  visibilityConfirmed.value = caughtUp
+  syncClocksFromSnapshot(snap)
   return true
+}
+
+/** Brings the running clock down to the server's reading of the same stored state when that reading is lower. */
+function lowerRunningClock(snap: MatchSnapshot) {
+  if (snap.status !== 'playing') return
+  const incoming = snap.side_to_move === 'red' ? snap.red_remaining_ms : snap.black_remaining_ms
+  const shown = snap.side_to_move === 'red' ? displayRedMs.value : displayBlackMs.value
+  if (incoming !== null && shown !== null && incoming < shown) syncClocksFromSnapshot(snap)
 }
 
 /**
@@ -395,13 +429,15 @@ async function refreshChoices(): Promise<boolean> {
   if (!matchId) return false
   try {
     const resp = await guestFetch(`/api/v1/matches/${matchId}`)
-    const snap = resp.ok ? ((await resp.json().catch(() => null)) as MatchSnapshot | null) : null
+    const read: unknown = resp.ok ? await resp.json().catch(() => null) : null
+    // A read of another match, or one missing what the room reads, is a failed read: none of it is used.
+    const snap = isSnapshotOf(read, matchId) ? read : null
     if (roomStopped.value) return false
     // Only a snapshot actually shown counts as confirmed; one ignored as older or malformed does not.
     const shown = snap ? hydrateChoices(snap) : false
     if (roomStopped.value) return false
     // The read installs like any snapshot: only if it is newer than the one shown, whichever participant changed it.
-    if (snap && isSnapshotOf(snap, matchId)) install(snap)
+    if (snap) install(snap)
     if (snap && shown) return true
     // A read superseded by a newer snapshot already shown leaves that newer confirmation in place.
     if (
@@ -445,7 +481,7 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
       true,
     )
     const ack = (await resp.json().catch(() => null)) as
-      | { effective_visibility?: unknown; choices_revision?: unknown }
+      | { effective_visibility?: unknown; choices_revision?: unknown; state_version?: unknown }
       | null
     if (resp.status === 409) {
       outcome = `${CHOICE_LABELS[field]} was not saved: your choices changed in another tab. Showing what is saved now.`
@@ -459,6 +495,15 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
     ) {
       // A save advances the revision by exactly one; any other acknowledgment is not adopted.
       shownRevision = madeAgainst + 1
+      // The save changed what the match's effective visibility may be; until a snapshot at least as new as the version
+      // it wrote is shown, the summary says it is not confirmed rather than show the state before the save.
+      if (
+        Number.isSafeInteger(ack.state_version) &&
+        (!shownVersion || (ack.state_version as number) > shownVersion.version)
+      ) {
+        awaitingVersion = Math.max(awaitingVersion ?? 0, ack.state_version as number)
+        visibilityConfirmed.value = false
+      }
       // The effective visibility is shown in one place, the summary above, which the read-back keeps current.
       outcome = `${CHOICE_LABELS[field]} saved. Sharing takes effect only when both players choose it.`
     } else {
@@ -533,10 +578,9 @@ function connectMatchWebSocket(matchId: string) {
       const data = JSON.parse(String(ev.data))
       if (isSnapshotOf(data, snapshot.value?.match_id)) {
         const prevLen = snapshot.value?.moves_uci.length ?? 0
-        const taken = install(data)
+        install(data)
         hydrateChoices(data)
         if (roomStopped.value) return
-        if (taken) syncClocksFromSnapshot(snapshot.value!)
         if (snapshot.value!.moves_uci.length > prevLen) {
           void percussionPlayer.play(material.value, 'place', soundEnabled.value, false)
           const latestZh = snapshot.value!.moves_chinese[snapshot.value!.moves_chinese.length - 1]
@@ -603,10 +647,9 @@ async function recoverGapAndReconnect(matchId: string) {
       if (roomStopped.value) return
       // An unreadable read installs nothing, and the stream can still be reopened below.
       if (isSnapshotOf(snap, matchId)) {
-        const taken = install(snap)
+        install(snap)
         hydrateChoices(snap)
         if (roomStopped.value) return
-        if (taken) syncClocksFromSnapshot(snapshot.value!)
         if (snapshot.value?.status === 'finished') {
           connectionState.value = 'connected'
           return
@@ -657,7 +700,6 @@ async function joinAndSubscribe() {
       redBelow.value = false
     }
     const shown = snapshot.value ?? first
-    syncClocksFromSnapshot(shown)
     connectionState.value = shown.status === 'finished' ? 'connected' : 'connecting'
     if (shown.status !== 'finished') {
       connectMatchWebSocket(shown.match_id)
@@ -698,10 +740,9 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
     if (matchId) void recoverGapAndReconnect(matchId)
     return
   }
-  const taken = install(data)
+  install(data)
   hydrateChoices(data)
   if (roomStopped.value) return
-  if (taken) syncClocksFromSnapshot(snapshot.value!)
   await refreshBoard()
 }
 

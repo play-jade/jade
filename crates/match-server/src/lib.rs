@@ -2500,10 +2500,13 @@ async fn load_match_snapshot(
             message: "Match not found".to_string(),
         })?;
 
+    // Events are read up to the sequence the row was read at, so a move committed between the two reads cannot appear
+    // in the move list of a snapshot whose position, turn, clocks, and version are from before it.
     let all_events = sqlx::query(
-        "SELECT seq, command_id, actor_side, event_type, payload_json, created_at_ms FROM match_events WHERE match_id = ? ORDER BY seq ASC",
+        "SELECT seq, command_id, actor_side, event_type, payload_json, created_at_ms FROM match_events WHERE match_id = ? AND seq <= ? ORDER BY seq ASC",
     )
     .bind(match_id)
+    .bind(m.get::<i64, _>("current_seq"))
     .fetch_all(db)
     .await
     .map_err(|e| ApiError {

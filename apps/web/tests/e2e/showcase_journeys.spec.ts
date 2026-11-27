@@ -747,18 +747,32 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         },
         { times: 1 },
       )
+      // The stream stays closed until the reply is handled: the reconnect's reads fail meanwhile, as offline.
+      let blockRecovery = true
+      await redPage.route(/\/api\/v1\/matches\/[^/?]+\?since_seq=\d+$/, (route) =>
+        blockRecovery ? route.abort() : route.fallback(),
+      )
       await playBoardSquares(redPage, 'b0', 'c2')
       await expect(redPage.getByTestId('match-moves-card')).toContainText('2.H8+7')
-      await redStreams[redStreams.length - 1]!.close()
-      await redPage.waitForTimeout(2_500)
+      const streamsBefore = redStreams.length
+      await redStreams[streamsBefore - 1]!.close()
+      await redPage.waitForTimeout(2_000)
       const seconds = async () => {
         const [m, sec] = (await redPage.getByTestId('clock-black').innerText()).trim().split(':').map(Number)
         return m! * 60 + sec!
       }
       const beforeReply = await seconds()
+      const replied = redPage.waitForEvent('requestfinished', { predicate: (r) => r.url().endsWith('/commands') })
       releaseReply()
-      await redPage.waitForTimeout(800)
-      expect(await seconds()).toBeLessThanOrEqual(beforeReply)
+      await replied
+      // Sampled across the reply's handling, Black's clock never shows more time than before the reply.
+      for (let i = 0; i < 10; i++) {
+        expect(await seconds()).toBeLessThanOrEqual(beforeReply)
+        await redPage.waitForTimeout(100)
+      }
+      expect(redStreams.length).toBe(streamsBefore)
+      blockRecovery = false
+      await expect.poll(() => redStreams.length).toBe(streamsBefore + 1)
 
       // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
       let releaseSave: () => void = () => {}
