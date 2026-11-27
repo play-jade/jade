@@ -55,15 +55,24 @@ pub enum Backend {
     Postgres,
 }
 
-/// The longest command ID accepted, in bytes.
+/// The longest command ID accepted for a new event, in bytes.
 pub const MAX_COMMAND_ID_BYTES: usize = 128;
+
+fn invalid_command_id() -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_command_id",
+        message: format!("A command ID is 1 to {MAX_COMMAND_ID_BYTES} bytes, without NUL"),
+    }
+}
 
 /// Reads a database setting into the backend it names and the URL to open it by. A `postgres:` or `postgresql:` URL
 /// (any letter case) is PostgreSQL; a `sqlite:` URL, or a bare file name as earlier settings allowed, is SQLite. Any
 /// other scheme is refused before anything touches the filesystem.
 pub fn parse_database_url(setting: &str) -> Result<(Backend, String), sqlx::Error> {
-    let unsupported = || {
-        sqlx::Error::Configuration(format!("unsupported database URL scheme in {setting:?}").into())
+    // The error names the scheme alone: the setting may carry credentials, and startup errors reach the logs.
+    let unsupported = |scheme: &str| {
+        sqlx::Error::Configuration(format!("unsupported database URL scheme {scheme:?}").into())
     };
     let scheme_end = setting.find(':');
     let scheme = scheme_end.map(|end| setting[..end].to_ascii_lowercase());
@@ -77,7 +86,7 @@ pub fn parse_database_url(setting: &str) -> Result<(Backend, String), sqlx::Erro
             format!("sqlite{}", &setting[scheme_end.unwrap()..]),
         )),
         // A scheme followed by `//` names some other service; a bare file name has none.
-        Some(_) if setting[scheme_end.unwrap()..].starts_with("://") => Err(unsupported()),
+        Some(other) if setting[scheme_end.unwrap()..].starts_with("://") => Err(unsupported(other)),
         _ => Ok((Backend::Sqlite, format!("sqlite:{setting}"))),
     }
 }
@@ -466,11 +475,36 @@ fn extract_sqlite_file_path(sqlite_url: &str) -> Option<std::path::PathBuf> {
     };
     if path_part.is_empty()
         || path_part == ":memory:"
-        || query_part.split('&').any(|kv| kv == "mode=memory")
+        || query_part
+            .split('&')
+            .any(|kv| percent_decode(kv) == "mode=memory")
     {
         return None;
     }
-    Some(std::path::PathBuf::from(path_part))
+    // The file the SQLite driver opens is the percent-decoded name, so the owner lock is taken beside that same file
+    // whichever way the setting spells it.
+    Some(std::path::PathBuf::from(percent_decode(path_part)))
+}
+
+/// Decodes `%XX` escapes the way the SQLite driver reads a URL's file name and options; anything else is kept as is.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let hex = |b: u8| (b as char).to_digit(16);
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The URL the pool opens. The generic driver parses its URL again for every connection, and each parse of an
@@ -486,7 +520,11 @@ fn pool_url(db_url: &str, backend: Backend) -> Result<String, sqlx::Error> {
         .map(|(_, query)| query)
         .unwrap_or("")
         .split('&')
-        .filter(|kv| !kv.is_empty() && !kv.starts_with("mode=") && !kv.starts_with("cache="))
+        .filter(|kv| {
+            // Options are judged by their decoded names, as the driver reads them.
+            let key = percent_decode(kv.split('=').next().unwrap_or(""));
+            !kv.is_empty() && key != "mode" && key != "cache"
+        })
         .map(|kv| format!("&{kv}"))
         .collect::<String>();
     static IN_MEMORY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -663,6 +701,10 @@ pub async fn mark_interrupted_timed_matches_on_startup(db: &AnyPool) -> Result<u
         let mid: String = r.get("match_id");
         let seq = r.get::<i64, _>("current_seq") + 1;
         let mut tx = db.begin().await?;
+        // Recovery writes match state too: a server that lost ownership while starting interrupts nothing.
+        fence(&mut tx)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.message))?;
         sqlx::query(
             "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
              VALUES ($1, $2, $3, 'system', 'interrupted', '{\"reason\":\"server_interruption\"}', $4)",
@@ -2201,13 +2243,9 @@ async fn process_single_command(
             ..
         } => (command_id.as_str(), *expected_seq),
     };
-    // Command IDs are stored and indexed for idempotency; one bound keeps every backend accepting the same IDs.
-    if cmd_id.is_empty() || cmd_id.len() > MAX_COMMAND_ID_BYTES {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_command_id",
-            message: format!("A command ID is 1 to {MAX_COMMAND_ID_BYTES} bytes"),
-        });
+    // PostgreSQL text cannot hold NUL, so an ID with one is refused on every backend before it is looked up.
+    if cmd_id.is_empty() || cmd_id.contains('\0') {
+        return Err(invalid_command_id());
     }
 
     // 1. Load current match seats, sequence, status, and clocks
@@ -2263,6 +2301,10 @@ async fn process_single_command(
             })?;
     if existing.is_some() {
         return load_match_snapshot(db, match_id, None).await;
+    }
+    // A new event's ID is stored and indexed, so it is bounded; a retry of an ID committed earlier was answered above.
+    if cmd_id.len() > MAX_COMMAND_ID_BYTES {
+        return Err(invalid_command_id());
     }
 
     if status != "playing" {
@@ -3129,6 +3171,19 @@ mod session_cookie_tests {
         let url = pool_url("sqlite::memory:?vfs=unix-none", Backend::Sqlite).unwrap();
         assert!(url.ends_with("&vfs=unix-none"), "{url}");
         assert!(pool_url("sqlite::memory:?not_an_option=1", Backend::Sqlite).is_err());
+        // An encoded spelling of `cache` is still the cache option, which the shared database decides.
+        let url = pool_url("sqlite::memory:?%63ache=private", Backend::Sqlite).unwrap();
+        assert!(!url.contains("%63ache"), "{url}");
+        assert!(
+            super::parse_database_url("mysql://u:secret@h/game")
+                .unwrap_err()
+                .to_string()
+                .contains("\"mysql\"")
+                && !super::parse_database_url("mysql://u:secret@h/game")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("secret")
+        );
     }
 
     #[test]

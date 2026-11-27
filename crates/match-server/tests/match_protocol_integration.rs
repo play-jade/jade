@@ -39,9 +39,78 @@ async fn connect_ws_duplex(
 
 static TEST_DB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A test's database, removed when the test ends: a PostgreSQL database dropped from its server, or a SQLite file's
+/// directory deleted. A private in-memory SQLite database needs neither.
+struct TestDb {
+    url: String,
+    postgres: Option<(String, String)>,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some((admin, name)) = self.postgres.take() {
+            // Dropping runs outside the test's runtime, on a thread of its own; FORCE ends sessions still open.
+            let _ = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    if let Ok(mut conn) =
+                        <sqlx::AnyConnection as sqlx::Connection>::connect(&admin).await
+                    {
+                        let _ =
+                            sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                                .execute(&mut conn)
+                                .await;
+                    }
+                });
+            })
+            .join();
+        }
+    }
+}
+
+/// Sets query options on a URL, replacing any it already has with the same names; values are percent-encoded.
+fn with_query(url: &str, set: &[(&str, &str)]) -> String {
+    let (location, query) = url.split_once('?').unwrap_or((url, ""));
+    let encode = |v: &str| {
+        v.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    let mut pairs: Vec<String> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty())
+        .filter(|kv| {
+            let key = kv.split('=').next().unwrap_or("");
+            !set.iter().any(|(name, _)| key.eq_ignore_ascii_case(name))
+        })
+        .map(str::to_string)
+        .collect();
+    pairs.extend(
+        set.iter()
+            .map(|(name, value)| format!("{name}={}", encode(value))),
+    );
+    if pairs.is_empty() {
+        location.to_string()
+    } else {
+        format!("{location}?{}", pairs.join("&"))
+    }
+}
+
 /// A fresh database on the PostgreSQL server `JADE_TEST_POSTGRES_URL` names (a URL ending in a database to connect to
 /// for administration, such as `postgres://jade@127.0.0.1:55432/postgres`), or `None` when it names none.
-async fn fresh_postgres_url() -> Option<String> {
+async fn fresh_postgres() -> Option<TestDb> {
     let admin = std::env::var("JADE_TEST_POSTGRES_URL")
         .ok()
         .filter(|u| !u.is_empty())?;
@@ -60,49 +129,60 @@ async fn fresh_postgres_url() -> Option<String> {
         .execute(&mut conn)
         .await
         .expect("create a test database");
-    // Only the database name changes: the server, credentials, and connection options stay as configured.
-    let (location, options) = match admin.split_once('?') {
-        Some((location, options)) => (location, format!("?{options}")),
-        None => (admin.as_str(), String::new()),
-    };
+    // Only the database changes: the server, credentials, and other options stay as configured, and a `dbname` option,
+    // which would otherwise override the path, is removed.
+    let (location, query) = admin.split_once('?').unwrap_or((admin.as_str(), ""));
     let (server, _) = location
         .rsplit_once('/')
         .expect("a URL that names a database");
-    Some(format!("{server}/{name}{options}"))
+    let options: Vec<&str> = query
+        .split('&')
+        .filter(|kv| {
+            !kv.is_empty()
+                && !kv
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("dbname")
+        })
+        .collect();
+    let url = if options.is_empty() {
+        format!("{server}/{name}")
+    } else {
+        format!("{server}/{name}?{}", options.join("&"))
+    };
+    Some(TestDb {
+        url,
+        postgres: Some((admin, name)),
+        dir: None,
+    })
 }
 
 /// The database a test runs on: a fresh PostgreSQL database when one is configured, else private in-memory SQLite.
-async fn test_db_url() -> String {
-    fresh_postgres_url()
-        .await
-        .unwrap_or_else(|| "sqlite::memory:".to_string())
-}
-
-/// A database that outlives one server, for restart and concurrent-writer tests: a fresh PostgreSQL database when one
-/// is configured, else a new SQLite file, removed with its directory when the test ends.
-struct DurableTestDb {
-    url: String,
-    dir: Option<std::path::PathBuf>,
-}
-
-impl Drop for DurableTestDb {
-    fn drop(&mut self) {
-        if let Some(dir) = &self.dir {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+async fn test_db() -> TestDb {
+    match fresh_postgres().await {
+        Some(db) => db,
+        None => TestDb {
+            url: "sqlite::memory:".to_string(),
+            postgres: None,
+            dir: None,
+        },
     }
 }
 
-async fn durable_test_db(label: &str) -> DurableTestDb {
-    if let Some(url) = fresh_postgres_url().await {
-        return DurableTestDb { url, dir: None };
+/// A database that outlives one server, for restart and concurrent-writer tests: a fresh PostgreSQL database when one
+/// is configured, else a new SQLite file.
+async fn durable_test_db(label: &str) -> TestDb {
+    if let Some(db) = fresh_postgres().await {
+        return db;
     }
     let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("jade-{label}-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("game.sqlite3");
-    DurableTestDb {
+    TestDb {
         url: format!("sqlite://{}?mode=rwc", path.display()),
+        postgres: None,
         dir: Some(dir),
     }
 }
@@ -255,7 +335,8 @@ async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, Str
 
 #[tokio::test]
 async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
 
     let (red_guest, red_cookie) = new_guest(&app, "Red Host").await;
@@ -442,7 +523,8 @@ async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
 
 #[tokio::test]
 async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
 
     let (red, _) = new_guest(&app, "Red").await;
@@ -694,7 +776,8 @@ async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent(
 
 #[tokio::test]
 async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
 
     let (red, _) = new_guest(&app, "WS Red").await;
@@ -811,7 +894,8 @@ async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
 
 #[tokio::test]
 async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state.clone());
 
     let (red, _) = new_guest(&app, "Red").await;
@@ -992,7 +1076,8 @@ async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
 
 #[tokio::test]
 async fn slice_b_takeback_rematch_pgn_export_app_links_and_outage_interruption() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state.clone());
 
     // 1. Universal Links & Android App Links `.well-known` association endpoints
@@ -1417,7 +1502,8 @@ async fn session_as(app: &axum::Router, cookie: Option<&str>) -> axum::response:
 
 #[tokio::test]
 async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
 
@@ -1821,7 +1907,8 @@ async fn concurrent_saves_of_one_revision_apply_once() {
 
 #[tokio::test]
 async fn the_state_version_advances_with_every_change_by_either_participant() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
     let (blk, _) = new_guest(&app, "Black").await;
@@ -1950,7 +2037,8 @@ async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
 #[tokio::test]
 async fn an_open_stream_ends_with_its_session() {
     use sha2::Digest;
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2058,7 +2146,8 @@ async fn snapshot_for(app: &axum::Router, token: &str, match_id: &str) -> MatchS
 #[tokio::test]
 async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
     use sha2::Digest;
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state.clone());
     let (red, _) = new_guest(&app, "Red").await;
@@ -2105,7 +2194,8 @@ async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
 
 #[tokio::test]
 async fn a_read_only_session_check_sets_no_cookie() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
     let (_guest, cookie) = new_guest(&app, "Guest").await;
     let check = |query: &'static str| {
@@ -2125,7 +2215,8 @@ async fn a_read_only_session_check_sets_no_cookie() {
 
 #[tokio::test]
 async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
-    let state = build_app_state(&test_db_url().await).await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2283,9 +2374,10 @@ async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a
 #[tokio::test]
 async fn an_existing_postgres_database_gains_the_added_counters_at_startup() {
     // Runs only against a configured PostgreSQL server; the SQLite form of this check is the test above.
-    let Some(url) = fresh_postgres_url().await else {
+    let Some(pg) = fresh_postgres().await else {
         return;
     };
+    let url = pg.url.clone();
     let old_schema = include_str!("../../../db/game/0001_initial_game_schema.sql")
         .lines()
         .filter(|line| {
@@ -2331,9 +2423,10 @@ async fn an_existing_postgres_database_gains_the_added_counters_at_startup() {
 
 #[tokio::test]
 async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_starts() {
-    let Some(url) = fresh_postgres_url().await else {
+    let Some(pg) = fresh_postgres().await else {
         return;
     };
+    let url = pg.url.clone();
     let first = build_router(build_app_state(&url).await.unwrap());
     let (red, _) = new_guest(&first, "Red").await;
     let (blk, _) = new_guest(&first, "Black").await;
@@ -2359,8 +2452,18 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
     let mut admin = <sqlx::AnyConnection as sqlx::Connection>::connect(&url)
         .await
         .unwrap();
+    // The session runs in this test's own database before anything is ended.
+    let here: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        pg.postgres.as_ref().map(|(_, name)| name.as_str()),
+        Some(here.as_str())
+    );
+    // Each owner session must have ended, not just been signalled, before the second server starts.
     let ended: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) FROM pg_locks
+        "SELECT count(*) FILTER (WHERE ended) FROM (SELECT pg_terminate_backend(pid, 5000) AS ended FROM pg_locks
          WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()
            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())) ended",
     )
@@ -2381,6 +2484,10 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
             to: [6, 2],
         },
     };
+    let choices_before = snapshot_for(&second, &red.access_token, &match_id)
+        .await
+        .viewer_choices
+        .unwrap();
     let refused = post_command(&first, &red.access_token, &match_id, &mv).await;
     assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
     let refused: serde_json::Value = json_body(refused).await;
@@ -2400,6 +2507,12 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
     let now = snapshot_for(&second, &red.access_token, &match_id).await;
     assert_eq!(now.seq, 0);
     assert_eq!(now.visibility, Visibility::Private);
+    let choices_after = now.viewer_choices.unwrap();
+    assert_eq!(
+        choices_after.revision, choices_before.revision,
+        "Red's choices were not saved"
+    );
+    assert_eq!(choices_after.visibility, choices_before.visibility);
     // The new owner plays the same move.
     assert_eq!(
         post_command(&second, &red.access_token, &match_id, &mv)
@@ -2411,7 +2524,10 @@ async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_
 
 #[tokio::test]
 async fn command_ids_have_one_bound_on_every_backend() {
-    let app = build_router(build_app_state(&test_db_url().await).await.unwrap());
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
     let (blk, _) = new_guest(&app, "Black").await;
     let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
@@ -2435,6 +2551,25 @@ async fn command_ids_have_one_bound_on_every_backend() {
             .status(),
         StatusCode::OK
     );
+    let nul = post_command(
+        &app,
+        &red.access_token,
+        &match_id,
+        &mv("a\u{0}b".to_string()),
+    )
+    .await;
+    assert_eq!(nul.status(), StatusCode::BAD_REQUEST);
+    // An ID committed before the bound existed is still a retry: its snapshot comes back, nothing is appended.
+    sqlx::query("UPDATE match_events SET command_id = $1 WHERE match_id = $2 AND seq = 1")
+        .bind("y".repeat(200))
+        .bind(&match_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let retried = post_command(&app, &red.access_token, &match_id, &mv("y".repeat(200))).await;
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried: MatchSnapshotResponse = json_body(retried).await;
+    assert_eq!(retried.seq, 1);
 }
 
 #[tokio::test]
@@ -2444,24 +2579,19 @@ async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
     std::fs::create_dir_all(&dir).unwrap();
     let setting = format!("{}?mode=rwc", dir.join("game.db").display());
     let app = build_router(build_app_state(&setting).await.unwrap());
-    let (guest, _) = new_guest(&app, "Guest").await;
+    let (guest, cookie) = new_guest(&app, "Guest").await;
     drop(app);
     let reopened = build_router(build_app_state(&setting).await.unwrap());
-    let req = Request::builder()
-        .uri("/api/v1/auth/session")
-        .header("authorization", format!("Bearer {}", guest.access_token))
-        .body(Body::empty())
-        .unwrap();
-    let _ = reopened.clone().oneshot(req).await.unwrap();
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
-        .fetch_one(
-            &sqlx::AnyPool::connect(&format!("sqlite:{setting}"))
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(count, 1, "the reopened server reads the same file");
+    let recovered = session_as(&reopened, Some(&cookie)).await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let recovered: CurrentSessionResponse = json_body(recovered).await;
+    assert_eq!(
+        recovered.account_id, guest.account_id,
+        "the reopened server reads the same file"
+    );
+    // While it runs, the same file spelled another way is the same database, and a second server is refused.
+    let respelled = format!("{}?mode=rwc", dir.join("game%2Edb").display());
+    assert!(build_app_state(&respelled).await.is_err());
     drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2475,13 +2605,17 @@ async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
     else {
         return;
     };
-    let Some(url) = fresh_postgres_url().await else {
+    let Some(pg) = fresh_postgres().await else {
         return;
     };
+    let url = pg.url.clone();
     // Checked against the server's authority, the connection is made and is encrypted.
-    let state = build_app_state(&format!("{url}?sslmode=verify-full&sslrootcert={ca}"))
-        .await
-        .unwrap();
+    let state = build_app_state(&with_query(
+        &url,
+        &[("sslmode", "verify-full"), ("sslrootcert", &ca)],
+    ))
+    .await
+    .unwrap();
     let encrypted: bool =
         sqlx::query_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
             .fetch_one(&state.db)
@@ -2491,7 +2625,7 @@ async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
     drop(state);
     // Checked only against the public authorities the server ships with, an unknown certificate is refused.
     assert!(
-        build_app_state(&format!("{url}?sslmode=verify-full"))
+        build_app_state(&with_query(&url, &[("sslmode", "verify-full")]))
             .await
             .is_err()
     );
