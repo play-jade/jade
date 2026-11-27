@@ -8,11 +8,11 @@ const repoRoot = resolve(currentDir, '../..')
 const fastTargetDir = existsSync('/tmp/jade-target-core') ? '/tmp/jade-target-core' : undefined
 
 // With PLAYWRIGHT_BASE_URL set, the journeys run against that deployed origin (its match server and web application
-// behind one host) and start no local servers. A set but empty or relative value is refused rather than read as unset,
+// behind one host) and start no local servers. A set value that is not an http(s) URL is refused rather than read as unset,
 // so a qualification run never falls back to local servers.
 const deployedOrigin = process.env.PLAYWRIGHT_BASE_URL
-if (deployedOrigin !== undefined && !URL.canParse(deployedOrigin)) {
-  throw new Error(`PLAYWRIGHT_BASE_URL must be the deployed origin's absolute URL, not ${JSON.stringify(deployedOrigin)}`)
+if (deployedOrigin !== undefined && !['http:', 'https:'].includes(URL.parse(deployedOrigin)?.protocol ?? '')) {
+  throw new Error(`PLAYWRIGHT_BASE_URL must be the deployed origin's http(s) URL, not ${JSON.stringify(deployedOrigin)}`)
 }
 
 export default defineConfig({
