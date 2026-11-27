@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { parsePlyQuery } from '~/composables/useReplaySession'
+import { computeBoardView } from '~/utils/core-wasm'
 import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
@@ -41,17 +42,25 @@ const loadError = ref<string | null>(null)
 
 const redBelow = ref(true)
 const selectedUci = ref<string | null>(null)
-const cursorPly = ref(0)
-const branchOriginPly = ref<number | null>(null)
-const branchMovesUci = ref<string[]>([])
+// The guest who owns this private match's local variation; set from the browser session on mount.
+const ownerScope = ref<string | null>(null)
 
-const activeMovesUci = computed(() => {
-  const main = snapshot.value?.moves_uci ?? []
-  if (branchOriginPly.value !== null) {
-    return [...main.slice(0, branchOriginPly.value), ...branchMovesUci.value]
-  }
-  return main.slice(0, cursorPly.value)
+const session = useReplaySession({
+  source: computed(() =>
+    snapshot.value ? { kind: 'match', id: snapshot.value.match_id, revision: String(snapshot.value.seq) } : null,
+  ),
+  rootFen: ref(STARTING_FEN),
+  rulesProfile: computed(() => snapshot.value?.rules_profile ?? config.public.rulesProfile),
+  recordedMovesUci: computed(() => snapshot.value?.moves_uci ?? []),
+  ownerScope,
+  traditionalGlyphs,
+  // A private match's variation is kept only for a known guest; otherwise it stays in this tab.
+  persist: computed(() => ownerScope.value !== null),
+  unpersistedReason: computed(() =>
+    ownerScope.value === null ? 'This tab does not know your guest identity, so the variation is not kept' : null,
+  ),
 })
+const { cursor: cursorPly, variation, activePath: activeMovesUci } = session
 
 const { data: boardData, refresh: refreshBoard } = await useAsyncData(
   () => `replay-match-${matchId.value}`,
@@ -83,6 +92,7 @@ onMounted(async () => {
       if (sess?.access_token) {
         tokenHeader = { authorization: `Bearer ${sess.access_token}` }
       }
+      ownerScope.value = typeof sess?.account_id === 'string' && sess.account_id.trim() !== '' ? sess.account_id : null
     }
     const resp = await fetch(`${config.public.matchServerUrl}/api/v1/matches/${matchId.value}`, {
       credentials: 'include',
@@ -98,10 +108,10 @@ onMounted(async () => {
     }
     const data = (await resp.json()) as MatchSnapshot
     snapshot.value = data
-    const qPly = Number(route.query.ply)
-    cursorPly.value = Number.isFinite(qPly)
-      ? Math.max(0, Math.min(data.moves_uci.length, qPly))
-      : data.moves_uci.length
+    const linkedPly = parsePlyQuery(route.query.ply)
+    await nextTick()
+    session.selectPly(linkedPly ?? data.moves_uci.length)
+    await session.restoreDraft({ keepPosition: linkedPly !== null })
     await refreshBoard()
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : String(err)
@@ -111,30 +121,42 @@ onMounted(async () => {
 function stepToPly(ply: number) {
   if (!snapshot.value) return
   selectedUci.value = null
-  branchOriginPly.value = null
-  branchMovesUci.value = []
-  const clamped = Math.max(0, Math.min(snapshot.value.moves_uci.length, ply))
-  cursorPly.value = clamped
-  void router.replace({ query: { ...route.query, ply: String(clamped) } })
+  session.selectPly(ply)
+  void router.replace({ query: { ...route.query, ply: String(cursorPly.value) } })
 }
 
+// Replay exploration is local: it validates through the core and never sends a match command.
 async function handleTryMove(fromUci: string, toUci: string) {
   selectedUci.value = null
-  try {
-    const applied = await applyCoreMove({
-      fen: STARTING_FEN,
-      movesUci: activeMovesUci.value,
-      token: `${fromUci}${toUci}`,
-      traditionalGlyphs: traditionalGlyphs.value,
-    })
-    if (branchOriginPly.value === null) {
-      branchOriginPly.value = cursorPly.value
-    }
-    branchMovesUci.value = [...branchMovesUci.value, applied.move_uci]
-    await refreshBoard()
-  } catch {
-    // Ignore illegal variation move
-  }
+  await session.tryMove(`${fromUci}${toUci}`)
+}
+
+function handleEngineMove(uci: string, stateId: string) {
+  if (stateId !== session.stateId.value) return
+  selectedUci.value = null
+  void session.tryMove(uci)
+}
+
+function returnToGame() {
+  selectedUci.value = null
+  session.returnToRecordedLine()
+  void router.replace({ query: { ...route.query, ply: String(cursorPly.value) } })
+}
+
+function resumeVariation() {
+  selectedUci.value = null
+  session.resumeDraft()
+}
+
+async function exportVariation() {
+  const blob = await session.exportDraft()
+  if (!blob || !snapshot.value) return
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `jade-${snapshot.value.match_id}-variation.json`
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 async function exportMatchPgn() {
@@ -174,7 +196,7 @@ const plates = computed(() => {
   return plateOrder(redBelow.value).map((side) => ({
     side,
     name: sideName(side, locale.value),
-    toMove: branchOriginPly.value === null && toMove === side && cursorPly.value < (snapshot.value?.moves_uci.length ?? 0),
+    toMove: variation.value === null && toMove === side && cursorPly.value < (snapshot.value?.moves_uci.length ?? 0),
     captured: capturedFaces(pieces, side, traditionalGlyphs.value),
   }))
 })
@@ -267,11 +289,20 @@ const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveL
 
       <aside class="jade-ledger">
         <section class="moves" aria-label="Moves">
-          <div v-if="branchOriginPly !== null" class="branch-note">
-            <span>Trying a line from ply {{ branchOriginPly }}</span>
-            <button type="button" class="jade-pill-btn" @click="stepToPly(branchOriginPly)">Back to the game</button>
-          </div>
-          <ol class="jade-move-list">
+          <ReplayVariationBar
+            :variation="session.variation.value"
+            :parked="session.parked.value"
+            :save-state="session.saveState.value"
+            :will-replace-draft="session.willReplaceDraft.value"
+            :draft-notice="session.draftNotice.value"
+            :feedback="session.feedback.value"
+            :recorded-moves-uci="snapshot.moves_uci"
+            :root-fen="STARTING_FEN"
+            @return-to-game="returnToGame"
+            @resume="resumeVariation"
+            @export="exportVariation"
+          />
+          <ol class="jade-move-list" data-testid="recorded-move-list">
             <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
               <span class="jade-move-number">{{ row.number }}.</span>
               <button
@@ -279,7 +310,7 @@ const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveL
                 :key="m.ply"
                 type="button"
                 class="jade-move"
-                :class="{ current: branchOriginPly === null && cursorPly === m.ply }"
+                :class="{ current: variation === null && cursorPly === m.ply }"
                 @click="stepToPly(m.ply)"
               >
                 {{ m.label }}
@@ -294,8 +325,8 @@ const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveL
         <EngineAnalysisCard
           :fen="STARTING_FEN"
           :moves-uci="activeMovesUci"
-          :state-id="`replay:${matchId}:${activeMovesUci.join(',')}`"
-          @play-engine-move="(uci) => handleTryMove(uci.slice(0, 2), uci.slice(2, 4))"
+          :state-id="session.stateId.value"
+          @play-engine-move="handleEngineMove"
         />
       </aside>
     </div>
@@ -346,14 +377,6 @@ const moveRows = computed(() => pairMoves(snapshot.value?.moves_uci ?? [], moveL
   gap: 10px;
 }
 
-.branch-note {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.8rem;
-  color: var(--jade-pale);
-}
 
 .room-link {
   align-self: flex-start;

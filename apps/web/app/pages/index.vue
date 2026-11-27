@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
 import { loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
 import { capturedFaces, plateOrder, sideName, type Side } from '~/utils/side-plates'
@@ -22,10 +22,18 @@ const {
 const redBelow = ref(true)
 const selectedUci = ref<string | null>(null)
 const mainlineMovesUci = ref<string[]>([])
-const cursorPly = ref(0)
-// Optional exploration branch tried out from a replay cursor
-const branchOriginPly = ref<number | null>(null)
-const branchMovesUci = ref<string[]>([])
+// Local play extends the mainline at its end; a move from an earlier ply starts a variation, which this
+// device keeps beside the game and restores after a reload. New game clears both.
+const session = useReplaySession({
+  source: ref({ kind: 'local', id: 'active_board', revision: 'local' }),
+  rootFen: ref(STARTING_FEN),
+  rulesProfile: ref(config.public.rulesProfile),
+  recordedMovesUci: mainlineMovesUci,
+  traditionalGlyphs,
+  extendAtEnd: true,
+  persist: true,
+})
+const { cursor: cursorPly, variation, parked, activePath: activeMovesUci } = session
 
 const lastAnnouncement = ref('')
 const moveError = ref<string | null>(null)
@@ -76,13 +84,6 @@ function exportOfflinePgn() {
   URL.revokeObjectURL(url)
 }
 
-const activeMovesUci = computed(() => {
-  if (branchOriginPly.value !== null) {
-    return [...mainlineMovesUci.value.slice(0, branchOriginPly.value), ...branchMovesUci.value]
-  }
-  return mainlineMovesUci.value.slice(0, cursorPly.value)
-})
-
 const { data: boardData, refresh: refreshBoard } = await useAsyncData(
   'home-board-view',
   () =>
@@ -112,6 +113,9 @@ onMounted(async () => {
     mainlineMovesUci.value = saved.movesUci
     cursorPly.value = saved.movesUci.length
   }
+  // The kept variation reapplies only to the game it was made on, so it is read after the game.
+  await nextTick()
+  await session.restoreDraft()
 })
 
 watch(
@@ -137,22 +141,16 @@ async function handlePlayMove(fromUci: string, toUci: string) {
   const token = `${fromUci}${toUci}`
   const priorPieceCount = boardData.value?.snapshot.pieces.length ?? 32
   try {
-    const applied = await applyCoreMove({
-      fen: STARTING_FEN,
-      movesUci: activeMovesUci.value,
-      token,
-      traditionalGlyphs: traditionalGlyphs.value,
-    })
+    const result = await session.tryMove(token)
+    if (result.kind === 'rejected') {
+      moveError.value = result.message
+      return
+    }
+    const applied = result.applied
     selectedUci.value = null
 
-    if (branchOriginPly.value !== null) {
-      branchMovesUci.value = [...branchMovesUci.value, applied.move_uci]
-    } else if (cursorPly.value < mainlineMovesUci.value.length) {
-      // Playing from an earlier replay ply starts a non-destructive exploration branch!
-      branchOriginPly.value = cursorPly.value
-      branchMovesUci.value = [applied.move_uci]
-    } else {
-      mainlineMovesUci.value = [...mainlineMovesUci.value, applied.move_uci]
+    if (result.kind === 'extend') {
+      mainlineMovesUci.value = [...mainlineMovesUci.value, result.uci]
       cursorPly.value = mainlineMovesUci.value.length
     }
 
@@ -172,25 +170,21 @@ async function handlePlayMove(fromUci: string, toUci: string) {
 
 function handleUndo() {
   selectedUci.value = null
-  if (branchOriginPly.value !== null) {
-    if (branchMovesUci.value.length > 1) {
-      branchMovesUci.value = branchMovesUci.value.slice(0, -1)
-    } else {
-      branchOriginPly.value = null
-      branchMovesUci.value = []
-    }
+  if (variation.value) {
+    session.undoVariationMove()
     return
   }
   if (mainlineMovesUci.value.length > 0) {
     mainlineMovesUci.value = mainlineMovesUci.value.slice(0, -1)
     cursorPly.value = mainlineMovesUci.value.length
+    // The replay session stores a kept variation again against the shorter game, or removes it with a notice.
   }
 }
 
+/** New game clears the board and the variation this device kept for the old one. */
 function handleReset() {
   selectedUci.value = null
-  branchOriginPly.value = null
-  branchMovesUci.value = []
+  session.discardVariation()
   mainlineMovesUci.value = []
   cursorPly.value = 0
   moveError.value = null
@@ -198,14 +192,28 @@ function handleReset() {
 
 function stepToPly(target: number) {
   selectedUci.value = null
-  branchOriginPly.value = null
-  branchMovesUci.value = []
-  cursorPly.value = Math.max(0, Math.min(mainlineMovesUci.value.length, target))
+  session.selectPly(target)
 }
 
-function exitBranch() {
-  branchOriginPly.value = null
-  branchMovesUci.value = []
+function returnToMainLine() {
+  selectedUci.value = null
+  session.returnToRecordedLine()
+}
+
+function resumeVariation() {
+  selectedUci.value = null
+  session.resumeDraft()
+}
+
+async function exportVariation() {
+  const blob = await session.exportDraft()
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'jade-local-variation.json'
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 async function createFriendlyInvitation() {
@@ -300,7 +308,7 @@ interface IconAction {
 const capsuleActions = computed<IconAction[]>(() => [
   { testid: 'btn-flip', label: t('board.flip'), paths: ['M6 3v13M6 3 3 6M6 3l3 3M14 17V4M14 17l-3-3M14 17l3-3'], run: () => (redBelow.value = !redBelow.value) },
   { testid: 'btn-undo', label: t('board.undo'), paths: ['M7 5 3.5 8.5 7 12', 'M3.5 8.5H12a4.5 4.5 0 0 1 0 9H9'], disabled: activeMovesUci.value.length === 0, run: handleUndo },
-  { testid: 'btn-reset', label: t('board.new_local'), paths: ['M4 10a6 6 0 1 0 1.8-4.3', 'M4 3.5v3h3'], disabled: mainlineMovesUci.value.length === 0 && branchOriginPly.value === null, run: handleReset },
+  { testid: 'btn-reset', label: t('board.new_local'), paths: ['M4 10a6 6 0 1 0 1.8-4.3', 'M4 3.5v3h3'], disabled: mainlineMovesUci.value.length === 0 && variation.value === null, run: handleReset },
   { testid: 'btn-export-offline-pgn', label: t('export.pgn'), paths: ['M10 3v9M6.5 8.5 10 12l3.5-3.5M4 14.5v2h12v-2'], disabled: activeMovesUci.value.length === 0, run: exportOfflinePgn },
 ])
 
@@ -377,12 +385,19 @@ const moveRows = computed(() => {
 
     <aside class="jade-ledger">
       <section class="moves" data-testid="move-list-card" aria-label="Moves">
-        <div v-if="branchOriginPly !== null" class="branch-banner" data-testid="branch-banner">
-          <span>Trying a line from ply {{ branchOriginPly }}</span>
-          <button type="button" class="jade-pill-btn" data-testid="exit-branch-btn" @click="exitBranch">
-            Return to main line
-          </button>
-        </div>
+        <ReplayVariationBar
+          :variation="variation"
+          :parked="parked"
+          :save-state="session.saveState.value"
+          :will-replace-draft="session.willReplaceDraft.value"
+          :draft-notice="session.draftNotice.value"
+          :feedback="session.feedback.value"
+          :recorded-moves-uci="mainlineMovesUci"
+          :root-fen="STARTING_FEN"
+          @return-to-game="returnToMainLine"
+          @resume="resumeVariation"
+          @export="exportVariation"
+        />
 
         <ol v-if="displayedMoves.length > 0" class="jade-move-list" data-testid="move-list">
           <li v-for="row in moveRows" :key="row.number" class="jade-move-row">
@@ -393,7 +408,7 @@ const moveRows = computed(() => {
               type="button"
               class="jade-move"
               :class="{ current: m.ply === activeMovesUci.length }"
-              :disabled="branchOriginPly !== null"
+              :disabled="variation !== null"
               @click="stepToPly(m.ply)"
             >
               {{ m.label }}
@@ -418,8 +433,8 @@ const moveRows = computed(() => {
       <EngineAnalysisCard
         :fen="STARTING_FEN"
         :moves-uci="activeMovesUci"
-        :state-id="`home:${activeMovesUci.join(',')}`"
-        @play-engine-move="(uci) => handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
+        :state-id="session.stateId.value"
+        @play-engine-move="(uci, stateId) => stateId === session.stateId.value && handlePlayMove(uci.slice(0, 2), uci.slice(2, 4))"
       />
 
       <section class="invite jade-rule" data-testid="play-friend-card" aria-label="Play a friend">
@@ -489,15 +504,6 @@ const moveRows = computed(() => {
   display: flex;
   gap: 2px;
   padding-top: 8px;
-}
-
-.branch-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.8rem;
-  color: var(--jade-pale);
 }
 
 .invite {

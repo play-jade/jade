@@ -4,6 +4,31 @@ import { expect, test } from '@playwright/test'
 
 const VISUAL_REF_DIR = resolve(process.cwd(), '../../docs/visual-reference')
 
+/** The number of replay drafts this browser holds, read from the page's own IndexedDB. */
+async function storedDraftCount(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      new Promise<number>((resolve, reject) => {
+        const open = indexedDB.open('jade_offline_v1')
+        open.onerror = () => reject(open.error)
+        open.onsuccess = () => {
+          const db = open.result
+          if (!db.objectStoreNames.contains('replay_drafts')) {
+            db.close()
+            resolve(0)
+            return
+          }
+          const count = db.transaction('replay_drafts', 'readonly').objectStore('replay_drafts').count()
+          count.onsuccess = () => {
+            db.close()
+            resolve(count.result)
+          }
+          count.onerror = () => reject(count.error)
+        }
+      }),
+  )
+}
+
 async function playBoardSquares(page: Page, fromSq: string, toSq: string) {
   await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
   await page.locator(`[data-square="${fromSq}"]`).dispatchEvent('click')
@@ -192,6 +217,28 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(blkPage.locator('.jade-table .jade-capsule')).toBeVisible()
       await blkPage.screenshot({ path: test.info().outputPath('match-replay.png') })
 
+      // Black tries another reply at ply 1, then the engine's suggestion; the recorded game stays as played.
+      const recorded = blkPage.getByTestId('recorded-move-list').locator('button')
+      await expect(recorded).toHaveCount(4)
+      const recordedText = await blkPage.getByTestId('recorded-move-list').innerText()
+      await recorded.first().click()
+      await playBoardSquares(blkPage, 'b9', 'c7')
+      const variationMoves = blkPage.getByTestId('variation-moves').locator('li')
+      await expect(variationMoves).toHaveCount(1)
+      await blkPage.getByTestId('engine-toggle-btn').click()
+      await expect(blkPage.getByTestId('engine-play-best')).toBeVisible({ timeout: 10_000 })
+      await blkPage.getByTestId('engine-play-best').click()
+      await expect(variationMoves).toHaveCount(2)
+      await expect(blkPage.getByTestId('variation-saved')).toBeVisible()
+      expect(await blkPage.getByTestId('recorded-move-list').innerText()).toBe(recordedText)
+
+      // After a reload at the linked ply, the kept variation comes back to resume, with both moves.
+      await blkPage.reload()
+      await expect(blkPage.getByTestId('variation-resume')).toBeVisible({ timeout: 10_000 })
+      await blkPage.getByTestId('variation-resume').click()
+      await expect(blkPage.getByTestId('variation-moves').locator('li')).toHaveCount(2)
+      expect(await blkPage.getByTestId('recorded-move-list').innerText()).toBe(recordedText)
+
       // Rematch creates fresh invitation cleanly
       await redPage.getByTestId('btn-rematch').click()
       await expect(redPage.getByTestId('match-status-badge')).toContainText('Waiting for friend')
@@ -236,6 +283,122 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     } finally {
       await noJsContext.close()
     }
+  })
+
+  test('6. Local variation: return, resume, and reload keep it, with the board and notation agreeing', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await playBoardSquares(page, 'h2', 'e2')
+    await playBoardSquares(page, 'h9', 'g7')
+    await expect(page.getByTestId('move-list')).toContainText('H8+7')
+
+    // Back one ply, then Black tries another reply: a variation, kept on this device.
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    const variationMoves = page.getByTestId('variation-moves').locator('li')
+    await expect(variationMoves).toHaveCount(1)
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    const tried = (await variationMoves.first().locator('.variation-label').innerText()).trim()
+    await expect(page.getByTestId('move-list')).toContainText(tried)
+    await expect(page.getByTestId('move-list')).not.toContainText('H8+7')
+
+    // Return shows the game again and keeps the variation to resume.
+    await page.getByTestId('variation-return').click()
+    await expect(page.getByTestId('variation-resume')).toBeVisible()
+    await expect(page.getByTestId('move-list')).not.toContainText(tried)
+
+    // Resume brings it back; after a reload the game and the variation both return.
+    await page.getByTestId('variation-resume').click()
+    await expect(page.getByTestId('move-list')).toContainText(tried)
+    // Saving is asynchronous; the reload waits until the device holds the resumed line.
+    await expect(page.getByTestId('variation-saving')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.reload()
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.getByTestId('variation-moves').locator('li')).toHaveCount(1, { timeout: 10_000 })
+    await expect(page.getByTestId('move-list')).toContainText(tried)
+    await expect(page.getByTestId('variation-return')).toBeVisible()
+
+    // New game clears the board and the kept variation; a reload brings neither back.
+    await page.getByTestId('btn-reset').click()
+    await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+    // Removal is asynchronous and shows nothing on screen, so the reload waits until the device holds no draft.
+    await expect.poll(() => storedDraftCount(page)).toBe(0)
+    await page.reload()
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+
+    // Undo on the board takes back a variation's only move, and a reload does not bring it back.
+    await playBoardSquares(page, 'h2', 'e2')
+    await playBoardSquares(page, 'h9', 'g7')
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+    await expect.poll(() => storedDraftCount(page)).toBe(0)
+    await page.reload()
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.getByTestId('move-list')).toContainText('H8+7')
+    await expect(page.getByTestId('variation-bar')).toHaveCount(0)
+
+    // Undo of a game move after the kept variation's start stores it again, so a reload still offers it.
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.getByTestId('variation-return').click()
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('move-list')).not.toContainText('H8+7')
+    await expect(page.getByTestId('variation-saving')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.reload()
+    await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+    await expect(page.getByTestId('variation-resume')).toBeVisible({ timeout: 10_000 })
+
+    // Undo of the move it started from removes it, says so, and leaves nothing stored.
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('variation-notice')).toContainText('taken back')
+    await expect(page.getByTestId('variation-resume')).toHaveCount(0)
+    await expect.poll(() => storedDraftCount(page)).toBe(0)
+
+    // A removal the browser refuses stays visible as a notice, with no save status or export for a line that is gone.
+    await playBoardSquares(page, 'h2', 'e2')
+    await playBoardSquares(page, 'h9', 'g7')
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-saved')).toBeVisible()
+    await page.evaluate(() => {
+      IDBObjectStore.prototype.delete = () => {
+        throw new Error('removal refused for this test')
+      }
+    })
+    await page.getByTestId('btn-undo').click()
+    await expect(page.getByTestId('variation-notice')).toContainText('could not be removed')
+    await expect(page.getByTestId('variation-export')).toHaveCount(0)
+    await expect(page.getByTestId('variation-unsaved')).toHaveCount(0)
+    await expect(page.getByTestId('variation-saved')).toHaveCount(0)
+  })
+
+  test('7. Without browser storage, a variation reports it is not saved and still exports', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'indexedDB', { configurable: true, get: () => undefined })
+    })
+    await page.goto('/')
+    await playBoardSquares(page, 'h2', 'e2')
+    await playBoardSquares(page, 'h9', 'g7')
+    await page.getByTestId('scrub-prev').click()
+    await playBoardSquares(page, 'b9', 'c7')
+    await expect(page.getByTestId('variation-unsaved')).toContainText('Browser storage is not available')
+    await expect(page.getByTestId('variation-saved')).toHaveCount(0)
+
+    const download = page.waitForEvent('download')
+    await page.getByTestId('variation-export').click()
+    const file = await download
+    expect(file.suggestedFilename()).toBe('jade-local-variation.json')
+    const draft = JSON.parse(await (await import('node:fs/promises')).readFile((await file.path())!, 'utf8'))
+    expect(draft.variationMovesUci).toEqual(['b9c7'])
+    expect(draft.variationOriginPly).toBe(1)
   })
 
   test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({
