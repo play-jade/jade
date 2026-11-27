@@ -1163,10 +1163,29 @@ describe('replay session', () => {
     }
   })
 
-  it('removes the saved variation when Undo takes back its only move, so reload does not restore it', async () => {
+  /** Runs `run` with an in-memory IndexedDB standing in for the browser's, removed again afterwards. */
+  async function withMemoryStorage(run: (memory: ReturnType<typeof memoryIndexedDb>) => Promise<void>) {
     const memory = memoryIndexedDb()
     vi.stubGlobal('indexedDB', memory)
     try {
+      await run(memory)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }
+
+  /** A guest's session with a variation from ply 1 stored and set aside, the record following `line`. */
+  async function parkedSession(memory: ReturnType<typeof memoryIndexedDb>, line = ref([...recorded])) {
+    const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
+    s.selectPly(1)
+    await s.tryMove('b9c7')
+    s.returnToRecordedLine()
+    await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+    return s
+  }
+
+  it('removes the saved variation when Undo takes back its only move, so reload does not restore it', () =>
+    withMemoryStorage(async (memory) => {
       const s = session({ persist: true, ownerScope: ref('guest-1') })
       s.selectPly(1)
       await s.tryMove('b9c7')
@@ -1178,36 +1197,22 @@ describe('replay session', () => {
       await reopened.restoreDraft()
       expect(reopened.variation.value).toBeNull()
       expect(reopened.parked.value).toBeNull()
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it('stores a kept variation again when Undo shortens the recorded line, so reload still restores it', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
+  it('stores a kept variation again when Undo shortens the recorded line, so reload still restores it', () =>
+    withMemoryStorage(async (memory) => {
       const line = ref([...recorded])
-      const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
-      s.selectPly(1)
-      await s.tryMove('b9c7')
-      s.returnToRecordedLine()
-      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+      const s = await parkedSession(memory, line)
       line.value = line.value.slice(0, -1)
       await vi.waitFor(() => expect(memory.puts).toHaveLength(3), { interval: 1 })
       const reopened = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: ref([...line.value]) })
       await reopened.restoreDraft()
       expect(reopened.draftNotice.value).toBeNull()
       expect(reopened.parked.value?.movesUci).toEqual(['b9c7'])
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it('removes a kept variation, and its saved copy, when Undo takes back the move it started from', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
+  it('removes a kept variation, and its saved copy, when Undo takes back the move it started from', () =>
+    withMemoryStorage(async (memory) => {
       const line = ref([...recorded])
       const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
       s.selectPly(3)
@@ -1218,20 +1223,11 @@ describe('replay session', () => {
       await vi.waitFor(() => expect(storedRows(memory)).toHaveLength(0), { interval: 1 })
       expect(s.parked.value).toBeNull()
       expect(s.draftNotice.value).toContain('taken back')
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it('keeps the retained line when Undo removes a replacement whose save is still pending', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
-      const s = session({ persist: true, ownerScope: ref('guest-1') })
-      s.selectPly(1)
-      await s.tryMove('b9c7')
-      s.returnToRecordedLine()
-      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+  it('keeps the retained line when Undo removes a replacement whose save is still pending', () =>
+    withMemoryStorage(async (memory) => {
+      const s = await parkedSession(memory)
       const release = heldDigest()
       s.selectPly(0)
       const replacing = s.tryMove('b0c2')
@@ -1242,15 +1238,10 @@ describe('replay session', () => {
       await vi.waitFor(() => expect(memory.puts).toHaveLength(4), { interval: 1 })
       expect(s.parked.value?.movesUci).toEqual(['b9c7'])
       expect(storedRows(memory)[0]).toMatchObject({ variationMovesUci: ['b9c7'] })
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it("keeps one draft's removal warning when another draft's write succeeds", async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
+  it("keeps one draft's removal warning when another draft's write succeeds", () =>
+    withMemoryStorage(async (memory) => {
       const owner = ref<string | null>('guest-a')
       const s = session({ persist: true, ownerScope: owner })
       s.selectPly(1)
@@ -1273,20 +1264,11 @@ describe('replay session', () => {
         { interval: 1 },
       )
       expect(s.draftNotice.value).toContain('could not be removed')
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it('keeps the retained line when a later replacement is undone before its save lands', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
-      const s = session({ persist: true, ownerScope: ref('guest-1') })
-      s.selectPly(1)
-      await s.tryMove('b9c7')
-      s.returnToRecordedLine()
-      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+  it('keeps the retained line when a later replacement is undone before its save lands', () =>
+    withMemoryStorage(async (memory) => {
+      const s = await parkedSession(memory)
       const release = heldDigest()
       s.selectPly(0)
       const first = s.tryMove('b0c2')
@@ -1303,41 +1285,32 @@ describe('replay session', () => {
         interval: 1,
       })
       expect(s.parked.value?.movesUci).toEqual(['b9c7'])
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it('stores a cursor restore accepts when a resumed variation outlives a shortened record', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
+  it.each([
+    ['recorded', false],
+    ['variation', true],
+  ])('stores a cursor restore accepts when the record shortens under a selected later ply (%s)', (mode, resume) =>
+    withMemoryStorage(async (memory) => {
       const line = ref([...recorded])
-      const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
-      s.selectPly(1)
-      await s.tryMove('b9c7')
-      s.returnToRecordedLine()
+      const s = await parkedSession(memory, line)
       s.selectPly(3)
-      s.resumeDraft()
-      await vi.waitFor(() => expect(memory.puts.length).toBeGreaterThanOrEqual(3), { interval: 1 })
+      if (resume) s.resumeDraft()
+      await vi.waitFor(() => expect(s.saveState.value).toEqual({ state: 'saved' }), { interval: 1 })
       const puts = memory.puts.length
       line.value = line.value.slice(0, 2)
       await vi.waitFor(() => expect(memory.puts.length).toBeGreaterThan(puts), { interval: 1 })
       const reopened = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: ref([...line.value]) })
       await reopened.restoreDraft()
       expect(reopened.draftNotice.value).toBeNull()
-      // The resumed variation comes back active, with the cursor brought to the end of the shortened record.
+      // The cursor is brought to the end of the shortened record, and the line returns in the mode it was left in.
       expect(reopened.cursor.value).toBe(2)
-      expect(reopened.variation.value?.movesUci).toEqual(['b9c7'])
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+      expect(reopened.activeMode.value).toBe(mode)
+      expect((reopened.variation.value ?? reopened.parked.value)?.movesUci).toEqual(['b9c7'])
+    }))
 
-  it('says so when the saved variation cannot be removed after Undo', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
+  it('says so when the saved variation cannot be removed after Undo', () =>
+    withMemoryStorage(async (memory) => {
       const s = session({ persist: true, ownerScope: ref('guest-1') })
       s.selectPly(1)
       await s.tryMove('b9c7')
@@ -1350,44 +1323,11 @@ describe('replay session', () => {
       await s.tryMove('b9c7')
       await vi.waitFor(() => expect(s.saveState.value).toEqual({ state: 'saved' }), { interval: 1 })
       expect(s.draftNotice.value).toBeNull()
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
 
-  it('stores a cursor restore accepts when the recorded line shortens under a selected later ply', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
-      const line = ref([...recorded])
-      const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
-      s.selectPly(1)
-      await s.tryMove('b9c7')
-      s.returnToRecordedLine()
-      s.selectPly(3)
-      await vi.waitFor(() => expect(memory.puts.length).toBeGreaterThanOrEqual(2), { interval: 1 })
-      const puts = memory.puts.length
-      line.value = line.value.slice(0, 2)
-      await vi.waitFor(() => expect(memory.puts.length).toBeGreaterThan(puts), { interval: 1 })
-      const reopened = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: ref([...line.value]) })
-      await reopened.restoreDraft()
-      expect(reopened.draftNotice.value).toBeNull()
-      expect(reopened.parked.value?.movesUci).toEqual(['b9c7'])
-      expect(reopened.cursor.value).toBeLessThanOrEqual(2)
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
-
-  it('restores only after a queued removal of the same draft has run', async () => {
-    const memory = memoryIndexedDb()
-    vi.stubGlobal('indexedDB', memory)
-    try {
-      const s = session({ persist: true, ownerScope: ref('guest-1') })
-      s.selectPly(1)
-      await s.tryMove('b9c7')
-      s.returnToRecordedLine()
-      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+  it('restores only after a queued removal of the same draft has run', () =>
+    withMemoryStorage(async (memory) => {
+      const s = await parkedSession(memory)
       const release = heldDigest()
       s.resumeDraft()
       await vi.waitFor(() => expect(release.isHolding()).toBe(true), { interval: 1 })
@@ -1399,10 +1339,16 @@ describe('replay session', () => {
       expect(reopened.variation.value).toBeNull()
       expect(reopened.parked.value).toBeNull()
       expect(storedRows(memory)).toHaveLength(0)
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
+    }))
+
+
+
+
+
+
+
+
+
 
   it('keeps an edit made during a restore over the stored line', async () => {
     const memory = memoryIndexedDb()
