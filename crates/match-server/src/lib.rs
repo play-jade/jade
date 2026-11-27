@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{AnyConnection, AnyPool, Connection, Row, any::AnyPoolOptions};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -39,12 +39,140 @@ pub struct MatchActorHandle {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: SqlitePool,
+    pub db: AnyPool,
     pub archive: Arc<SampleArchiveProvider>,
     pub matches: Arc<RwLock<HashMap<String, MatchActorHandle>>>,
     pub rematch_lock: Arc<tokio::sync::Mutex<()>>,
     pub allowed_origins: Arc<Vec<String>>,
-    _db_owner_lock: Option<Arc<std::fs::File>>,
+    pub backend: Backend,
+    _db_owner_lock: Option<DbOwnerLock>,
+}
+
+/// The database a match server stores its matches in: SQLite for standalone use, PostgreSQL when hosted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Sqlite,
+    Postgres,
+}
+
+/// The longest command ID accepted for a new event, in bytes.
+pub const MAX_COMMAND_ID_BYTES: usize = 128;
+
+fn invalid_command_id() -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_command_id",
+        message: format!("A command ID is 1 to {MAX_COMMAND_ID_BYTES} bytes, without NUL"),
+    }
+}
+
+/// Reads a database setting into the backend it names and the URL to open it by. A `postgres:` or `postgresql:` URL
+/// (any letter case) is PostgreSQL; a `sqlite:` URL, or a bare file name as earlier settings allowed, is SQLite. Any
+/// other scheme is refused before anything touches the filesystem.
+pub fn parse_database_url(setting: &str) -> Result<(Backend, String), sqlx::Error> {
+    // A blank setting, such as an empty secret, is a missing database, never a request for one that forgets its data.
+    if setting.trim().is_empty() {
+        return Err(sqlx::Error::Configuration(
+            "no database is configured".into(),
+        ));
+    }
+    // The error names the scheme alone: the setting may carry credentials, and startup errors reach the logs.
+    let unsupported = |scheme: &str| {
+        sqlx::Error::Configuration(format!("unsupported database URL scheme {scheme:?}").into())
+    };
+    let scheme_end = setting.find(':');
+    let scheme = scheme_end.map(|end| setting[..end].to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("postgres" | "postgresql") => Ok((
+            Backend::Postgres,
+            format!("postgres{}", &setting[scheme_end.unwrap()..]),
+        )),
+        Some("sqlite") => Ok((
+            Backend::Sqlite,
+            format!("sqlite{}", &setting[scheme_end.unwrap()..]),
+        )),
+        // A scheme followed by `//` names some other service; a bare file name has none.
+        Some(other) if setting[scheme_end.unwrap()..].starts_with("://") => Err(unsupported(other)),
+        _ => Ok((Backend::Sqlite, format!("sqlite:{setting}"))),
+    }
+}
+
+/// Proof that this process is the one match server owning its database: matches are owned by one in-process actor
+/// each, so a second server on the same database would run a second, conflicting owner. It is held for the life of the
+/// state and released when the process ends.
+#[derive(Clone)]
+#[allow(dead_code)]
+enum DbOwnerLock {
+    /// An exclusive lock on a file beside the SQLite database.
+    File(Arc<std::fs::File>),
+    /// A session-level PostgreSQL advisory lock, held by this dedicated connection.
+    Postgres(Arc<tokio::sync::Mutex<AnyConnection>>),
+}
+
+/// The PostgreSQL advisory lock key that marks the database's single owning match server.
+const POSTGRES_OWNER_LOCK_KEY: i64 = 0x4A41_4445_4D41_5443; // "JADEMATC"
+
+/// Takes the PostgreSQL owner lock and, on the same connection, creates the schema and advances the owner epoch,
+/// returning the lock and this owner's epoch.
+async fn acquire_postgres_owner_lock(url: &str) -> Result<(DbOwnerLock, i64), sqlx::Error> {
+    let mut conn = AnyConnection::connect(url).await?;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(POSTGRES_OWNER_LOCK_KEY)
+        .fetch_one(&mut conn)
+        .await?;
+    if !acquired {
+        return Err(sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "the PostgreSQL database is already owned by a running match-server",
+        )));
+    }
+    sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&mut conn).await?;
+    // A new epoch for this owner. A server that lost its lock session keeps the older epoch on its pooled connections,
+    // so its writes are refused once this one starts.
+    let epoch: i64 = sqlx::query_scalar(
+        "INSERT INTO match_server_owner (singleton, epoch) VALUES (1, 1)
+         ON CONFLICT (singleton) DO UPDATE SET epoch = match_server_owner.epoch + 1
+         RETURNING epoch",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    Ok((
+        DbOwnerLock::Postgres(Arc::new(tokio::sync::Mutex::new(conn))),
+        epoch,
+    ))
+}
+
+/// Refuses a write of match state from a server that no longer owns the database. On PostgreSQL the owner's epoch is
+/// set on each of its connections and checked against the owner row, which is share-locked until the write commits,
+/// so a newer owner advances the epoch only between writes. SQLite's file lock cannot be lost while the process runs.
+async fn fence(conn: &mut AnyConnection) -> Result<(), ApiError> {
+    if conn.backend_name() != "PostgreSQL" {
+        return Ok(());
+    }
+    let owned: Option<i64> = sqlx::query_scalar(
+        "SELECT epoch FROM match_server_owner
+         WHERE singleton = 1 AND epoch = current_setting('jade.owner_epoch')::bigint
+         FOR SHARE",
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+    if owned.is_none() {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "ownership_lost",
+            message: "This match server no longer owns the database; another server has taken over"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// A transaction for a write of match state, fenced against loss of ownership.
+async fn begin_fenced(db: &AnyPool) -> Result<sqlx::Transaction<'static, sqlx::Any>, ApiError> {
+    let mut tx = db.begin().await.map_err(db_error)?;
+    fence(&mut tx).await?;
+    Ok(tx)
 }
 
 pub struct MailboxEnvelope {
@@ -258,22 +386,35 @@ pub struct PrivacyUpdateRequest {
 
 /// Adds the per-seat choice revisions and the match's state version to a database created before they existed;
 /// new databases have them already.
-async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error> {
+/// The counters added to `matches` after its first schema; a database created before them gains them at startup.
+const ADDED_MATCH_COUNTERS: [&str; 4] = [
+    "red_choices_revision",
+    "black_choices_revision",
+    "state_version",
+    "turn_generation",
+];
+
+async fn add_missing_choice_revisions(db: &AnyPool, backend: Backend) -> Result<(), sqlx::Error> {
+    if backend == Backend::Postgres {
+        for column in ADDED_MATCH_COUNTERS {
+            sqlx::query(&format!(
+                "ALTER TABLE matches ADD COLUMN IF NOT EXISTS {column} BIGINT NOT NULL DEFAULT 0"
+            ))
+            .execute(db)
+            .await?;
+        }
+        return Ok(());
+    }
     let columns: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('matches')")
         .fetch_all(db)
         .await?
         .iter()
         .map(|row| row.get("name"))
         .collect();
-    for column in [
-        "red_choices_revision",
-        "black_choices_revision",
-        "state_version",
-        "turn_generation",
-    ] {
+    for column in ADDED_MATCH_COUNTERS {
         if !columns.iter().any(|c| c == column) {
             sqlx::query(&format!(
-                "ALTER TABLE matches ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE matches ADD COLUMN {column} BIGINT NOT NULL DEFAULT 0"
             ))
             .execute(db)
             .await?;
@@ -329,28 +470,102 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(h.finalize())
 }
 
-fn extract_sqlite_file_path(sqlite_url: &str) -> Option<std::path::PathBuf> {
-    let rest = sqlite_url
-        .strip_prefix("sqlite://")
-        .or_else(|| sqlite_url.strip_prefix("sqlite:"))
-        .unwrap_or(sqlite_url);
-    let (path_part, query_part) = match rest.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (rest, ""),
-    };
-    if path_part.is_empty()
-        || path_part == ":memory:"
-        || query_part.split('&').any(|kv| kv == "mode=memory")
-    {
-        return None;
-    }
-    Some(std::path::PathBuf::from(path_part))
+/// Where a SQLite setting keeps its data, as the pool itself reads the setting.
+enum SqliteTarget {
+    /// One in-memory database, with the setting's options other than its mode and cache, which the pool decides.
+    Memory(Vec<(String, String)>),
+    /// A durable database file.
+    File(std::path::PathBuf),
 }
 
-fn acquire_exclusive_sqlite_lock(
-    sqlite_url: &str,
-) -> Result<Option<Arc<std::fs::File>>, sqlx::Error> {
-    let Some(db_path) = extract_sqlite_file_path(sqlite_url) else {
+/// Classifies a SQLite setting by one explicit grammar, so the owner lock and the pool always mean the same database:
+/// after the `sqlite:` prefixes the driver strips, `:memory:` or an empty name is the in-memory database, and anything
+/// else is a durable file named plainly. A setting that could be read two ways is refused rather than guessed at: a
+/// `#`, `mode=memory` beside a file name, a `file:` URI (SQLite would open the file it names, which the owner lock
+/// could not follow), or a file name that the SQLite parser and the pool's parse read differently.
+fn sqlite_target(db_url: &str) -> Result<SqliteTarget, sqlx::Error> {
+    let refuse = |why: &str| {
+        Err(sqlx::Error::Configuration(
+            format!("unsupported SQLite database setting: {why}").into(),
+        ))
+    };
+    let rest = db_url
+        .trim_start_matches("sqlite://")
+        .trim_start_matches("sqlite:");
+    let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if db_url.contains('#') {
+        return refuse("a '#' can be read as a fragment or as part of the name");
+    }
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    let memory_mode = pairs
+        .iter()
+        .any(|(key, value)| key == "mode" && value == "memory");
+    if name == ":memory:" || name.is_empty() {
+        // The driver checks the options; the pool opens one shared in-memory database in their place.
+        let _: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
+        let kept = pairs
+            .into_iter()
+            .filter(|(key, _)| key != "mode" && key != "cache")
+            .collect();
+        return Ok(SqliteTarget::Memory(kept));
+    }
+    if memory_mode {
+        return refuse(
+            "an in-memory database is named sqlite::memory:, not a file name with mode=memory",
+        );
+    }
+    // Storage is chosen by the file name alone: a VFS option can keep a named database in memory.
+    if pairs.iter().any(|(key, _)| key == "vfs") {
+        return refuse("a durable database takes no vfs option");
+    }
+    let direct: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
+    let any: sqlx::any::AnyConnectOptions = db_url.parse()?;
+    let pooled = sqlx::sqlite::SqliteConnectOptions::try_from(&any)?;
+    let file = pooled.get_filename();
+    if direct.get_filename() != file {
+        return refuse("the file name reads differently to the pool, as with surrounding spaces");
+    }
+    // The in-memory name reached by decoding (such as %3Amemory%3A) is still the in-memory database, not a file.
+    if file.as_os_str().is_empty() || file == std::path::Path::new(":memory:") {
+        return refuse("the in-memory database is named sqlite::memory: plainly");
+    }
+    if file.to_string_lossy().starts_with("file:") {
+        return refuse("a durable database is named by its file name, not a file: URI");
+    }
+    Ok(SqliteTarget::File(file.to_path_buf()))
+}
+
+/// The URL the pool opens. The generic driver parses its URL again for every connection, and each parse of an
+/// in-memory SQLite URL names a new database, so that URL is resolved once here into one shared in-memory database that
+/// every pooled connection opens, keeping the setting's other options.
+fn pool_url(db_url: &str, backend: Backend) -> Result<String, sqlx::Error> {
+    if backend != Backend::Sqlite {
+        return Ok(db_url.to_string());
+    }
+    let SqliteTarget::Memory(options) = sqlite_target(db_url)? else {
+        return Ok(db_url.to_string());
+    };
+    static IN_MEMORY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = IN_MEMORY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("mode", "memory")
+        .append_pair("cache", "shared");
+    for (key, value) in &options {
+        query.append_pair(key, value);
+    }
+    Ok(format!(
+        "sqlite:file:jade-in-memory-{}-{seq}?{}",
+        std::process::id(),
+        query.finish()
+    ))
+}
+
+fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>, sqlx::Error> {
+    // The lock sits beside the file the pool opens; an in-memory database belongs to this process alone.
+    let SqliteTarget::File(db_path) = sqlite_target(sqlite_url)? else {
         return Ok(None);
     };
     if let Some(parent) = db_path.parent()
@@ -377,26 +592,45 @@ fn acquire_exclusive_sqlite_lock(
             ),
         ))
     })?;
-    Ok(Some(Arc::new(file)))
+    Ok(Some(DbOwnerLock::File(Arc::new(file))))
 }
 
-pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> {
+pub async fn build_app_state(setting: &str) -> Result<AppState, sqlx::Error> {
+    sqlx::any::install_default_drivers();
+    let (backend, db_url) = parse_database_url(setting)?;
+    let db_url = db_url.as_str();
     // Establish exclusive ownership BEFORE opening or interrupting any stored matches!
-    let owner_lock = acquire_exclusive_sqlite_lock(sqlite_url)?;
-    let db = SqlitePoolOptions::new()
+    let (owner_lock, epoch) = match backend {
+        Backend::Sqlite => (acquire_exclusive_sqlite_lock(db_url)?, 0),
+        Backend::Postgres => {
+            let (lock, epoch) = acquire_postgres_owner_lock(db_url).await?;
+            (Some(lock), epoch)
+        }
+    };
+    let db = AnyPoolOptions::new()
         .max_connections(8)
-        .after_connect(|conn, _meta| {
+        .after_connect(move |conn, _meta| {
             Box::pin(async move {
-                sqlx::query("PRAGMA busy_timeout = 5000;")
-                    .execute(conn)
-                    .await?;
+                match backend {
+                    Backend::Sqlite => {
+                        sqlx::query("PRAGMA busy_timeout = 5000;")
+                            .execute(conn)
+                            .await?;
+                    }
+                    // Every connection carries this owner's epoch, for the fence on writes of match state.
+                    Backend::Postgres => {
+                        sqlx::query(&format!("SET jade.owner_epoch = '{epoch}'"))
+                            .execute(conn)
+                            .await?;
+                    }
+                }
                 Ok(())
             })
         })
-        .connect(sqlite_url)
+        .connect(&pool_url(db_url, backend)?)
         .await?;
     sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&db).await?;
-    add_missing_choice_revisions(&db).await?;
+    add_missing_choice_revisions(&db, backend).await?;
     mark_interrupted_timed_matches_on_startup(&db).await?;
 
     Ok(AppState {
@@ -412,6 +646,7 @@ pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> 
             "http://localhost:4180".to_string(),
             "http://127.0.0.1:4180".to_string(),
         ]),
+        backend,
         _db_owner_lock: owner_lock,
     })
 }
@@ -482,9 +717,7 @@ async fn healthz() -> impl IntoResponse {
 /// Startup clock-continuity guard (Handoff Section 8, p. 21):
 /// Monotonic clock origins do not survive an unexpected process restart; preserve all moves
 /// and mark previously active timed matches `interrupted` without awarding a loss!
-pub async fn mark_interrupted_timed_matches_on_startup(
-    db: &SqlitePool,
-) -> Result<u64, sqlx::Error> {
+pub async fn mark_interrupted_timed_matches_on_startup(db: &AnyPool) -> Result<u64, sqlx::Error> {
     let now = now_utc_ms();
     let rows = sqlx::query(
         "SELECT match_id, current_seq FROM matches WHERE status = 'playing' AND clock_initial_ms IS NOT NULL",
@@ -497,9 +730,13 @@ pub async fn mark_interrupted_timed_matches_on_startup(
         let mid: String = r.get("match_id");
         let seq = r.get::<i64, _>("current_seq") + 1;
         let mut tx = db.begin().await?;
+        // Recovery writes match state too: a server that lost ownership while starting interrupts nothing.
+        fence(&mut tx)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.message))?;
         sqlx::query(
             "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
-             VALUES (?, ?, ?, 'system', 'interrupted', '{\"reason\":\"server_interruption\"}', ?)",
+             VALUES ($1, $2, $3, 'system', 'interrupted', '{\"reason\":\"server_interruption\"}', $4)",
         )
         .bind(&mid)
         .bind(seq)
@@ -509,9 +746,9 @@ pub async fn mark_interrupted_timed_matches_on_startup(
         .await?;
 
         sqlx::query(
-            "UPDATE matches SET state_version = state_version + 1, current_seq = ?, status = 'interrupted', outcome = 'interrupted',
-             reason_code = 'server_interruption', turn_started_utc_ms = NULL, updated_at_ms = ?
-             WHERE match_id = ?",
+            "UPDATE matches SET state_version = state_version + 1, current_seq = $1, status = 'interrupted', outcome = 'interrupted',
+             reason_code = 'server_interruption', turn_started_utc_ms = NULL, updated_at_ms = $2
+             WHERE match_id = $3",
         )
         .bind(seq)
         .bind(now)
@@ -598,7 +835,7 @@ async fn create_guest_session(
     let ts = now_utc_ms();
 
     sqlx::query(
-        "INSERT INTO accounts (account_id, display_name, is_guest, created_at_ms) VALUES (?, ?, 1, ?)",
+        "INSERT INTO accounts (account_id, display_name, is_guest, created_at_ms) VALUES ($1, $2, 1, $3)",
     )
     .bind(&account_id)
     .bind(&display_name)
@@ -612,7 +849,7 @@ async fn create_guest_session(
     })?;
 
     sqlx::query(
-        "INSERT INTO auth_sessions (session_id_hash, account_id, transport_kind, csrf_token, refresh_token_hash, expires_at_ms, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO auth_sessions (session_id_hash, account_id, transport_kind, csrf_token, refresh_token_hash, expires_at_ms, created_at_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(sha256_hex(&raw_token))
     .bind(&account_id)
@@ -672,7 +909,7 @@ async fn current_session(
         session_cookie(&headers).ok_or_else(|| unauthenticated("No browser session cookie"))?;
     let row = sqlx::query(
         "SELECT s.account_id, s.csrf_token, s.expires_at_ms, s.revoked_at_ms, a.display_name
-         FROM auth_sessions s JOIN accounts a ON a.account_id = s.account_id WHERE s.session_id_hash = ?",
+         FROM auth_sessions s JOIN accounts a ON a.account_id = s.account_id WHERE s.session_id_hash = $1",
     )
     .bind(sha256_hex(token))
     .fetch_optional(&state.db)
@@ -793,9 +1030,9 @@ fn presented_session_token(headers: &HeaderMap) -> Option<String> {
 
 /// Whether the session a live connection opened with still stands for `account_id`: present, unrevoked, unexpired.
 /// A failed read counts as not standing, so a connection never outlives a session it cannot confirm.
-async fn session_still_valid(db: &SqlitePool, session_id_hash: &str, account_id: &str) -> bool {
+async fn session_still_valid(db: &AnyPool, session_id_hash: &str, account_id: &str) -> bool {
     let Ok(Some(row)) = sqlx::query(
-        "SELECT account_id, revoked_at_ms, expires_at_ms FROM auth_sessions WHERE session_id_hash = ?",
+        "SELECT account_id, revoked_at_ms, expires_at_ms FROM auth_sessions WHERE session_id_hash = $1",
     )
     .bind(session_id_hash)
     .fetch_optional(db)
@@ -822,7 +1059,7 @@ async fn lookup_session_account(
     expected_csrf: Option<&str>,
 ) -> Result<String, ApiError> {
     let row = sqlx::query(
-        "SELECT account_id, csrf_token, revoked_at_ms, expires_at_ms FROM auth_sessions WHERE session_id_hash = ?",
+        "SELECT account_id, csrf_token, revoked_at_ms, expires_at_ms FROM auth_sessions WHERE session_id_hash = $1",
     )
     .bind(sha256_hex(raw_token))
     .fetch_optional(&state.db)
@@ -895,17 +1132,18 @@ async fn create_invitation(
 
     let ts = now_utc_ms();
     let start_fen = xiangqi_core::STARTING_FEN;
+    let mut fenced = begin_fenced(&state.db).await?;
     sqlx::query(
         "INSERT INTO matches (
             match_id, invitation_code, rules_profile, is_friendly, initial_fen, current_fen,
             current_seq, status, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms,
             red_remaining_ms, black_remaining_ms, visibility, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'waiting', ?, ?, ?, ?, ?, ?, 'private', ?, ?)",
+        ) VALUES ($1, $2, $3, $4, $5, $6, 0, 'waiting', $7, $8, $9, $10, $11, $12, 'private', $13, $14)",
     )
     .bind(&match_id)
     .bind(&invitation_code)
     .bind(ADOPTED_RULES_PROFILE)
-    .bind(if req.is_friendly.unwrap_or(true) { 1 } else { 0 })
+    .bind(i64::from(req.is_friendly.unwrap_or(true)))
     .bind(start_fen)
     .bind(start_fen)
     .bind(&red_acct)
@@ -916,13 +1154,10 @@ async fn create_invitation(
     .bind(clock_initial_ms)
     .bind(ts)
     .bind(ts)
-    .execute(&state.db)
+    .execute(&mut *fenced)
     .await
-    .map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    .map_err(db_error)?;
+    fenced.commit().await.map_err(db_error)?;
 
     ensure_match_actor(&state, &match_id).await?;
 
@@ -941,7 +1176,7 @@ async fn inspect_invitation(
     Path(code): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let row = sqlx::query(
-        "SELECT match_id, rules_profile, status, clock_initial_ms, clock_increment_ms, red_account_id, black_account_id FROM matches WHERE invitation_code = ?",
+        "SELECT match_id, rules_profile, status, clock_initial_ms, clock_increment_ms, red_account_id, black_account_id FROM matches WHERE invitation_code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -978,7 +1213,7 @@ async fn join_invitation(
 ) -> Result<Json<JoinInvitationResponse>, ApiError> {
     let joiner_id = authenticate_request(&state, &headers, true).await?;
     let row = sqlx::query(
-        "SELECT match_id, red_account_id, black_account_id, status, rematch_of_match_id FROM matches WHERE invitation_code = ?",
+        "SELECT match_id, red_account_id, black_account_id, status, rematch_of_match_id FROM matches WHERE invitation_code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -1002,7 +1237,7 @@ async fn join_invitation(
     // If this invitation is a linked rematch, reserve the open seat strictly for the original match's participants!
     let eligible_to_claim_seat = if let Some(ref orig_mid) = rematch_of_id {
         if let Some(orig_row) =
-            sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
+            sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = $1")
                 .bind(orig_mid)
                 .fetch_optional(&state.db)
                 .await
@@ -1043,8 +1278,9 @@ async fn join_invitation(
         } else {
             None
         };
+        let mut fenced = begin_fenced(&state.db).await?;
         let res = sqlx::query(
-            "UPDATE matches SET state_version = state_version + 1, red_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND ? IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = ? WHERE match_id = ? AND red_account_id IS NULL",
+            "UPDATE matches SET state_version = state_version + 1, red_account_id = $1, status = $2, turn_started_utc_ms = COALESCE(turn_started_utc_ms, $3), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND $4 IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = $5 WHERE match_id = $6 AND red_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
@@ -1052,13 +1288,10 @@ async fn join_invitation(
         .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
-        .execute(&state.db)
+        .execute(&mut *fenced)
         .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+        .map_err(db_error)?;
+        fenced.commit().await.map_err(db_error)?;
         if res.rows_affected() == 1 {
             transitioned_to_playing = next_status == "playing";
             Some(Side::Red)
@@ -1077,8 +1310,9 @@ async fn join_invitation(
         } else {
             None
         };
+        let mut fenced = begin_fenced(&state.db).await?;
         let res = sqlx::query(
-            "UPDATE matches SET state_version = state_version + 1, black_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND ? IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = ? WHERE match_id = ? AND black_account_id IS NULL",
+            "UPDATE matches SET state_version = state_version + 1, black_account_id = $1, status = $2, turn_started_utc_ms = COALESCE(turn_started_utc_ms, $3), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND $4 IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = $5 WHERE match_id = $6 AND black_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
@@ -1086,13 +1320,10 @@ async fn join_invitation(
         .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
-        .execute(&state.db)
+        .execute(&mut *fenced)
         .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+        .map_err(db_error)?;
+        fenced.commit().await.map_err(db_error)?;
         if res.rows_affected() == 1 {
             transitioned_to_playing = next_status == "playing";
             Some(Side::Black)
@@ -1152,7 +1383,7 @@ async fn get_match_snapshot(
 }
 
 async fn is_match_participant(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     viewer_account_id: Option<&str>,
 ) -> bool {
@@ -1160,7 +1391,7 @@ async fn is_match_participant(
         return false;
     };
     let Ok(Some(row)) =
-        sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
+        sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = $1")
             .bind(match_id)
             .fetch_optional(db)
             .await
@@ -1173,7 +1404,7 @@ async fn is_match_participant(
 }
 
 async fn redact_snapshot_for_viewer(
-    db: &SqlitePool,
+    db: &AnyPool,
     mut snap: MatchSnapshotResponse,
     viewer_account_id: Option<&str>,
 ) -> Result<MatchSnapshotResponse, ApiError> {
@@ -1192,7 +1423,7 @@ async fn redact_snapshot_for_viewer(
 /// The viewer's own saved choices when the viewer holds a seat in the match, read from that seat's columns only.
 /// A failed read is an error, never mistaken for a viewer without a seat.
 async fn participant_choices(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     viewer: &str,
 ) -> Result<Option<ParticipantChoices>, ApiError> {
@@ -1201,7 +1432,7 @@ async fn participant_choices(
                 red_visibility_choice, red_consent_training, red_consent_research, red_consent_dataset,
                 black_visibility_choice, black_consent_training, black_consent_research, black_consent_dataset,
                 red_choices_revision, black_choices_revision
-         FROM matches WHERE match_id = ?",
+         FROM matches WHERE match_id = $1",
     )
     .bind(match_id)
     .fetch_optional(db)
@@ -1242,27 +1473,37 @@ async fn participant_choices(
     }))
 }
 
+/// A failed database call, answered as a server error.
+fn db_error(e: sqlx::Error) -> ApiError {
+    ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    }
+}
+
+/// A match ID that names no match.
+fn match_not_found() -> ApiError {
+    ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "match_not_found",
+        message: "Match not found".to_string(),
+    }
+}
+
 async fn check_match_read_access(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     viewer_account_id: Option<&str>,
 ) -> Result<(), ApiError> {
     let row = sqlx::query(
-        "SELECT visibility, red_account_id, black_account_id FROM matches WHERE match_id = ?",
+        "SELECT visibility, red_account_id, black_account_id FROM matches WHERE match_id = $1",
     )
     .bind(match_id)
     .fetch_optional(db)
     .await
-    .map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?
-    .ok_or_else(|| ApiError {
-        status: StatusCode::NOT_FOUND,
-        code: "match_not_found",
-        message: "Match not found".to_string(),
-    })?;
+    .map_err(db_error)?
+    .ok_or_else(match_not_found)?;
 
     let vis: String = row.get("visibility");
     if vis == "public" || vis == "unlisted" {
@@ -1390,20 +1631,22 @@ async fn update_match_privacy(
         Visibility::Private => "private",
     };
 
-    // The transaction takes the write lock before it reads the seats, so concurrent saves run one after another and a
-    // stale one is answered 409, never failed by a busy upgrade from reader to writer.
-    let mut tx = state
-        .db
-        .begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+    // On SQLite the transaction takes the write lock before it reads the seats, so concurrent saves run one after
+    // another and a stale one is answered 409, never failed by a busy upgrade from reader to writer. On PostgreSQL the
+    // revision-checked update locks its row, so a competing save waits, sees the advanced revision, and is refused.
+    let begin = match state.backend {
+        Backend::Sqlite => "BEGIN IMMEDIATE",
+        Backend::Postgres => "BEGIN",
+    };
+    let mut tx = state.db.begin_with(begin).await.map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+    fence(&mut tx).await?;
 
     let seats =
-        sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
+        sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = $1")
             .bind(&match_id)
             .fetch_optional(&mut *tx)
             .await
@@ -1437,13 +1680,13 @@ async fn update_match_privacy(
     };
     let updated = sqlx::query(&format!(
         "UPDATE matches SET state_version = state_version + 1,
-            {seat}_visibility_choice = COALESCE(?, {seat}_visibility_choice),
-            {seat}_consent_training = COALESCE(?, {seat}_consent_training),
-            {seat}_consent_research = COALESCE(?, {seat}_consent_research),
-            {seat}_consent_dataset = COALESCE(?, {seat}_consent_dataset),
+            {seat}_visibility_choice = COALESCE($1, {seat}_visibility_choice),
+            {seat}_consent_training = COALESCE($2, {seat}_consent_training),
+            {seat}_consent_research = COALESCE($3, {seat}_consent_research),
+            {seat}_consent_dataset = COALESCE($4, {seat}_consent_dataset),
             {seat}_choices_revision = {seat}_choices_revision + 1,
-            updated_at_ms = ?
-         WHERE match_id = ? AND {seat}_choices_revision = ?"
+            updated_at_ms = $5
+         WHERE match_id = $6 AND {seat}_choices_revision = $7"
     ))
     .bind(req.visibility.map(fmt_vis))
     .bind(req.allow_internal_training.map(i64::from))
@@ -1468,7 +1711,7 @@ async fn update_match_privacy(
         });
     }
     let revisions = sqlx::query(&format!(
-        "SELECT {seat}_choices_revision AS choices_revision, state_version FROM matches WHERE match_id = ?"
+        "SELECT {seat}_choices_revision AS choices_revision, state_version FROM matches WHERE match_id = $1"
     ))
     .bind(&match_id)
     .fetch_one(&mut *tx)
@@ -1486,7 +1729,7 @@ async fn update_match_privacy(
                 red_consent_training, black_consent_training,
                 red_consent_research, black_consent_research,
                 red_consent_dataset, black_consent_dataset
-         FROM matches WHERE match_id = ?",
+         FROM matches WHERE match_id = $1",
     )
     .bind(&match_id)
     .fetch_one(&mut *tx)
@@ -1509,7 +1752,7 @@ async fn update_match_privacy(
     };
     let effective = policy.effective_visibility();
 
-    sqlx::query("UPDATE matches SET visibility = ?, updated_at_ms = ? WHERE match_id = ?")
+    sqlx::query("UPDATE matches SET visibility = $1, updated_at_ms = $2 WHERE match_id = $3")
         .bind(fmt_vis(effective))
         .bind(now)
         .bind(&match_id)
@@ -1584,7 +1827,7 @@ async fn ws_match_stream(
 
 async fn handle_ws_client(
     mut socket: WebSocket,
-    db: SqlitePool,
+    db: AnyPool,
     actor: MatchActorHandle,
     account_id: String,
     session_id_hash: String,
@@ -1798,14 +2041,14 @@ async fn ensure_match_actor(
 }
 
 async fn compute_actor_deadline(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     side_to_move: Side,
     turn_started_mono: Option<Instant>,
 ) -> Option<tokio::time::Instant> {
     let started = turn_started_mono?;
     let row = sqlx::query(
-        "SELECT status, red_remaining_ms, black_remaining_ms FROM matches WHERE match_id = ?",
+        "SELECT status, red_remaining_ms, black_remaining_ms FROM matches WHERE match_id = $1",
     )
     .bind(match_id)
     .fetch_optional(db)
@@ -1825,7 +2068,7 @@ async fn compute_actor_deadline(
 }
 
 async fn expire_active_clock_if_due(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     game: &GameState,
     turn_started_mono: &mut Option<Instant>,
@@ -1835,7 +2078,7 @@ async fn expire_active_clock_if_due(
         return Ok(None);
     };
     let row = sqlx::query(
-        "SELECT current_seq, status, red_remaining_ms, black_remaining_ms FROM matches WHERE match_id = ?",
+        "SELECT current_seq, status, red_remaining_ms, black_remaining_ms FROM matches WHERE match_id = $1",
     )
     .bind(match_id)
     .fetch_optional(db)
@@ -1901,25 +2144,17 @@ async fn expire_active_clock_if_due(
 }
 
 async fn reconstruct_game_from_db(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
 ) -> Result<(GameState, Option<Instant>, Option<Side>, Option<Side>), ApiError> {
     let mrow = sqlx::query(
-        "SELECT initial_fen, rules_profile, status, turn_started_utc_ms FROM matches WHERE match_id = ?",
+        "SELECT initial_fen, rules_profile, status, turn_started_utc_ms FROM matches WHERE match_id = $1",
     )
     .bind(match_id)
     .fetch_optional(db)
     .await
-    .map_err(|e| ApiError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "db_error",
-                message: e.to_string(),
-            })?
-            .ok_or_else(|| ApiError {
-                status: StatusCode::NOT_FOUND,
-                code: "match_not_found",
-                message: "Match not found".to_string(),
-            })?;
+    .map_err(db_error)?
+    .ok_or_else(match_not_found)?;
 
     let initial_fen: String = mrow.get("initial_fen");
     let profile: String = mrow.get("rules_profile");
@@ -1931,7 +2166,7 @@ async fn reconstruct_game_from_db(
     })?;
 
     let events = sqlx::query(
-        "SELECT event_type, payload_json FROM match_events WHERE match_id = ? ORDER BY seq ASC",
+        "SELECT event_type, payload_json FROM match_events WHERE match_id = $1 ORDER BY seq ASC",
     )
     .bind(match_id)
     .fetch_all(db)
@@ -1994,7 +2229,7 @@ async fn reconstruct_game_from_db(
 
 #[allow(clippy::too_many_arguments)]
 async fn process_single_command(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     game: &mut GameState,
     turn_started_mono: &mut Option<Instant>,
@@ -2037,11 +2272,15 @@ async fn process_single_command(
             ..
         } => (command_id.as_str(), *expected_seq),
     };
+    // PostgreSQL text cannot hold NUL, so an ID with one is refused on every backend before it is looked up.
+    if cmd_id.is_empty() || cmd_id.contains('\0') {
+        return Err(invalid_command_id());
+    }
 
     // 1. Load current match seats, sequence, status, and clocks
     let mrow = sqlx::query(
         "SELECT current_seq, status, is_friendly, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, red_remaining_ms, black_remaining_ms
-         FROM matches WHERE match_id = ?",
+         FROM matches WHERE match_id = $1",
     )
     .bind(match_id)
     .fetch_one(db)
@@ -2079,7 +2318,7 @@ async fn process_single_command(
     //    without applying move twice or awarding extra clock increment (Section 8)! It precedes the
     //    status check so a participant's retry after the match finished still receives the snapshot.
     let existing =
-        sqlx::query("SELECT seq FROM match_events WHERE match_id = ? AND command_id = ?")
+        sqlx::query("SELECT seq FROM match_events WHERE match_id = $1 AND command_id = $2")
             .bind(match_id)
             .bind(cmd_id)
             .fetch_optional(db)
@@ -2091,6 +2330,10 @@ async fn process_single_command(
             })?;
     if existing.is_some() {
         return load_match_snapshot(db, match_id, None).await;
+    }
+    // A new event's ID is stored and indexed, so it is bounded; a retry of an ID committed earlier was answered above.
+    if cmd_id.len() > MAX_COMMAND_ID_BYTES {
+        return Err(invalid_command_id());
     }
 
     if status != "playing" {
@@ -2421,7 +2664,7 @@ fn starts_turn(event_type: &str, next_status: &str) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 async fn commit_match_event_tx(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     next_seq: u64,
     command_id: &str,
@@ -2437,15 +2680,11 @@ async fn commit_match_event_tx(
     utc_ms: i64,
 ) -> Result<(), ApiError> {
     let starts_turn = starts_turn(event_type, next_status);
-    let mut tx = db.begin().await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    let mut tx = begin_fenced(db).await?;
 
     sqlx::query(
         "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(match_id)
     .bind(next_seq as i64)
@@ -2464,11 +2703,11 @@ async fn commit_match_event_tx(
 
     sqlx::query(
         "UPDATE matches SET state_version = state_version + 1,
-            current_seq = ?, current_fen = ?, status = ?,
-            red_remaining_ms = ?, black_remaining_ms = ?,
-            turn_started_utc_ms = ?, turn_generation = turn_generation + ?,
-            outcome = ?, reason_code = ?, updated_at_ms = ?
-         WHERE match_id = ?",
+            current_seq = $1, current_fen = $2, status = $3,
+            red_remaining_ms = $4, black_remaining_ms = $5,
+            turn_started_utc_ms = $6, turn_generation = turn_generation + $7,
+            outcome = $8, reason_code = $9, updated_at_ms = $10
+         WHERE match_id = $11",
     )
     .bind(next_seq as i64)
     .bind(next_fen)
@@ -2497,11 +2736,11 @@ async fn commit_match_event_tx(
 }
 
 async fn load_match_snapshot(
-    db: &SqlitePool,
+    db: &AnyPool,
     match_id: &str,
     since_seq: Option<u64>,
 ) -> Result<MatchSnapshotResponse, ApiError> {
-    let m = sqlx::query("SELECT * FROM matches WHERE match_id = ?")
+    let m = sqlx::query("SELECT * FROM matches WHERE match_id = $1")
         .bind(match_id)
         .fetch_optional(db)
         .await
@@ -2519,7 +2758,7 @@ async fn load_match_snapshot(
     // Events are read up to the sequence the row was read at, so a move committed between the two reads cannot appear
     // in the move list of a snapshot whose position, turn, clocks, and version are from before it.
     let all_events = sqlx::query(
-        "SELECT seq, command_id, actor_side, event_type, payload_json, created_at_ms FROM match_events WHERE match_id = ? AND seq <= ? ORDER BY seq ASC",
+        "SELECT seq, command_id, actor_side, event_type, payload_json, created_at_ms FROM match_events WHERE match_id = $1 AND seq <= $2 ORDER BY seq ASC",
     )
     .bind(match_id)
     .bind(m.get::<i64, _>("current_seq"))
@@ -2616,7 +2855,7 @@ async fn load_match_snapshot(
     }
 
     let next_rematch_code = if let Some(next_mid) = m.get::<Option<String>, _>("next_rematch_id") {
-        sqlx::query_scalar::<_, String>("SELECT invitation_code FROM matches WHERE match_id = ?")
+        sqlx::query_scalar::<_, String>("SELECT invitation_code FROM matches WHERE match_id = $1")
             .bind(next_mid)
             .fetch_optional(db)
             .await
@@ -2664,15 +2903,11 @@ async fn create_or_get_rematch(
     let caller_id = authenticate_request(&state, &headers, true).await?;
     // Serialize rematch lookup + creation so simultaneous requests from both seats never race on `next_rematch_id`!
     let _rematch_guard = state.rematch_lock.lock().await;
-    let mut tx = state.db.begin().await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    let mut tx = begin_fenced(&state.db).await?;
 
     let m = sqlx::query(
         "SELECT status, is_friendly, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, next_rematch_id
-         FROM matches WHERE match_id = ?",
+         FROM matches WHERE match_id = $1",
     )
     .bind(&match_id)
     .fetch_optional(&mut *tx)
@@ -2714,7 +2949,7 @@ async fn create_or_get_rematch(
 
     if let Some(existing_rematch_id) = m.get::<Option<String>, _>("next_rematch_id")
         && let Some(existing_code) = sqlx::query_scalar::<_, String>(
-            "SELECT invitation_code FROM matches WHERE match_id = ?",
+            "SELECT invitation_code FROM matches WHERE match_id = $1",
         )
         .bind(&existing_rematch_id)
         .fetch_optional(&mut *tx)
@@ -2756,7 +2991,7 @@ async fn create_or_get_rematch(
             match_id, invitation_code, rules_profile, is_friendly, initial_fen, current_fen,
             current_seq, status, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms,
             red_remaining_ms, black_remaining_ms, visibility, rematch_of_match_id, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'waiting', ?, ?, ?, ?, ?, ?, 'private', ?, ?, ?)",
+        ) VALUES ($1, $2, $3, $4, $5, $6, 0, 'waiting', $7, $8, $9, $10, $11, $12, 'private', $13, $14, $15)",
     )
     .bind(&new_match_id)
     .bind(&invitation_code)
@@ -2781,7 +3016,7 @@ async fn create_or_get_rematch(
         message: e.to_string(),
     })?;
 
-    sqlx::query("UPDATE matches SET state_version = state_version + 1, next_rematch_id = ?, updated_at_ms = ? WHERE match_id = ?")
+    sqlx::query("UPDATE matches SET state_version = state_version + 1, next_rematch_id = $1, updated_at_ms = $2 WHERE match_id = $3")
         .bind(&new_match_id)
         .bind(ts)
         .bind(&match_id)
@@ -2936,6 +3171,91 @@ pub fn server_ready() -> bool {
 
 #[cfg(test)]
 mod session_cookie_tests {
+    #[test]
+    fn database_settings_name_their_backend() {
+        use super::{Backend, parse_database_url};
+        let parsed = |s: &str| parse_database_url(s).unwrap();
+        assert_eq!(
+            parsed("POSTGRES://u:p@h/game"),
+            (Backend::Postgres, "postgres://u:p@h/game".to_string())
+        );
+        assert_eq!(parsed("postgresql://h/game").0, Backend::Postgres);
+        assert_eq!(
+            parsed("sqlite:jade.db?mode=rwc"),
+            (Backend::Sqlite, "sqlite:jade.db?mode=rwc".to_string())
+        );
+        assert_eq!(
+            parsed("/var/lib/jade/game.db?mode=rwc"),
+            (
+                Backend::Sqlite,
+                "sqlite:/var/lib/jade/game.db?mode=rwc".to_string()
+            )
+        );
+        assert!(parse_database_url("mysql://h/game").is_err());
+        // A blank setting is a missing database, whatever whitespace it holds.
+        for blank in ["", " ", "\n"] {
+            assert!(matches!(
+                parse_database_url(blank),
+                Err(sqlx::Error::Configuration(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn an_in_memory_database_keeps_and_checks_its_options() {
+        use super::{Backend, pool_url};
+        let url = pool_url("sqlite::memory:?vfs=unix-none", Backend::Sqlite).unwrap();
+        assert!(url.ends_with("&vfs=unix-none"), "{url}");
+        assert!(pool_url("sqlite::memory:?not_an_option=1", Backend::Sqlite).is_err());
+        // An encoded spelling of `cache` is still the cache option, which the shared database decides.
+        let url = pool_url("sqlite::memory:?%63ache=private", Backend::Sqlite).unwrap();
+        assert!(
+            !url.contains("%63ache") && !url.contains("private"),
+            "{url}"
+        );
+        // Every spelling of the in-memory database the driver reads is one shared in-memory database.
+        for memory in [
+            "sqlite::memory:",
+            "sqlite://:memory:",
+            "sqlite:",
+            "sqlite:sqlite::memory:",
+        ] {
+            assert!(
+                pool_url(memory, Backend::Sqlite)
+                    .unwrap()
+                    .contains("mode=memory"),
+                "{memory}"
+            );
+        }
+        // Settings that could be read two ways are refused, never turned into volatile or mislocked storage.
+        for ambiguous in [
+            "sqlite:file:sqlx-in-memory-backup.db?mode=rwc",
+            "sqlite:game#test?mode=memory&cache=private",
+            "sqlite:game.db?mode=memory",
+            "sqlite:game.db ",
+            "sqlite:%3Amemory%3A",
+            "sqlite:/tmp/game.db?mode=rwc&vfs=memdb",
+        ] {
+            assert!(
+                matches!(
+                    pool_url(ambiguous, Backend::Sqlite),
+                    Err(sqlx::Error::Configuration(_))
+                ),
+                "{ambiguous}"
+            );
+        }
+        assert!(
+            super::parse_database_url("mysql://u:secret@h/game")
+                .unwrap_err()
+                .to_string()
+                .contains("\"mysql\"")
+                && !super::parse_database_url("mysql://u:secret@h/game")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("secret")
+        );
+    }
+
     #[test]
     fn only_a_move_or_accepted_takeback_that_continues_play_starts_a_turn() {
         assert!(super::starts_turn("move", "playing"));

@@ -5,14 +5,14 @@
 CREATE TABLE IF NOT EXISTS accounts (
     account_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    is_guest INTEGER NOT NULL DEFAULT 1,
+    is_guest BIGINT NOT NULL DEFAULT 1,
     locale TEXT NOT NULL DEFAULT 'en-US',
     piece_face_set TEXT NOT NULL DEFAULT 'simplified-prototype-v1',
     board_material TEXT NOT NULL DEFAULT 'pale-jade',
     notation_format TEXT NOT NULL DEFAULT 'chinese',
-    reduced_motion INTEGER NOT NULL DEFAULT 0,
-    sound_enabled INTEGER NOT NULL DEFAULT 1,
-    created_at_ms INTEGER NOT NULL
+    reduced_motion BIGINT NOT NULL DEFAULT 0,
+    sound_enabled BIGINT NOT NULL DEFAULT 1,
+    created_at_ms BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -22,61 +22,61 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     csrf_token TEXT NOT NULL,
     refresh_token_hash TEXT,
     device_label TEXT,
-    revoked_at_ms INTEGER,
-    expires_at_ms INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    revoked_at_ms BIGINT,
+    expires_at_ms BIGINT NOT NULL,
+    created_at_ms BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS matches (
     match_id TEXT PRIMARY KEY,
     invitation_code TEXT NOT NULL UNIQUE,
     rules_profile TEXT NOT NULL DEFAULT 'program-2023.11-v1',
-    is_friendly INTEGER NOT NULL DEFAULT 1,
+    is_friendly BIGINT NOT NULL DEFAULT 1,
     initial_fen TEXT NOT NULL,
     current_fen TEXT NOT NULL,
-    current_seq INTEGER NOT NULL DEFAULT 0,
+    current_seq BIGINT NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'waiting', -- 'waiting' | 'playing' | 'finished' | 'interrupted'
     red_account_id TEXT REFERENCES accounts(account_id),
     black_account_id TEXT REFERENCES accounts(account_id),
     red_seat_token_hash TEXT,
     black_seat_token_hash TEXT,
-    clock_initial_ms INTEGER, -- NULL for untimed
-    clock_increment_ms INTEGER NOT NULL DEFAULT 0,
-    red_remaining_ms INTEGER,
-    black_remaining_ms INTEGER,
-    turn_started_utc_ms INTEGER,
+    clock_initial_ms BIGINT, -- NULL for untimed
+    clock_increment_ms BIGINT NOT NULL DEFAULT 0,
+    red_remaining_ms BIGINT,
+    black_remaining_ms BIGINT,
+    turn_started_utc_ms BIGINT,
     outcome TEXT, -- NULL | 'red_win' | 'black_win' | 'draw' | 'interrupted'
     reason_code TEXT,
     visibility TEXT NOT NULL DEFAULT 'private', -- 'private' | 'unlisted' | 'public'
     red_visibility_choice TEXT NOT NULL DEFAULT 'private',
     black_visibility_choice TEXT NOT NULL DEFAULT 'private',
-    red_consent_training INTEGER NOT NULL DEFAULT 0,
-    black_consent_training INTEGER NOT NULL DEFAULT 0,
-    red_consent_research INTEGER NOT NULL DEFAULT 0,
-    black_consent_research INTEGER NOT NULL DEFAULT 0,
-    red_consent_dataset INTEGER NOT NULL DEFAULT 0,
-    black_consent_dataset INTEGER NOT NULL DEFAULT 0,
+    red_consent_training BIGINT NOT NULL DEFAULT 0,
+    black_consent_training BIGINT NOT NULL DEFAULT 0,
+    red_consent_research BIGINT NOT NULL DEFAULT 0,
+    black_consent_research BIGINT NOT NULL DEFAULT 0,
+    red_consent_dataset BIGINT NOT NULL DEFAULT 0,
+    black_consent_dataset BIGINT NOT NULL DEFAULT 0,
     -- Each participant's choices advance a revision on every save, so an older save cannot overwrite a newer one.
-    red_choices_revision INTEGER NOT NULL DEFAULT 0,
-    black_choices_revision INTEGER NOT NULL DEFAULT 0,
+    red_choices_revision BIGINT NOT NULL DEFAULT 0,
+    black_choices_revision BIGINT NOT NULL DEFAULT 0,
     -- Advances with every change to the match's stored state, so clients show the newest snapshot they hold.
-    state_version INTEGER NOT NULL DEFAULT 0,
+    state_version BIGINT NOT NULL DEFAULT 0,
     -- Advances only when a new turn begins (play starting, a move, an accepted takeback), for clock accounting.
-    turn_generation INTEGER NOT NULL DEFAULT 0,
+    turn_generation BIGINT NOT NULL DEFAULT 0,
     rematch_of_match_id TEXT,
     next_rematch_id TEXT,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    created_at_ms BIGINT NOT NULL,
+    updated_at_ms BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS match_events (
     match_id TEXT NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,
+    seq BIGINT NOT NULL,
     command_id TEXT NOT NULL,
     actor_side TEXT, -- 'red' | 'black' | 'system'
     event_type TEXT NOT NULL, -- 'seat_joined' | 'move' | 'draw_offered' | 'draw_accepted' | 'resigned' | 'timeout' | 'interrupted'
     payload_json TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
+    created_at_ms BIGINT NOT NULL,
     PRIMARY KEY (match_id, seq),
     UNIQUE (match_id, command_id)
 );
@@ -90,13 +90,20 @@ CREATE TABLE IF NOT EXISTS studies (
     rules_profile TEXT NOT NULL DEFAULT 'program-2023.11-v1',
     root_fen TEXT NOT NULL,
     nodes_json TEXT NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 1,
+    revision BIGINT NOT NULL DEFAULT 1,
     visibility TEXT NOT NULL DEFAULT 'private', -- 'private' | 'unlisted' | 'public'
-    consent_research INTEGER NOT NULL DEFAULT 0,
-    consent_dataset INTEGER NOT NULL DEFAULT 0,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    consent_research BIGINT NOT NULL DEFAULT 0,
+    consent_dataset BIGINT NOT NULL DEFAULT 0,
+    created_at_ms BIGINT NOT NULL,
+    updated_at_ms BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_invitation ON matches(invitation_code);
 CREATE INDEX IF NOT EXISTS idx_studies_owner ON studies(owner_account_id);
+
+-- The epoch of the match server that owns this database. Each owner advances it when it starts, and every write of
+-- match state checks it, so a server that lost ownership cannot write once a newer owner has started.
+CREATE TABLE IF NOT EXISTS match_server_owner (
+    singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
+    epoch BIGINT NOT NULL
+);

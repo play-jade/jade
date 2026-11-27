@@ -43,7 +43,7 @@ Changes go through [Bosun](../bosun.yaml); see [`AGENTS.md`](../AGENTS.md) for t
 | `crates/archive-client/`, `protocol/`, `data/fixtures/` | Versioned public archive/game/study/privacy contracts, standalone sample fixture provider, and shared rules/geometry fixtures (`Apache-2.0`). |
 | `crates/core-wasm/`, `crates/core-ffi/` | `wasm-bindgen` browser module, `UniFFI` Swift/Kotlin bindings, and panic-safe C ABI for Windows `.NET LibraryImport` (`Apache-2.0`). |
 | `crates/inference/`, `models/releases/` | Observation/action encoding (`from * 90 + to` = `8,100` labels) and released-model inference contracts (`Apache-2.0`). |
-| `crates/match-server/`, `db/game/` | Authoritative `Axum`/`Tokio` match, invitation, `10+5`/untimed clock, reconnection, and private-by-default study service with SQLx migrations. |
+| `crates/match-server/`, `db/game/` | Authoritative `Axum`/`Tokio` match, invitation, `10+5`/untimed clock, reconnection, and private-by-default study service. Its schema (`db/game/`) is applied at startup on SQLite or PostgreSQL, and counters added since are added to existing databases. |
 | `engines/` | Search adapter contracts, supervised desktop UCI host (`engines/uci-host`), linked C/C++ mobile bridge (`engines/mobile-bridge`), and browser Web Worker (`engines/wasm-worker`). |
 | `crates/asset-pipeline/`, `assets/` | Reproducible Rust vector glyph extraction, orthographic 2.5D baked material pipeline, synthesized piece acoustics, brand kit (`assets/brand/`), and `assets/manifest.json`. |
 | `apps/web/` | Server-rendered Nuxt 4 / Vue 3 / TypeScript web interface with Canvas 2D materials, SVG/DOM WCAG 2.2 semantics, IndexedDB offline play, and Web Worker analysis. |

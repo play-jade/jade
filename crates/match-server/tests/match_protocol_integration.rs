@@ -9,7 +9,7 @@ use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use jade_match_server::{
     CoordMovePayload, CurrentSessionResponse, GuestSessionResponse, InvitationCreatedResponse,
     JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest,
-    build_app_state, build_router,
+    build_app_state, build_router, mark_interrupted_timed_matches_on_startup,
 };
 use tokio::io::DuplexStream;
 use tokio_tungstenite::{
@@ -35,6 +35,220 @@ async fn connect_ws_duplex(
         .await
         .map_err(Box::new)?;
     Ok(ws)
+}
+
+static TEST_DB_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A test's database, removed when the test ends: a PostgreSQL database dropped from its server, or a SQLite file's
+/// directory deleted. A private in-memory SQLite database needs neither.
+struct TestDb {
+    url: String,
+    postgres: Option<(String, String)>,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Drop for TestDb {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some((admin, name)) = self.postgres.take() {
+            // Dropping runs outside the test's runtime, on a thread of its own; FORCE ends sessions still open.
+            let leftover = name.clone();
+            let dropped = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                runtime.block_on(async {
+                    let mut conn = <sqlx::AnyConnection as sqlx::Connection>::connect(&admin)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+                        .execute(&mut conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("{name}: {e}"))
+                })
+            })
+            .join()
+            .unwrap_or_else(|_| Err("the cleanup thread panicked".to_string()));
+            if let Err(error) = dropped {
+                let report = format!("test database {leftover} was not dropped: {error}");
+                // A test already failing reports the leftover; a passing one fails, naming it.
+                if std::thread::panicking() {
+                    eprintln!("{report}");
+                } else {
+                    panic!("{report}");
+                }
+            }
+        }
+    }
+}
+
+/// Sets query options on a URL, replacing any it already has with the same names as the URL parser reads them.
+fn with_query(url: &str, set: &[(&str, &str)]) -> String {
+    let mut parsed = url::Url::parse(url).expect("a database URL");
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !set.iter().any(|(name, _)| key.eq_ignore_ascii_case(name)))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.clear();
+        query.extend_pairs(kept);
+        query.extend_pairs(set.iter().copied());
+    }
+    parsed.to_string()
+}
+
+/// The URL of database `name` on the server `admin` names: only the database changes, and a `dbname` option, which
+/// would otherwise override the path, is removed however it is spelled.
+fn fixture_url(admin: &str, name: &str) -> String {
+    let mut parsed = url::Url::parse(admin).expect("a database URL");
+    parsed.set_path(&format!("/{name}"));
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("dbname"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    parsed.to_string()
+}
+
+#[test]
+fn a_fixture_url_names_only_its_own_database() {
+    let url = fixture_url(
+        "postgres://jade@127.0.0.1:5432/postgres?db%6Eame=postgres&application_name=t",
+        "jade_x",
+    );
+    let parsed = url::Url::parse(&url).unwrap();
+    assert_eq!(parsed.path(), "/jade_x");
+    assert!(
+        parsed
+            .query_pairs()
+            .all(|(k, _)| !k.eq_ignore_ascii_case("dbname")),
+        "{url}"
+    );
+    assert!(
+        parsed
+            .query_pairs()
+            .any(|(k, v)| k == "application_name" && v == "t")
+    );
+    // An existing option, however it is spelled, is replaced rather than joined by a second.
+    let replaced = with_query(
+        &format!("{url}&SSLMode=disable"),
+        &[("sslmode", "verify-full")],
+    );
+    let modes: Vec<(String, String)> = url::Url::parse(&replaced)
+        .unwrap()
+        .query_pairs()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("sslmode"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert_eq!(
+        modes,
+        vec![("sslmode".to_string(), "verify-full".to_string())]
+    );
+}
+
+/// A fresh database on the PostgreSQL server `JADE_TEST_POSTGRES_URL` names (a URL ending in a database to connect to
+/// for administration, such as `postgres://jade@127.0.0.1:55432/postgres`), or `None` when it names none.
+async fn fresh_postgres() -> Option<TestDb> {
+    let admin = std::env::var("JADE_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|u| !u.is_empty())?;
+    sqlx::any::install_default_drivers();
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Unique across runs as well as within one, so a reused process ID never meets an earlier run's database.
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let name = format!("jade_test_{}_{started}_{seq}", std::process::id());
+    let mut conn = <sqlx::AnyConnection as sqlx::Connection>::connect(&admin)
+        .await
+        .expect("connect to the PostgreSQL test server");
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut conn)
+        .await
+        .expect("create a test database");
+    let url = fixture_url(&admin, &name);
+    let db = TestDb {
+        url,
+        postgres: Some((admin, name.clone())),
+        dir: None,
+    };
+    // No test receives a fixture that reaches any database but its own.
+    let mut check = <sqlx::AnyConnection as sqlx::Connection>::connect(&db.url)
+        .await
+        .unwrap();
+    let reached: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&mut check)
+        .await
+        .unwrap();
+    assert_eq!(reached, name, "the fixture URL reaches its own database");
+    Some(db)
+}
+
+/// The database a test runs on: a fresh PostgreSQL database when one is configured, else private in-memory SQLite.
+async fn test_db() -> TestDb {
+    match fresh_postgres().await {
+        Some(db) => db,
+        None => TestDb {
+            url: "sqlite::memory:".to_string(),
+            postgres: None,
+            dir: None,
+        },
+    }
+}
+
+/// A database that outlives one server, for restart and concurrent-writer tests: a fresh PostgreSQL database when one
+/// is configured, else a new SQLite file.
+async fn durable_test_db(label: &str) -> TestDb {
+    if let Some(db) = fresh_postgres().await {
+        return db;
+    }
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("jade-{label}-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("game.sqlite3");
+    TestDb {
+        url: format!("sqlite://{}?mode=rwc", path.display()),
+        postgres: None,
+        dir: Some(dir),
+    }
+}
+
+/// A started 10+5 match between two new guests on a fresh test database, with direct access to that database.
+struct TestMatch {
+    test_db: TestDb,
+    db: sqlx::AnyPool,
+    app: axum::Router,
+    red: GuestSessionResponse,
+    match_id: String,
+}
+
+async fn test_match() -> TestMatch {
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    TestMatch {
+        test_db,
+        db,
+        app,
+        red,
+        match_id,
+    }
 }
 
 async fn json_body<T: serde::de::DeserializeOwned>(resp: axum::response::Response) -> T {
@@ -185,7 +399,8 @@ async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, Str
 
 #[tokio::test]
 async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
 
     let (red_guest, red_cookie) = new_guest(&app, "Red Host").await;
@@ -372,7 +587,8 @@ async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
 
 #[tokio::test]
 async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
 
     let (red, _) = new_guest(&app, "Red").await;
@@ -624,7 +840,8 @@ async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent(
 
 #[tokio::test]
 async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
 
     let (red, _) = new_guest(&app, "WS Red").await;
@@ -741,7 +958,8 @@ async fn live_websocket_two_client_fanout_origin_check_and_resignation() {
 
 #[tokio::test]
 async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state.clone());
 
     let (red, _) = new_guest(&app, "Red").await;
@@ -922,7 +1140,8 @@ async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
 
 #[tokio::test]
 async fn slice_b_takeback_rematch_pgn_export_app_links_and_outage_interruption() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state.clone());
 
     // 1. Universal Links & Android App Links `.well-known` association endpoints
@@ -1153,15 +1372,8 @@ async fn slice_b_takeback_rematch_pgn_export_app_links_and_outage_interruption()
 
 #[tokio::test]
 async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protection() {
-    let tmp_db = format!(
-        "/tmp/jade_owner_lock_test_{}.db",
-        std::process::id()
-            ^ (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos())
-    );
-    let sqlite_url = format!("sqlite:{tmp_db}?mode=rwc");
+    let db = durable_test_db("owner").await;
+    let sqlite_url = db.url.clone();
 
     let state1 = build_app_state(&sqlite_url).await.unwrap();
     let app1 = build_router(state1.clone());
@@ -1322,8 +1534,7 @@ async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protect
         .unwrap();
     assert_eq!(hijack_resp.status(), StatusCode::FORBIDDEN);
 
-    let _ = std::fs::remove_file(&tmp_db);
-    let _ = std::fs::remove_file(format!("{tmp_db}.owner.lock"));
+    drop(db);
 }
 
 /// Reads a match snapshot as the holder of `cookie` (or anonymously).
@@ -1355,7 +1566,8 @@ async fn session_as(app: &axum::Router, cookie: Option<&str>) -> axum::response:
 
 #[tokio::test]
 async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
 
@@ -1615,7 +1827,7 @@ async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
     );
 
     // 6. A revoked cookie session recovers nothing.
-    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE account_id = ?")
+    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE account_id = $1")
         .bind(&blk.account_id)
         .execute(&db)
         .await
@@ -1631,7 +1843,7 @@ async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
         .unwrap()
         .as_millis() as i64;
     let soon = now_ms + 90_000;
-    sqlx::query("UPDATE auth_sessions SET expires_at_ms = ? WHERE account_id = ?")
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = $1 WHERE account_id = $2")
         .bind(soon)
         .bind(&red.account_id)
         .execute(&db)
@@ -1651,7 +1863,7 @@ async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
     assert_eq!(partial.expires_at_ms, soon);
 
     // 7. An expired session recovers nothing and no longer reads the private replay.
-    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE account_id = ?")
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE account_id = $1")
         .bind(&red.account_id)
         .execute(&db)
         .await
@@ -1719,14 +1931,9 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
 
 #[tokio::test]
 async fn concurrent_saves_of_one_revision_apply_once() {
-    // A file-backed database, so the two saves run on separate connections and compete for the write lock.
-    let dir = std::env::temp_dir().join(format!("jade-concurrent-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("game.sqlite3");
-    let _ = std::fs::remove_file(&path);
-    let state = build_app_state(&format!("sqlite://{}?mode=rwc", path.display()))
-        .await
-        .unwrap();
+    // A durable database, so the two saves run on separate connections and compete for the write lock.
+    let db = durable_test_db("concurrent").await;
+    let state = build_app_state(&db.url).await.unwrap();
     let app = build_router(state);
     let (red, _red_cookie) = new_guest(&app, "Red").await;
     let (blk, _blk_cookie) = new_guest(&app, "Black").await;
@@ -1759,12 +1966,13 @@ async fn concurrent_saves_of_one_revision_apply_once() {
         revision + 1
     );
     drop(app);
-    let _ = std::fs::remove_dir_all(&dir);
+    drop(db);
 }
 
 #[tokio::test]
 async fn the_state_version_advances_with_every_change_by_either_participant() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
     let (blk, _) = new_guest(&app, "Black").await;
@@ -1893,7 +2101,8 @@ async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
 #[tokio::test]
 async fn an_open_stream_ends_with_its_session() {
     use sha2::Digest;
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2001,7 +2210,8 @@ async fn snapshot_for(app: &axum::Router, token: &str, match_id: &str) -> MatchS
 #[tokio::test]
 async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
     use sha2::Digest;
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let db = state.db.clone();
     let app = build_router(state.clone());
     let (red, _) = new_guest(&app, "Red").await;
@@ -2048,7 +2258,8 @@ async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
 
 #[tokio::test]
 async fn a_read_only_session_check_sets_no_cookie() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url).await.unwrap();
     let app = build_router(state);
     let (_guest, cookie) = new_guest(&app, "Guest").await;
     let check = |query: &'static str| {
@@ -2068,12 +2279,13 @@ async fn a_read_only_session_check_sets_no_cookie() {
 
 #[tokio::test]
 async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
-    let state = build_app_state("sqlite::memory:").await.unwrap();
-    let db = state.db.clone();
-    let app = build_router(state);
-    let (red, _) = new_guest(&app, "Red").await;
-    let (blk, _) = new_guest(&app, "Black").await;
-    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let TestMatch {
+        test_db: _test_db,
+        db,
+        app,
+        red,
+        match_id,
+    } = test_match().await;
     let mv = MatchCommandRequest::Move {
         protocol: 1,
         match_id: match_id.clone(),
@@ -2095,7 +2307,7 @@ async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
     sqlx::query(
         "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
          SELECT match_id, seq + 1, 'planted', actor_side, event_type, payload_json, created_at_ms
-         FROM match_events WHERE match_id = ? AND seq = 1",
+         FROM match_events WHERE match_id = $1 AND seq = 1",
     )
     .bind(&match_id)
     .execute(&db)
@@ -2121,11 +2333,8 @@ async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
 
 #[tokio::test]
 async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a_restart() {
-    let dir = std::env::temp_dir().join(format!("jade-turns-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("game.sqlite3");
-    let _ = std::fs::remove_file(&path);
-    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let db = durable_test_db("turns").await;
+    let url = db.url.clone();
     let state = build_app_state(&url).await.unwrap();
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
@@ -2223,5 +2432,339 @@ async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a
     let after_restart = snapshot_for(&restarted, &red.access_token, &match_id).await;
     assert_eq!(generation(&after_restart), 4);
     drop(restarted);
+    drop(db);
+}
+
+#[tokio::test]
+async fn an_existing_postgres_database_gains_the_added_counters_at_startup() {
+    // Runs only against a configured PostgreSQL server; the SQLite form of this check is the test above.
+    let Some(pg) = fresh_postgres().await else {
+        return;
+    };
+    let url = pg.url.clone();
+    let old_schema = include_str!("../../../db/game/0001_initial_game_schema.sql")
+        .lines()
+        .filter(|line| {
+            !line.contains("_choices_revision")
+                && !line.contains("advance a revision")
+                && !line.contains("state_version")
+                && !line.contains("Advances with every change to the match")
+                && !line.contains("turn_generation")
+                && !line.contains("Advances only when a new turn begins")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let columns = |pool: sqlx::AnyPool| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'matches'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    {
+        let pool = sqlx::AnyPool::connect(&url).await.unwrap();
+        sqlx::raw_sql(&old_schema).execute(&pool).await.unwrap();
+        let before = columns(pool.clone()).await;
+        assert!(
+            !before
+                .iter()
+                .any(|c| c.ends_with("_choices_revision") || c == "state_version")
+        );
+        pool.close().await;
+    }
+    let state = build_app_state(&url).await.unwrap();
+    let after = columns(state.db.clone()).await;
+    for added in [
+        "red_choices_revision",
+        "black_choices_revision",
+        "state_version",
+        "turn_generation",
+    ] {
+        assert!(after.iter().any(|c| c == added), "{added}");
+    }
+}
+
+#[tokio::test]
+async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_starts() {
+    let Some(pg) = fresh_postgres().await else {
+        return;
+    };
+    let url = pg.url.clone();
+    let first_state = build_app_state(&url).await.unwrap();
+    let first_db = first_state.db.clone();
+    let first = build_router(first_state);
+    let (red, _) = new_guest(&first, "Red").await;
+    let (blk, _) = new_guest(&first, "Black").await;
+    // An untimed match, so the new owner's startup recovery leaves it playing and only the fence can refuse the write.
+    let invite: InvitationCreatedResponse = post_json(
+        &first,
+        &red.access_token,
+        "/api/v1/invitations".to_string(),
+        serde_json::json!({ "preferred_side": "red" }),
+    )
+    .await;
+    let joined: JoinInvitationResponse = post_json(
+        &first,
+        &blk.access_token,
+        format!("/api/v1/invitations/{}/join", invite.invitation_code),
+        serde_json::json!({}),
+    )
+    .await;
+    let match_id = joined.match_id;
+
+    // The first server's lock session ends, as a database restart or an idle timeout would end it, and a second
+    // server takes ownership.
+    let mut admin = <sqlx::AnyConnection as sqlx::Connection>::connect(&url)
+        .await
+        .unwrap();
+    // The session runs in this test's own database before anything is ended.
+    let here: String = sqlx::query_scalar("SELECT current_database()::text")
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        pg.postgres.as_ref().map(|(_, name)| name.as_str()),
+        Some(here.as_str())
+    );
+    // Each owner session must have ended, not just been signalled, before the second server starts.
+    let ended: i64 = sqlx::query_scalar(
+        "SELECT count(*) FILTER (WHERE ended) FROM (SELECT pg_terminate_backend(pid, 5000) AS ended FROM pg_locks
+         WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())) ended",
+    )
+    .fetch_one(&mut admin)
+    .await
+    .unwrap();
+    assert_eq!(ended, 1, "the owner's lock session ends");
+    let second = build_router(build_app_state(&url).await.unwrap());
+
+    // The first server still answers, but its writes of match state are refused and change nothing.
+    let mv = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "stale-owner".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    let choices_before = snapshot_for(&second, &red.access_token, &match_id)
+        .await
+        .viewer_choices
+        .unwrap();
+    let refused = post_command(&first, &red.access_token, &match_id, &mv).await;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let refused: serde_json::Value = json_body(refused).await;
+    assert_eq!(refused["error"]["code"], "ownership_lost");
+    assert_eq!(
+        save_choices(
+            &first,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3]
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let now = snapshot_for(&second, &red.access_token, &match_id).await;
+    assert_eq!(now.seq, 0);
+    assert_eq!(now.visibility, Visibility::Private);
+    let choices_after = now.viewer_choices.unwrap();
+    assert_eq!(
+        choices_after.revision, choices_before.revision,
+        "Red's choices were not saved"
+    );
+    assert_eq!(choices_after.visibility, choices_before.visibility);
+    // Startup recovery run through the stale server's pool interrupts nothing the new owner is timing.
+    let (red2, _) = new_guest(&second, "Red 2").await;
+    let (blk2, _) = new_guest(&second, "Black 2").await;
+    let timed = start_match(&second, &red2.access_token, &blk2.access_token).await;
+    assert!(
+        mark_interrupted_timed_matches_on_startup(&first_db)
+            .await
+            .is_err()
+    );
+    let timed_now = snapshot_for(&second, &red2.access_token, &timed).await;
+    assert_eq!(timed_now.status, "playing");
+    assert_eq!(timed_now.seq, 0);
+    // The new owner plays the same move.
+    assert_eq!(
+        post_command(&second, &red.access_token, &match_id, &mv)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn command_ids_have_one_bound_on_every_backend() {
+    let TestMatch {
+        test_db: _test_db,
+        db,
+        app,
+        red,
+        match_id,
+    } = test_match().await;
+    let mv = |id: String| MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: id,
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    let too_long = post_command(&app, &red.access_token, &match_id, &mv("x".repeat(129))).await;
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+    let too_long: serde_json::Value = json_body(too_long).await;
+    assert_eq!(too_long["error"]["code"], "invalid_command_id");
+    assert_eq!(
+        post_command(&app, &red.access_token, &match_id, &mv("x".repeat(128)))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let nul = post_command(
+        &app,
+        &red.access_token,
+        &match_id,
+        &mv("a\u{0}b".to_string()),
+    )
+    .await;
+    assert_eq!(nul.status(), StatusCode::BAD_REQUEST);
+    // An ID committed before the bound existed is still a retry: its snapshot comes back, nothing is appended.
+    sqlx::query("UPDATE match_events SET command_id = $1 WHERE match_id = $2 AND seq = 1")
+        .bind("y".repeat(200))
+        .bind(&match_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let retried = post_command(&app, &red.access_token, &match_id, &mv("y".repeat(200))).await;
+    assert_eq!(retried.status(), StatusCode::OK);
+    let retried: MatchSnapshotResponse = json_body(retried).await;
+    assert_eq!(retried.seq, 1);
+}
+
+#[tokio::test]
+async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("jade-bare-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let setting = format!("{}?mode=rwc", dir.join("game.db").display());
+    let app = build_router(build_app_state(&setting).await.unwrap());
+    let (guest, cookie) = new_guest(&app, "Guest").await;
+    drop(app);
+    let reopened = build_router(build_app_state(&setting).await.unwrap());
+    let recovered = session_as(&reopened, Some(&cookie)).await;
+    assert_eq!(recovered.status(), StatusCode::OK);
+    let recovered: CurrentSessionResponse = json_body(recovered).await;
+    assert_eq!(
+        recovered.account_id, guest.account_id,
+        "the reopened server reads the same file"
+    );
+    // While it runs, the same file spelled another way is the same database, and a second server is refused.
+    let respelled = format!("{}?mode=rwc", dir.join("game%2Edb").display());
+    assert!(build_app_state(&respelled).await.is_err());
+    // So is the same file behind a repeated scheme prefix, which meets the running owner's lock; a trailing space,
+    // which the pool and the SQLite parser read differently, is refused as a setting.
+    let contended = |result: Result<_, sqlx::Error>| matches!(result, Err(sqlx::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock);
+    let reprefixed = format!("sqlite:sqlite:{}?mode=rwc", dir.join("game.db").display());
+    assert!(contended(build_app_state(&reprefixed).await));
+    let spaced = format!("sqlite:{} ", dir.join("game.db").display());
+    assert!(matches!(
+        build_app_state(&spaced).await,
+        Err(sqlx::Error::Configuration(_))
+    ));
+    drop(reopened);
+    // A `file:` URI, which SQLite would open as the same file under a lock the server could not follow, is refused as
+    // a setting, with no server running, before any lock is taken.
+    let uri = format!("sqlite:file:{}?mode=rwc", dir.join("game.db").display());
+    assert!(matches!(
+        build_app_state(&uri).await,
+        Err(sqlx::Error::Configuration(_))
+    ));
+    let reprefixed_uri = format!(
+        "sqlite:sqlite:file:{}?mode=rwc",
+        dir.join("game.db").display()
+    );
+    assert!(matches!(
+        build_app_state(&reprefixed_uri).await,
+        Err(sqlx::Error::Configuration(_))
+    ));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
+    // Runs only against a TLS-enabled PostgreSQL server whose certificate authority `JADE_TEST_POSTGRES_CA` names.
+    let Some(ca) = std::env::var("JADE_TEST_POSTGRES_CA")
+        .ok()
+        .filter(|p| !p.is_empty())
+    else {
+        return;
+    };
+    let Some(pg) = fresh_postgres().await else {
+        return;
+    };
+    let url = pg.url.clone();
+    // Checked against the server's authority, the connection is made and is encrypted.
+    let state = build_app_state(&with_query(
+        &url,
+        &[("sslmode", "verify-full"), ("sslrootcert", &ca)],
+    ))
+    .await
+    .unwrap();
+    let encrypted: bool =
+        sqlx::query_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(encrypted);
+    drop(state);
+    // Checked against an unrelated authority, the server's certificate is refused during verification.
+    let other_ca = std::env::var("JADE_TEST_POSTGRES_OTHER_CA")
+        .expect("JADE_TEST_POSTGRES_OTHER_CA names an authority unrelated to the server's");
+    let refused = build_app_state(&with_query(
+        &url,
+        &[("sslmode", "verify-full"), ("sslrootcert", &other_ca)],
+    ))
+    .await
+    .err()
+    .expect("a certificate from another authority is refused");
+    assert!(
+        refused.to_string().contains("invalid peer certificate"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn every_in_memory_spelling_is_one_database_shared_by_the_pool() {
+    for spelling in [
+        "sqlite::memory:",
+        "sqlite://:memory:",
+        "sqlite:",
+        "sqlite:sqlite::memory:",
+    ] {
+        let state = build_app_state(spelling).await.unwrap();
+        // Two connections held at once: what one writes, the other reads.
+        let mut writer = state.db.acquire().await.unwrap();
+        let mut reader = state.db.acquire().await.unwrap();
+        sqlx::query(
+            "INSERT INTO accounts (account_id, display_name, created_at_ms) VALUES ('shared', 'Shared', 0)",
+        )
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        let seen: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM accounts WHERE account_id = 'shared'")
+                .fetch_one(&mut *reader)
+                .await
+                .unwrap();
+        assert_eq!(seen, 1, "{spelling}");
+    }
 }
