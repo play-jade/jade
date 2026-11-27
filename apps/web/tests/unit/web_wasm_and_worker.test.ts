@@ -24,6 +24,7 @@ import {
 } from '../../app/composables/useReplaySession'
 import { ref, type Ref } from 'vue'
 import { useNotatedMoves } from '../../app/composables/useNotatedMoves'
+import { matchServerBase, useBrowserSession } from '../../app/composables/useBrowserSession'
 import pikafishFixtures from '../../../../data/fixtures/rules/pikafish_examples.json'
 
 describe('core_wasm isomorphic browser/SSR rules & geometry contract', () => {
@@ -520,6 +521,66 @@ describe('archive page helpers', () => {
       previous: null,
       next: 25,
     })
+  })
+})
+
+describe('match server address', () => {
+  function baseFor(configured: string, pageHost: string | null) {
+    vi.stubGlobal('useRuntimeConfig', () => ({ public: { matchServerUrl: configured } }))
+    if (pageHost !== null) vi.stubGlobal('window', { location: { hostname: pageHost } })
+    try {
+      return matchServerBase()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }
+
+  it('reaches a loopback server by the page’s own loopback name, so the session cookie is same-site', () => {
+    expect(baseFor('http://127.0.0.1:4180', 'localhost')).toBe('http://localhost:4180')
+    expect(baseFor('http://localhost:4180', '127.0.0.1')).toBe('http://127.0.0.1:4180')
+    expect(baseFor('http://127.0.0.1:4180', '127.0.0.1')).toBe('http://127.0.0.1:4180')
+    // Only the host changes: a configured base path stays.
+    expect(baseFor('http://127.0.0.1:4180/match', 'localhost')).toBe('http://localhost:4180/match')
+    // A hosted server, or a render without a page, keeps the configured address.
+    expect(baseFor('https://match.example.org', 'jade.example.org')).toBe('https://match.example.org')
+    expect(baseFor('http://127.0.0.1:4180', null)).toBe('http://127.0.0.1:4180')
+  })
+})
+
+describe('browser session', () => {
+  /** Runs `ensure()` against answers to the session check, recording every request it makes. */
+  async function ensureWith(answer: () => Promise<Response>) {
+    const requests: string[] = []
+    vi.stubGlobal('useRuntimeConfig', () => ({ public: { matchServerUrl: 'http://127.0.0.1:4180' } }))
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      requests.push(`${init?.method ?? 'GET'} ${url}`)
+      return answer()
+    })
+    try {
+      const outcome = await useBrowserSession()
+        .ensure()
+        .then(() => 'session', (error: Error) => error.name)
+      return { outcome, requests }
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }
+
+  it('creates a guest only after the server confirms there is no session', async () => {
+    const json = (status: number, body: unknown) => async () =>
+      new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+    for (const answer of [
+      json(200, null),
+      json(200, { account_id: '', csrf_token: 'x' }),
+      json(503, { error: { code: 'unavailable' } }),
+      async () => {
+        throw new TypeError('network down')
+      },
+    ]) {
+      const { outcome, requests } = await ensureWith(answer)
+      expect(outcome).toBe('SessionUnavailableError')
+      expect(requests.filter((r) => r.startsWith('POST'))).toEqual([])
+    }
   })
 })
 

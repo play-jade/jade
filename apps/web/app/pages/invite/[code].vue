@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { applyCoreMove, computeBoardView } from '~/utils/core-wasm'
 import { percussionPlayer } from '~/utils/audio'
 import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
+import { matchServerBase, useBrowserSession, type BrowserSession } from '~/composables/useBrowserSession'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -29,6 +30,15 @@ interface MatchSnapshot {
   outcome: string | null
   reason_code: string | null
   visibility: 'private' | 'unlisted' | 'public'
+  /** This participant's own saved choices; the effective `visibility` needs both players. */
+  viewer_choices?: {
+    side: 'red' | 'black'
+    revision: number
+    visibility: 'private' | 'unlisted' | 'public'
+    allow_internal_training: boolean
+    allow_published_research: boolean
+    allow_dataset_release: boolean
+  }
 }
 
 const route = useRoute()
@@ -79,7 +89,8 @@ let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectingInFlight = false
 let isUnmounted = false
-let guestSession: { account_id: string; access_token: string; csrf_token: string } | null = null
+const browserSession = useBrowserSession()
+let guestSession: BrowserSession | null = null
 
 const shareUrl = computed(() => {
   if (typeof window === 'undefined') return `/invite/${code.value}`
@@ -132,27 +143,262 @@ function formatClock(ms: number | null): string {
   return `${mins}:${String(secs).padStart(2, '0')}`
 }
 
-async function ensureGuestSession() {
-  if (guestSession) return guestSession
-  const raw = sessionStorage.getItem('jade_guest_session')
-  if (raw) {
-    guestSession = JSON.parse(raw)
-    return guestSession!
+/**
+ * A request to the match server as this browser's guest. A mutation carries the CSRF token. When the server refuses
+ * the session, the browser's session is checked again: the request is retried only if a session still exists, so it
+ * never silently becomes another guest's request.
+ */
+async function guestFetch(path: string, init: RequestInit = {}, mutation = false): Promise<Response> {
+  const send = (sess: BrowserSession) =>
+    fetch(`${matchServerBase()}${path}`, {
+      credentials: 'include',
+      ...init,
+      headers: mutation ? browserSession.mutationHeaders(sess) : init.headers,
+    })
+  if (roomStopped.value) throw new Error(ANOTHER_GUEST)
+  const bound = guestSession
+  const session = await browserSession.current()
+  // The room belongs to the guest that opened it; a browser now holding another guest stops rather than act for it.
+  if (bound && session.account_id !== bound.account_id) {
+    stopRoom()
+    throw new Error(ANOTHER_GUEST)
   }
-  const resp = await fetch(`${config.public.matchServerUrl}/api/v1/auth/guest`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ display_name: 'Jade Player', transport: 'web_cookie' }),
-  })
-  if (!resp.ok) throw new Error(`Guest session failed (${resp.status})`)
-  guestSession = await resp.json()
-  sessionStorage.setItem('jade_guest_session', JSON.stringify(guestSession))
-  return guestSession!
+  guestSession = session
+  const resp = await send(session)
+  if (!(await browserSession.refusedBy(resp))) return resp
+  const again = await browserSession.recover({ fresh: true })
+  if (!again) throw new Error('Your guest session has ended; reload to continue as a new guest')
+  if (again.account_id !== session.account_id) {
+    stopRoom()
+    throw new Error(ANOTHER_GUEST)
+  }
+  guestSession = again
+  return send(again)
 }
 
-function connectMatchWebSocket(matchId: string, token: string) {
-  if (isUnmounted) return
+const ANOTHER_GUEST = 'This browser is now signed in as another guest; reload the room to continue as that guest'
+
+/** The server's own explanation of a refusal, or a plain fallback with the status. */
+async function refusalMessage(resp: Response, fallback: string): Promise<string> {
+  const body = (await resp.json().catch(() => null)) as { error?: { message?: unknown } } | null
+  return typeof body?.error?.message === 'string' ? body.error.message : `${fallback} (${resp.status})`
+}
+
+type ChoiceField = 'visibility' | 'allow_internal_training' | 'allow_published_research' | 'allow_dataset_release'
+
+const VISIBILITIES = ['private', 'unlisted', 'public']
+const CHOICE_LABELS: Record<ChoiceField, string> = {
+  visibility: 'Your visibility choice',
+  allow_internal_training: 'Internal model training',
+  allow_published_research: 'Published research analysis',
+  allow_dataset_release: 'Open dataset release',
+}
+type Choices = NonNullable<MatchSnapshot['viewer_choices']>
+
+/** True while one choice is being saved; every control waits until it settles, so no save queues behind another. */
+const savingChoice = ref(false)
+/** True while the saved choices are being read back after a save; the controls stay locked until they are shown. */
+const reconciling = ref(false)
+/** The privacy controls accept a change only when they show confirmed, current choices. */
+const choicesLocked = computed(
+  () => savingChoice.value || reconciling.value || choicesUnconfirmed.value || roomStopped.value,
+)
+/** The revision of the choices the controls show: a save is made against exactly what the player saw. */
+let shownRevision = -1
+/**
+ * True until the controls show a validated personal snapshot, and again whenever the saved choices could not be read
+ * back; the controls stay locked meanwhile, so no change is made against choices that are not confirmed.
+ */
+const choicesUnconfirmed = ref(true)
+/** Set when a snapshot belongs to another guest; the room then acts no further until it is reloaded. */
+const roomStopped = ref(false)
+
+/** Stops the room: no further requests, and the original guest's live stream closes, so nothing more of the match
+ * reaches this browser under the guest it no longer holds. */
+function stopRoom() {
+  roomStopped.value = true
+  errorBanner.value = ANOTHER_GUEST
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (ws) {
+    const socket = ws
+    ws = null
+    socket.onclose = null
+    socket.onmessage = null
+    socket.close()
+  }
+}
+
+function wellFormedChoices(value: unknown): value is Choices {
+  if (typeof value !== 'object' || value === null) return false
+  const c = value as Record<string, unknown>
+  return (
+    (c.side === 'red' || c.side === 'black') &&
+    Number.isSafeInteger(c.revision) &&
+    (c.revision as number) >= 0 &&
+    VISIBILITIES.includes(c.visibility as string) &&
+    typeof c.allow_internal_training === 'boolean' &&
+    typeof c.allow_published_research === 'boolean' &&
+    typeof c.allow_dataset_release === 'boolean'
+  )
+}
+
+/**
+ * Shows this participant's own saved choices, separately from the match's effective visibility, and reports whether
+ * it did. A snapshot naming another seat, or none, belongs to another guest: the room stops. One older than the
+ * choices shown, or one arriving while a save is in flight, changes nothing; the controls and their revision only
+ * ever move together.
+ */
+function hydrateChoices(snap: MatchSnapshot): boolean {
+  if (!assignedSide.value) return false
+  const latest = snap.viewer_choices
+  if (latest?.side !== assignedSide.value) {
+    stopRoom()
+    return false
+  }
+  if (!wellFormedChoices(latest)) {
+    choicesUnconfirmed.value = true
+    return false
+  }
+  if (savingChoice.value || latest.revision < shownRevision) return false
+  if (!VISIBILITIES.includes(snap.visibility)) {
+    choicesUnconfirmed.value = true
+    return false
+  }
+  shownRevision = latest.revision
+  desiredVisibility.value = latest.visibility
+  consentTraining.value = latest.allow_internal_training
+  consentResearch.value = latest.allow_published_research
+  consentDataset.value = latest.allow_dataset_release
+  choicesUnconfirmed.value = false
+  return true
+}
+
+/** Reads the saved choices back; true once a current personal snapshot has been shown. */
+async function refreshChoices(): Promise<boolean> {
+  const matchId = snapshot.value?.match_id
+  if (!matchId) return false
+  try {
+    const resp = await guestFetch(`/api/v1/matches/${matchId}`)
+    const snap = resp.ok ? ((await resp.json().catch(() => null)) as MatchSnapshot | null) : null
+    if (roomStopped.value) return false
+    // A current read of this seat with an unknown effective visibility shows it as not confirmed; an older read, or
+    // another seat's, never changes the summary.
+    if (
+      snap &&
+      snapshot.value &&
+      !VISIBILITIES.includes(snap.visibility) &&
+      wellFormedChoices(snap.viewer_choices) &&
+      snap.viewer_choices.side === assignedSide.value &&
+      snap.viewer_choices.revision >= shownRevision
+    ) {
+      snapshot.value = { ...snapshot.value, visibility: snap.visibility }
+    }
+    // Only a snapshot actually shown counts as confirmed; one ignored as older or malformed does not.
+    const shown = snap ? hydrateChoices(snap) : false
+    if (roomStopped.value) return false
+    if (snap && shown) {
+      if (snapshot.value) snapshot.value = { ...snapshot.value, visibility: snap.visibility }
+      return true
+    }
+    // A read superseded by a newer snapshot already shown leaves that newer confirmation in place.
+    if (
+      snap &&
+      wellFormedChoices(snap.viewer_choices) &&
+      snap.viewer_choices.revision < shownRevision &&
+      !choicesUnconfirmed.value
+    ) {
+      return true
+    }
+  } catch {
+    // Reported below as an unconfirmed read.
+  }
+  if (!roomStopped.value) choicesUnconfirmed.value = true
+  return false
+}
+
+async function recheckChoices() {
+  privacyStatusMsg.value = (await refreshChoices())
+    ? 'Your saved choices are shown.'
+    : 'Your saved choices could not be read back; the controls may not show what is saved.'
+}
+
+/**
+ * Saves one choice as soon as the player changes it, naming only that choice and the revision of the choices shown.
+ * The change is the explicit action, so a withdrawal is always sent; the server refuses a save made against an older
+ * revision, so it can never overwrite a choice saved meanwhile from another tab.
+ */
+async function saveChoice(field: ChoiceField, value: string | boolean) {
+  const matchId = snapshot.value?.match_id
+  if (!matchId || savingChoice.value || roomStopped.value) return
+  savingChoice.value = true
+  // The edit makes the shown choices unconfirmed until a validated snapshot shows what was saved.
+  choicesUnconfirmed.value = true
+  const madeAgainst = shownRevision
+  let outcome: string
+  try {
+    const resp = await guestFetch(
+      `/api/v1/matches/${matchId}/privacy`,
+      { method: 'POST', body: JSON.stringify({ [field]: value, expected_revision: madeAgainst }) },
+      true,
+    )
+    const ack = (await resp.json().catch(() => null)) as
+      | { effective_visibility?: unknown; choices_revision?: unknown }
+      | null
+    if (resp.status === 409) {
+      outcome = `${CHOICE_LABELS[field]} was not saved: your choices changed in another tab. Showing what is saved now.`
+    } else if (!resp.ok) {
+      outcome = `${CHOICE_LABELS[field]} was not saved (${resp.status}). Showing what is saved now.`
+    } else if (
+      typeof ack?.effective_visibility === 'string' &&
+      VISIBILITIES.includes(ack.effective_visibility) &&
+      ack.choices_revision === madeAgainst + 1
+    ) {
+      // A save advances the revision by exactly one; any other acknowledgment is not adopted.
+      shownRevision = madeAgainst + 1
+      if (snapshot.value) {
+        snapshot.value = { ...snapshot.value, visibility: ack.effective_visibility as MatchSnapshot['visibility'] }
+      }
+      // The effective visibility is shown in one place, the summary above, which the read-back keeps current.
+      outcome = `${CHOICE_LABELS[field]} saved. Sharing takes effect only when both players choose it.`
+    } else {
+      outcome = `${CHOICE_LABELS[field]} may not have been saved. Showing what is saved now.`
+    }
+  } catch (err) {
+    outcome = `${CHOICE_LABELS[field]} may not have been saved: ${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    // The controls stay locked through the read-back below, until the saved choices are shown.
+    reconciling.value = true
+    savingChoice.value = false
+  }
+  privacyStatusMsg.value = outcome
+  try {
+    if (!(await refreshChoices()) && !roomStopped.value) {
+      privacyStatusMsg.value = `${outcome} Your saved choices could not be read back; check again before changing them.`
+    }
+  } finally {
+    reconciling.value = false
+  }
+}
+
+/** Leaving with a choice still being saved could lose it (a withdrawal included), so the browser asks first. */
+function warnWhileSaving(event: BeforeUnloadEvent) {
+  if (savingChoice.value || reconciling.value) event.preventDefault()
+}
+
+/** Leaving the room, or moving to another invitation within it, asks first while a choice is being saved. */
+const confirmLeavingWhileSaving = () =>
+  savingChoice.value || reconciling.value
+    ? window.confirm('A privacy choice is still being saved. Leave anyway?')
+    : true
+onBeforeRouteLeave(confirmLeavingWhileSaving)
+// Within the room, only a change of invitation leaves it; a query or hash change keeps the room and its save.
+onBeforeRouteUpdate((to, from) => (to.params.code === from.params.code ? true : confirmLeavingWhileSaving()))
+
+function connectMatchWebSocket(matchId: string) {
+  if (isUnmounted || roomStopped.value) return
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
@@ -163,7 +409,7 @@ function connectMatchWebSocket(matchId: string, token: string) {
     prev.onclose = null
     prev.close()
   }
-  const httpBase = config.public.matchServerUrl
+  const httpBase = matchServerBase()
   const wsBase = httpBase.replace(/^http/, 'ws')
   // Browser WebSocket uses HttpOnly cookie set on /api/v1/auth/guest; if cross-port in local dev, fallback poll/reconnect stays synced
   const socket = new WebSocket(`${wsBase}/api/v1/matches/${matchId}/ws`)
@@ -179,11 +425,13 @@ function connectMatchWebSocket(matchId: string, token: string) {
   }
 
   socket.onmessage = (ev) => {
+    if (roomStopped.value) return
     try {
       const data = JSON.parse(String(ev.data))
       if (data.match_id) {
         const prevLen = snapshot.value?.moves_uci.length ?? 0
         snapshot.value = data as MatchSnapshot
+        hydrateChoices(snapshot.value)
         syncClocksFromSnapshot(snapshot.value)
         if (snapshot.value.moves_uci.length > prevLen) {
           void percussionPlayer.play(material.value, 'place', soundEnabled.value, false)
@@ -205,28 +453,25 @@ function connectMatchWebSocket(matchId: string, token: string) {
       if (!reconnectTimer) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
-          void recoverGapAndReconnect(matchId, token)
+          void recoverGapAndReconnect(matchId)
         }, 500)
       }
     }
   }
 }
 
-async function recoverGapAndReconnect(matchId: string, token: string) {
-  if (isUnmounted || reconnectingInFlight) return
+async function recoverGapAndReconnect(matchId: string) {
+  if (isUnmounted || reconnectingInFlight || roomStopped.value) return
   reconnectingInFlight = true
   try {
     const since = snapshot.value?.seq ?? 0
-    const resp = await fetch(
-      `${config.public.matchServerUrl}/api/v1/matches/${matchId}?since_seq=${since}`,
-      {
-        credentials: 'include',
-        headers: { authorization: `Bearer ${token}` },
-      },
-    )
+    const resp = await guestFetch(`/api/v1/matches/${matchId}?since_seq=${since}`)
     if (resp.ok) {
       const snap = (await resp.json()) as MatchSnapshot
+      // A read answered after the room stopped belongs to the guest it no longer holds; it is dropped.
+      if (roomStopped.value) return
       snapshot.value = snap
+      hydrateChoices(snap)
       syncClocksFromSnapshot(snap)
       if (snap.status === 'finished') {
         connectionState.value = 'connected'
@@ -239,7 +484,7 @@ async function recoverGapAndReconnect(matchId: string, token: string) {
       snapshot.value?.status !== 'finished' &&
       (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING))
     ) {
-      connectMatchWebSocket(matchId, token)
+      connectMatchWebSocket(matchId)
     }
   } catch {
     // Keep reconnecting indicator and fallback polling active until WebSocket reconnects
@@ -251,31 +496,23 @@ async function recoverGapAndReconnect(matchId: string, token: string) {
 async function joinAndSubscribe() {
   errorBanner.value = null
   try {
-    const sess = await ensureGuestSession()
-    const joinResp = await fetch(
-      `${config.public.matchServerUrl}/api/v1/invitations/${code.value}/join`,
-      {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          authorization: `Bearer ${sess.access_token}`,
-          'x-csrf-token': sess.csrf_token,
-        },
-      },
-    )
+    // Opening the room checks the browser's session afresh, recovering its guest or creating one only if none exists.
+    guestSession = await browserSession.ensure('Jade Player')
+    const joinResp = await guestFetch(`/api/v1/invitations/${code.value}/join`, { method: 'POST' }, true)
     if (!joinResp.ok) {
       throw new Error(`Invitation not found or unavailable (${joinResp.status})`)
     }
     const joined = await joinResp.json()
     assignedSide.value = joined.assigned_side
     snapshot.value = joined.snapshot as MatchSnapshot
+    hydrateChoices(snapshot.value)
     if (assignedSide.value === 'black') {
       redBelow.value = false
     }
     syncClocksFromSnapshot(snapshot.value)
     connectionState.value = snapshot.value.status === 'finished' ? 'connected' : 'connecting'
     if (snapshot.value.status !== 'finished') {
-      connectMatchWebSocket(snapshot.value.match_id, sess.access_token)
+      connectMatchWebSocket(snapshot.value.match_id)
     }
   } catch (err) {
     connectionState.value = 'error'
@@ -286,26 +523,24 @@ async function joinAndSubscribe() {
 async function sendMatchCommand(payload: Record<string, unknown>) {
   if (!snapshot.value) return
   errorBanner.value = null
-  const sess = await ensureGuestSession()
-  const resp = await fetch(
-    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/commands`,
-    {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${sess.access_token}`,
-        'x-csrf-token': sess.csrf_token,
-      },
-      body: JSON.stringify(payload),
-    },
-  )
+  let resp: Response
+  try {
+    resp = await guestFetch(
+      `/api/v1/matches/${snapshot.value.match_id}/commands`,
+      { method: 'POST', body: JSON.stringify(payload) },
+      true,
+    )
+  } catch (err) {
+    errorBanner.value = err instanceof Error ? err.message : String(err)
+    return
+  }
   const data = await resp.json()
   if (!resp.ok) {
     errorBanner.value = data?.error?.message || `Command rejected (${resp.status})`
     return
   }
   snapshot.value = data as MatchSnapshot
+  hydrateChoices(snapshot.value)
   syncClocksFromSnapshot(snapshot.value)
   await refreshBoard()
 }
@@ -413,17 +648,15 @@ async function acceptTakeback() {
 
 async function exportMatchPgn() {
   if (!snapshot.value || typeof window === 'undefined') return
-  const sess = await ensureGuestSession()
-  const resp = await fetch(
-    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/export.pgn`,
-    {
-      credentials: 'include',
-      headers: {
-        authorization: `Bearer ${sess.access_token}`,
-      },
-    },
-  )
-  if (!resp.ok) return
+  const resp = await guestFetch(`/api/v1/matches/${snapshot.value.match_id}/export.pgn`).catch((err: unknown) => {
+    errorBanner.value = err instanceof Error ? err.message : String(err)
+    return null
+  })
+  if (!resp) return
+  if (!resp.ok) {
+    errorBanner.value = await refusalMessage(resp, 'The game could not be exported')
+    return
+  }
   const pgnText = await resp.text()
   const blob = new Blob([pgnText], { type: 'application/x-chess-pgn;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -442,48 +675,19 @@ async function startRematch() {
     await router.push(`/invite/${snapshot.value.next_rematch_invitation_code}`)
     return
   }
-  const sess = await ensureGuestSession()
-  const resp = await fetch(
-    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/rematch`,
-    {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        authorization: `Bearer ${sess.access_token}`,
-        'x-csrf-token': sess.csrf_token,
-      },
+  const resp = await guestFetch(`/api/v1/matches/${snapshot.value.match_id}/rematch`, { method: 'POST' }, true).catch(
+    (err: unknown) => {
+      errorBanner.value = err instanceof Error ? err.message : String(err)
+      return null
     },
   )
-  if (resp.ok) {
+  if (resp && !resp.ok) {
+    errorBanner.value = await refusalMessage(resp, 'A rematch could not be started')
+    return
+  }
+  if (resp?.ok) {
     const created = await resp.json()
     await router.push(`/invite/${created.invitation_code}`)
-  }
-}
-
-async function savePrivacyPreferences() {
-  if (!snapshot.value) return
-  const sess = await ensureGuestSession()
-  const resp = await fetch(
-    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/privacy`,
-    {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${sess.access_token}`,
-        'x-csrf-token': sess.csrf_token,
-      },
-      body: JSON.stringify({
-        visibility: desiredVisibility.value,
-        allow_internal_training: consentTraining.value,
-        allow_published_research: consentResearch.value,
-        allow_dataset_release: consentDataset.value,
-      }),
-    },
-  )
-  if (resp.ok) {
-    const res = await resp.json()
-    privacyStatusMsg.value = `Effective visibility: ${res.effective_visibility} (requires both players for public/unlisted)`
   }
 }
 
@@ -500,6 +704,7 @@ async function copyShareLink() {
 }
 
 onMounted(() => {
+  window.addEventListener('beforeunload', warnWhileSaving)
   // A server render that could not compute the board leaves no data to hydrate, so the client computes it.
   if (!boardData.value) void refreshBoard()
   void joinAndSubscribe()
@@ -512,7 +717,7 @@ onMounted(() => {
       (snapshot.value.status === 'waiting' || connectionState.value !== 'connected')
     ) {
       if (guestSession) {
-        void recoverGapAndReconnect(snapshot.value.match_id, guestSession.access_token)
+        void recoverGapAndReconnect(snapshot.value.match_id)
       }
     }
     if (snapshot.value?.status === 'playing') {
@@ -534,6 +739,7 @@ watch(code, () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', warnWhileSaving)
   isUnmounted = true
   if (clockTimer) clearInterval(clockTimer)
   if (reconnectTimer) clearTimeout(reconnectTimer)
@@ -648,7 +854,13 @@ function showPly(ply: number | null) {
         </template>
 
         <template v-if="snapshot?.status === 'finished' || snapshot?.status === 'interrupted'">
-          <button type="button" class="jade-btn jade-btn-primary" data-testid="btn-rematch" @click="startRematch">
+          <button
+            type="button"
+            class="jade-btn jade-btn-primary"
+            data-testid="btn-rematch"
+            :disabled="savingChoice || reconciling"
+            @click="startRematch"
+          >
             {{ snapshot.next_rematch_invitation_code ? 'Join rematch' : t('action.rematch') }}
           </button>
           <button type="button" class="jade-btn" data-testid="btn-export-pgn" @click="exportMatchPgn">
@@ -712,25 +924,73 @@ function showPly(ply: number | null) {
 
       <!-- Dual-participant privacy and consent (handoff sections 3 and 16), folded so play stays the focus. -->
       <details v-if="assignedSide" class="privacy jade-rule" data-testid="privacy-consent-card">
-        <summary>Privacy · {{ desiredVisibility === 'private' ? 'Private' : desiredVisibility === 'unlisted' ? 'Unlisted' : 'Public' }}</summary>
+        <!-- The match's effective visibility, which needs both players; this player's own choice is the control below. -->
+        <summary data-testid="privacy-effective">
+          Privacy ·
+          {{
+            snapshot?.visibility === 'public'
+              ? 'Public'
+              : snapshot?.visibility === 'unlisted'
+                ? 'Unlisted'
+                : snapshot?.visibility === 'private'
+                  ? 'Private'
+                  : 'Not confirmed'
+          }}
+        </summary>
         <p class="privacy-note">
           Matches are private by default. Sharing and any training or research use take effect only when both players agree.
         </p>
         <label class="priv-row">
           <span>Your visibility choice</span>
-          <select v-model="desiredVisibility" class="jade-select" data-testid="privacy-visibility">
+          <select
+            v-model="desiredVisibility"
+            class="jade-select"
+            data-testid="privacy-visibility"
+            :disabled="choicesLocked"
+            @change="saveChoice('visibility', desiredVisibility)"
+          >
             <option value="private">Private (default)</option>
             <option value="unlisted">Unlisted link</option>
             <option value="public">Public archive</option>
           </select>
         </label>
-        <label class="priv-check"><input v-model="consentTraining" type="checkbox" /> <span>Allow internal model training</span></label>
-        <label class="priv-check"><input v-model="consentResearch" type="checkbox" /> <span>Allow published research analysis</span></label>
-        <label class="priv-check"><input v-model="consentDataset" type="checkbox" /> <span>Allow open dataset release</span></label>
-        <button type="button" class="jade-btn" data-testid="save-privacy-btn" @click="savePrivacyPreferences">
-          Save privacy preferences
-        </button>
-        <p v-if="privacyStatusMsg" class="privacy-note" data-testid="privacy-status">{{ privacyStatusMsg }}</p>
+        <!-- Each choice saves as soon as it changes. -->
+        <label class="priv-check">
+          <input
+            v-model="consentTraining"
+            type="checkbox"
+            :disabled="choicesLocked"
+            @change="saveChoice('allow_internal_training', consentTraining)"
+          />
+          <span>Allow internal model training</span>
+        </label>
+        <label class="priv-check">
+          <input
+            v-model="consentResearch"
+            type="checkbox"
+            :disabled="choicesLocked"
+            @change="saveChoice('allow_published_research', consentResearch)"
+          />
+          <span>Allow published research analysis</span>
+        </label>
+        <label class="priv-check">
+          <input
+            v-model="consentDataset"
+            type="checkbox"
+            :disabled="choicesLocked"
+            @change="saveChoice('allow_dataset_release', consentDataset)"
+          />
+          <span>Allow open dataset release</span>
+        </label>
+        <p v-if="privacyStatusMsg" class="privacy-note" data-testid="privacy-status">
+          {{ privacyStatusMsg }}
+        </p>
+        <p v-if="choicesUnconfirmed && !roomStopped && !savingChoice && !reconciling" class="privacy-note" data-testid="privacy-unconfirmed">
+          Your saved choices are not confirmed yet, so they cannot be changed.
+          <button type="button" class="jade-pill-btn" data-testid="privacy-recheck" @click="recheckChoices">
+            Check again
+          </button>
+        </p>
       </details>
     </aside>
   </div>

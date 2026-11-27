@@ -471,6 +471,80 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     await expect(page.getByTestId('player-list').locator('li')).toHaveCount(1)
   })
 
+  test('10. Guest return: a new tab, a reopened browser, and saved choices keep the participant', async ({ browser }) => {
+    const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const contexts = [redContext, blkContext]
+    try {
+      const redPage = await redContext.newPage()
+      const blkPage = await blkContext.newPage()
+      await redPage.goto('/')
+      await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await redPage.getByTestId('create-invite-btn').click()
+      await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      const room = new URL(redPage.url()).pathname
+      await blkPage.goto(room)
+      await expect(blkPage.getByTestId('match-status-badge')).toContainText('You play black')
+      await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
+
+      // A second tab of the same browser is the same guest, in the same seat.
+      const tab = await redContext.newPage()
+      await tab.goto(room)
+      await expect(tab.getByTestId('match-status-badge')).toContainText('You play red')
+
+      // The participant's saved choices come back after a reload; the match stays private until both choose.
+      // Each choice saves as soon as it changes; the test waits for each save's own request.
+      const saved = (page: typeof tab) =>
+        page.waitForResponse((r) => r.url().endsWith('/privacy') && r.request().method() === 'POST')
+      await tab.getByTestId('privacy-consent-card').locator('summary').click()
+      let save = saved(tab)
+      await tab.getByTestId('privacy-visibility').selectOption('public')
+      expect((await save).status()).toBe(200)
+      save = saved(tab)
+      await tab.getByLabel('Allow internal model training').check()
+      expect((await save).status()).toBe(200)
+      await expect(tab.getByTestId('privacy-effective')).toContainText('Private')
+      await tab.reload()
+      await expect(tab.getByTestId('match-status-badge')).toContainText('You play red')
+      await tab.getByTestId('privacy-consent-card').locator('summary').click()
+      await expect(tab.getByTestId('privacy-visibility')).toHaveValue('public')
+      await expect(tab.getByLabel('Allow internal model training')).toBeChecked()
+      await expect(tab.getByLabel('Allow open dataset release')).not.toBeChecked()
+
+      // A withdrawal is saved by itself too, and stays withdrawn after a reload.
+      save = saved(tab)
+      await tab.getByLabel('Allow internal model training').uncheck()
+      expect((await save).status()).toBe(200)
+      await tab.reload()
+      await tab.getByTestId('privacy-consent-card').locator('summary').click()
+      await expect(tab.getByLabel('Allow internal model training')).not.toBeChecked()
+      await expect(tab.getByTestId('privacy-visibility')).toHaveValue('public')
+
+      // Closing the browser and opening it again keeps the guest while its session lasts.
+      const kept = await redContext.storageState()
+      await redContext.close()
+      const reopened = await browser.newContext({ storageState: kept, viewport: { width: 1200, height: 840 } })
+      contexts.push(reopened)
+      const back = await reopened.newPage()
+      await back.goto(room)
+      await expect(back.getByTestId('match-status-badge')).toContainText('You play red')
+
+      // A browser without that session is another guest, which takes no seat in this private match.
+      const other = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+      contexts.push(other)
+      const stranger = await other.newPage()
+      const joinAnswered = stranger.waitForResponse((r) => r.url().includes('/join'))
+      await stranger.goto(room)
+      // Both seats are taken and the match is private, so the room is refused to this browser.
+      const join = await joinAnswered
+      expect(join.status()).toBe(403)
+      expect((await join.json()).error.code).toBe('private_match')
+      await expect(stranger.getByTestId('match-status-badge')).not.toContainText('You play')
+    } finally {
+      for (const context of contexts) await context.close().catch(() => undefined)
+    }
+  })
+
   test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({
     page,
   }) => {

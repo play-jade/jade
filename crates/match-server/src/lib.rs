@@ -104,6 +104,31 @@ pub struct CoordMovePayload {
     pub to: [u8; 2],
 }
 
+/// How long a browser guest session lasts; the cookie's `Max-Age` matches it, so a closed browser returns within it.
+pub const SESSION_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+
+/// A browser's current guest session, recovered from its cookie without creating a new guest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentSessionResponse {
+    pub account_id: String,
+    pub display_name: String,
+    pub csrf_token: String,
+    pub expires_at_ms: i64,
+}
+
+/// A seated participant's own saved visibility and consent choices, as they last saved them, with the seat they hold,
+/// so a client can confirm the snapshot is for the participant it shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantChoices {
+    pub side: Side,
+    /// Advances on every save of these choices, so a client can tell an older read from a newer one.
+    pub revision: i64,
+    pub visibility: Visibility,
+    pub allow_internal_training: bool,
+    pub allow_published_research: bool,
+    pub allow_dataset_release: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuestSessionResponse {
     pub account_id: String,
@@ -176,14 +201,85 @@ pub struct MatchSnapshotResponse {
     pub reason_code: Option<String>,
     pub visibility: Visibility,
     pub missing_events: Vec<CommittedEventRecord>,
+    /// The viewer's own saved choices when the viewer holds a seat; the effective `visibility` needs both players.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_choices: Option<ParticipantChoices>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A participant's change to their own choices. Each field left out keeps its saved value, so a save changes only
+/// what the participant changed, and a concurrent save from another tab cannot restore a revoked consent. A field
+/// that is named must carry a value (an explicit `null` is refused), unknown fields are refused, and a request must
+/// name at least one choice, so a misspelled withdrawal is never acknowledged as one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrivacyUpdateRequest {
-    pub visibility: Visibility,
-    pub allow_internal_training: bool,
-    pub allow_published_research: bool,
-    pub allow_dataset_release: bool,
+    #[serde(
+        default,
+        deserialize_with = "named_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub visibility: Option<Visibility>,
+    #[serde(
+        default,
+        deserialize_with = "named_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_internal_training: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "named_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_published_research: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "named_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_dataset_release: Option<bool>,
+    /// The choices revision the save was made against; required, and the save applies only if it is still current,
+    /// so a delayed older save is refused instead of overwriting a newer one.
+    #[serde(
+        default,
+        deserialize_with = "named_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expected_revision: Option<i64>,
+}
+
+/// Adds the per-seat choice revisions to a database created before they existed; new databases have them already.
+async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    let columns: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('matches')")
+        .fetch_all(db)
+        .await?
+        .iter()
+        .map(|row| row.get("name"))
+        .collect();
+    for column in ["red_choices_revision", "black_choices_revision"] {
+        if !columns.iter().any(|c| c == column) {
+            sqlx::query(&format!(
+                "ALTER TABLE matches ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+            ))
+            .execute(db)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// A field that is present must hold a value; serde calls this only for named fields, so omission stays `None`.
+fn named_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The `Max-Age` for a session with `remaining_ms` left: rounded up, so a live session is never deleted early.
+pub fn cookie_max_age_s(remaining_ms: i64) -> i64 {
+    let remaining = remaining_ms.max(0);
+    remaining / 1000 + i64::from(remaining % 1000 != 0)
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +381,7 @@ pub async fn build_app_state(sqlite_url: &str) -> Result<AppState, sqlx::Error> 
         .connect(sqlite_url)
         .await?;
     sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&db).await?;
+    add_missing_choice_revisions(&db).await?;
     mark_interrupted_timed_matches_on_startup(&db).await?;
 
     Ok(AppState {
@@ -331,6 +428,7 @@ pub fn build_router(state: AppState) -> Router {
             get(well_known_android_asset_links),
         )
         .route("/api/v1/auth/guest", post(create_guest_session))
+        .route("/api/v1/auth/session", get(current_session))
         .route("/api/v1/invitations", post(create_invitation))
         .route("/api/v1/invitations/{code}", get(inspect_invitation))
         .route("/api/v1/invitations/{code}/join", post(join_invitation))
@@ -506,7 +604,7 @@ async fn create_guest_session(
     .bind(&transport)
     .bind(&csrf_token)
     .bind(sha256_hex(&refresh_token))
-    .bind(ts + 7 * 24 * 3600 * 1000)
+    .bind(ts + SESSION_TTL_MS)
     .bind(ts)
     .execute(&state.db)
     .await
@@ -516,9 +614,11 @@ async fn create_guest_session(
         message: e.to_string(),
     })?;
 
-    let cookie_val = format!("jade_session={raw_token}; HttpOnly; Secure; SameSite=Lax; Path=/");
     let mut headers = HeaderMap::new();
-    headers.insert(axum::http::header::SET_COOKIE, cookie_val.parse().unwrap());
+    headers.insert(
+        axum::http::header::SET_COOKIE,
+        session_cookie_header(&raw_token, SESSION_TTL_MS / 1000),
+    );
 
     Ok((
         headers,
@@ -530,6 +630,80 @@ async fn create_guest_session(
             refresh_token,
         }),
     ))
+}
+
+/// The browser's session from its cookie alone, with its CSRF token and expiry, so a returning tab or reopened
+/// browser keeps its guest. A missing, expired, or revoked cookie session is `401` and creates nothing. The cookie
+/// is reissued with the session's remaining lifetime, so a cookie set before it carried one outlives a closed
+/// browser too, without extending the session. The answer is personal and never stored by a cache.
+async fn current_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let unauthenticated = |message: &str| ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        code: "unauthenticated",
+        message: message.to_string(),
+    };
+    let token =
+        session_cookie(&headers).ok_or_else(|| unauthenticated("No browser session cookie"))?;
+    let row = sqlx::query(
+        "SELECT s.account_id, s.csrf_token, s.expires_at_ms, s.revoked_at_ms, a.display_name
+         FROM auth_sessions s JOIN accounts a ON a.account_id = s.account_id WHERE s.session_id_hash = ?",
+    )
+    .bind(sha256_hex(token))
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?
+    .ok_or_else(|| unauthenticated("Session not found"))?;
+    let expires_at_ms: i64 = row.get("expires_at_ms");
+    let remaining_ms = expires_at_ms - now_utc_ms();
+    if row.get::<Option<i64>, _>("revoked_at_ms").is_some() || remaining_ms <= 0 {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "session_expired_or_revoked",
+            message: "Session expired or revoked".to_string(),
+        });
+    }
+    let mut out = HeaderMap::new();
+    // A positive remaining lifetime rounds up, so a session with under a second left is not deleted early.
+    out.insert(
+        axum::http::header::SET_COOKIE,
+        session_cookie_header(token, cookie_max_age_s(remaining_ms)),
+    );
+    out.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Ok((
+        out,
+        Json(CurrentSessionResponse {
+            account_id: row.get("account_id"),
+            display_name: row.get("display_name"),
+            csrf_token: row.get("csrf_token"),
+            expires_at_ms,
+        }),
+    ))
+}
+
+/// The `Set-Cookie` value for a browser session that lasts `max_age_s` more seconds.
+fn session_cookie_header(token: &str, max_age_s: i64) -> HeaderValue {
+    format!("jade_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_s}")
+        .parse()
+        .expect("a session token is a valid cookie value")
+}
+
+/// The raw `jade_session` cookie value, when the request carries one.
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())?
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("jade_session="))
 }
 
 async fn authenticate_request(
@@ -879,7 +1053,7 @@ async fn join_invitation(
     if assigned_side.is_some() {
         let _ = actor.bcast.send(snapshot.clone());
     }
-    let snapshot = redact_snapshot_for_viewer(&state.db, snapshot, Some(&joiner_id)).await;
+    let snapshot = redact_snapshot_for_viewer(&state.db, snapshot, Some(&joiner_id)).await?;
     Ok(Json(JoinInvitationResponse {
         match_id,
         assigned_side,
@@ -897,13 +1071,17 @@ async fn get_match_snapshot(
     headers: HeaderMap,
     Path(match_id): Path<String>,
     Query(q): Query<ReconnectQuery>,
-) -> Result<Json<MatchSnapshotResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let viewer = authenticate_request(&state, &headers, false).await.ok();
     // Enforce private-by-default access check (Section 3 & 9)!
     check_match_read_access(&state.db, &match_id, viewer.as_deref()).await?;
     let snap = load_match_snapshot(&state.db, &match_id, q.since_seq).await?;
-    let snap = redact_snapshot_for_viewer(&state.db, snap, viewer.as_deref()).await;
-    Ok(Json(snap))
+    let snap = redact_snapshot_for_viewer(&state.db, snap, viewer.as_deref()).await?;
+    // A snapshot carries the viewer's own choices, so no cache may keep it for another viewer.
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(snap),
+    ))
 }
 
 async fn is_match_participant(
@@ -931,13 +1109,70 @@ async fn redact_snapshot_for_viewer(
     db: &SqlitePool,
     mut snap: MatchSnapshotResponse,
     viewer_account_id: Option<&str>,
-) -> MatchSnapshotResponse {
+) -> Result<MatchSnapshotResponse, ApiError> {
     if snap.next_rematch_invitation_code.is_some()
         && !is_match_participant(db, &snap.match_id, viewer_account_id).await
     {
         snap.next_rematch_invitation_code = None;
     }
-    snap
+    snap.viewer_choices = match viewer_account_id {
+        Some(viewer) => participant_choices(db, &snap.match_id, viewer).await?,
+        None => None,
+    };
+    Ok(snap)
+}
+
+/// The viewer's own saved choices when the viewer holds a seat in the match, read from that seat's columns only.
+/// A failed read is an error, never mistaken for a viewer without a seat.
+async fn participant_choices(
+    db: &SqlitePool,
+    match_id: &str,
+    viewer: &str,
+) -> Result<Option<ParticipantChoices>, ApiError> {
+    let row = sqlx::query(
+        "SELECT red_account_id, black_account_id,
+                red_visibility_choice, red_consent_training, red_consent_research, red_consent_dataset,
+                black_visibility_choice, black_consent_training, black_consent_research, black_consent_dataset,
+                red_choices_revision, black_choices_revision
+         FROM matches WHERE match_id = ?",
+    )
+    .bind(match_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+    let Some(row) = row else { return Ok(None) };
+    let seat = if row.get::<Option<String>, _>("red_account_id").as_deref() == Some(viewer) {
+        "red"
+    } else if row.get::<Option<String>, _>("black_account_id").as_deref() == Some(viewer) {
+        "black"
+    } else {
+        return Ok(None);
+    };
+    let visibility = match row
+        .get::<String, _>(format!("{seat}_visibility_choice").as_str())
+        .as_str()
+    {
+        "public" => Visibility::Public,
+        "unlisted" => Visibility::Unlisted,
+        _ => Visibility::Private,
+    };
+    let flag = |column: &str| row.get::<i64, _>(format!("{seat}_{column}").as_str()) != 0;
+    Ok(Some(ParticipantChoices {
+        side: if seat == "red" {
+            Side::Red
+        } else {
+            Side::Black
+        },
+        revision: row.get(format!("{seat}_choices_revision").as_str()),
+        visibility,
+        allow_internal_training: flag("consent_training"),
+        allow_published_research: flag("consent_research"),
+        allow_dataset_release: flag("consent_dataset"),
+    }))
 }
 
 async fn check_match_read_access(
@@ -994,7 +1229,7 @@ async fn post_match_command(
     actor
         .tx
         .send(ActorMsg::Command(MailboxEnvelope {
-            actor_account_id,
+            actor_account_id: actor_account_id.clone(),
             command: cmd,
             received_at: Instant::now(),
             received_utc_ms: now_utc_ms(),
@@ -1012,16 +1247,71 @@ async fn post_match_command(
         code: "mailbox_dropped",
         message: "Match dispatcher dropped response".to_string(),
     })??;
-    Ok(Json(res))
+    // The reply is the caller's own view, with their saved choices; the shared broadcast stays impersonal.
+    Ok(Json(
+        redact_snapshot_for_viewer(&state.db, res, Some(&actor_account_id)).await?,
+    ))
 }
 
 async fn update_match_privacy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(match_id): Path<String>,
-    Json(req): Json<PrivacyUpdateRequest>,
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let actor = authenticate_request(&state, &headers, true).await?;
+    // A patch is a JSON object naming its choices: any other shape (an array assigns by position) is refused, and the
+    // typed parse refuses a choice named twice, unknown fields, and explicit nulls.
+    let invalid = |message: String| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "invalid_privacy_update",
+        message,
+    };
+    let is_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        });
+    if !is_json {
+        return Err(ApiError {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            code: "invalid_privacy_update",
+            message: "A privacy update is sent as application/json".to_string(),
+        });
+    }
+    if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(invalid(
+            "A privacy update is a JSON object naming its choices".to_string(),
+        ));
+    }
+    let req: PrivacyUpdateRequest =
+        serde_json::from_slice(&body).map_err(|e| invalid(e.to_string()))?;
+    // Every save names the revision it was made against, so no save, including one from a page loaded before
+    // revisions existed, is applied without ordering.
+    let Some(expected_revision) = req.expected_revision else {
+        return Err(ApiError {
+            status: StatusCode::PRECONDITION_REQUIRED,
+            code: "revision_required",
+            message: "Reload the room: a save must name the choices revision it was made against"
+                .to_string(),
+        });
+    };
+    if req.visibility.is_none()
+        && req.allow_internal_training.is_none()
+        && req.allow_published_research.is_none()
+        && req.allow_dataset_release.is_none()
+    {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "no_choice_named",
+            message: "A privacy update must name at least one choice".to_string(),
+        });
+    }
     let parse_vis = |s: &str| match s {
         "public" => Visibility::Public,
         "unlisted" => Visibility::Unlisted,
@@ -1033,11 +1323,17 @@ async fn update_match_privacy(
         Visibility::Private => "private",
     };
 
-    let mut tx = state.db.begin().await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    // The transaction takes the write lock before it reads the seats, so concurrent saves run one after another and a
+    // stale one is answered 409, never failed by a busy upgrade from reader to writer.
+    let mut tx = state
+        .db
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: e.to_string(),
+        })?;
 
     let seats =
         sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = ?")
@@ -1059,60 +1355,62 @@ async fn update_match_privacy(
     let blk: Option<String> = seats.get("black_account_id");
     let now = now_utc_ms();
 
-    // Update ONLY the caller's columns inside the transaction so concurrent updates never clobber the other player's revocations!
-    if red.as_deref() == Some(actor.as_str()) {
-        sqlx::query(
-            "UPDATE matches SET
-                red_visibility_choice = ?,
-                red_consent_training = ?,
-                red_consent_research = ?,
-                red_consent_dataset = ?,
-                updated_at_ms = ?
-             WHERE match_id = ?",
-        )
-        .bind(fmt_vis(req.visibility))
-        .bind(i64::from(req.allow_internal_training))
-        .bind(i64::from(req.allow_published_research))
-        .bind(i64::from(req.allow_dataset_release))
-        .bind(now)
-        .bind(&match_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+    // Update ONLY the caller's columns, and only the fields the request names, inside the transaction, so neither
+    // the other player's choices nor this player's choices saved meanwhile from another tab are overwritten.
+    let seat = if red.as_deref() == Some(actor.as_str()) {
+        "red"
     } else if blk.as_deref() == Some(actor.as_str()) {
-        sqlx::query(
-            "UPDATE matches SET
-                black_visibility_choice = ?,
-                black_consent_training = ?,
-                black_consent_research = ?,
-                black_consent_dataset = ?,
-                updated_at_ms = ?
-             WHERE match_id = ?",
-        )
-        .bind(fmt_vis(req.visibility))
-        .bind(i64::from(req.allow_internal_training))
-        .bind(i64::from(req.allow_published_research))
-        .bind(i64::from(req.allow_dataset_release))
-        .bind(now)
-        .bind(&match_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+        "black"
     } else {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
             code: "not_a_participant",
             message: "Only match participants can update match privacy or consent".to_string(),
         });
+    };
+    let updated = sqlx::query(&format!(
+        "UPDATE matches SET
+            {seat}_visibility_choice = COALESCE(?, {seat}_visibility_choice),
+            {seat}_consent_training = COALESCE(?, {seat}_consent_training),
+            {seat}_consent_research = COALESCE(?, {seat}_consent_research),
+            {seat}_consent_dataset = COALESCE(?, {seat}_consent_dataset),
+            {seat}_choices_revision = {seat}_choices_revision + 1,
+            updated_at_ms = ?
+         WHERE match_id = ? AND {seat}_choices_revision = ?"
+    ))
+    .bind(req.visibility.map(fmt_vis))
+    .bind(req.allow_internal_training.map(i64::from))
+    .bind(req.allow_published_research.map(i64::from))
+    .bind(req.allow_dataset_release.map(i64::from))
+    .bind(now)
+    .bind(&match_id)
+    .bind(expected_revision)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "stale_choices",
+            message: "These choices changed since they were read; read them again before saving"
+                .to_string(),
+        });
     }
+    let choices_revision: i64 = sqlx::query_scalar(&format!(
+        "SELECT {seat}_choices_revision FROM matches WHERE match_id = ?"
+    ))
+    .bind(&match_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "db_error",
+        message: e.to_string(),
+    })?;
 
     let row = sqlx::query(
         "SELECT red_visibility_choice, black_visibility_choice,
@@ -1169,6 +1467,7 @@ async fn update_match_privacy(
 
     Ok(Json(serde_json::json!({
         "effective_visibility": effective,
+        "choices_revision": choices_revision,
         "eligible_for_internal_training": policy.eligible_for_internal_training(),
         "eligible_for_published_research": policy.eligible_for_published_research(),
         "eligible_for_dataset_release": policy.eligible_for_dataset_release(),
@@ -1197,7 +1496,7 @@ async fn ws_match_stream(
     check_match_read_access(&state.db, &match_id, Some(&account_id)).await?;
     let actor = ensure_match_actor(&state, &match_id).await?;
     let init_snap = load_match_snapshot(&state.db, &match_id, None).await?;
-    let init_snap = redact_snapshot_for_viewer(&state.db, init_snap, Some(&account_id)).await;
+    let init_snap = redact_snapshot_for_viewer(&state.db, init_snap, Some(&account_id)).await?;
 
     let db = state.db.clone();
     Ok(ws.on_upgrade(move |socket| handle_ws_client(socket, db, actor, account_id, init_snap)))
@@ -1228,7 +1527,11 @@ async fn handle_ws_client(
                     let _ = socket.send(Message::Close(None)).await;
                     break;
                 }
-                let snap = redact_snapshot_for_viewer(&db, snap, Some(&account_id)).await;
+                // A snapshot that cannot be projected for this viewer is not sent in another shape.
+                let Ok(snap) = redact_snapshot_for_viewer(&db, snap, Some(&account_id)).await else {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                };
                 if let Ok(json) = serde_json::to_string(&snap)
                     && socket.send(Message::Text(json.into())).await.is_err()
                 {
@@ -2237,6 +2540,7 @@ async fn load_match_snapshot(
         reason_code: m.get("reason_code"),
         visibility: vis,
         missing_events,
+        viewer_choices: None,
     })
 }
 
@@ -2516,4 +2820,18 @@ async fn archive_query_position(
 
 pub fn server_ready() -> bool {
     true
+}
+
+#[cfg(test)]
+mod session_cookie_tests {
+    #[test]
+    fn cookie_lifetime_rounds_a_live_session_up() {
+        assert_eq!(super::cookie_max_age_s(1), 1);
+        assert_eq!(super::cookie_max_age_s(999), 1);
+        assert_eq!(super::cookie_max_age_s(1_000), 1);
+        assert_eq!(super::cookie_max_age_s(1_001), 2);
+        assert_eq!(super::cookie_max_age_s(90_000), 90);
+        assert_eq!(super::cookie_max_age_s(-5), 0);
+        assert_eq!(super::cookie_max_age_s(i64::MAX), i64::MAX / 1000 + 1);
+    }
 }
