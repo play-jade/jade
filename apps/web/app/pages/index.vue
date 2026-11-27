@@ -196,8 +196,7 @@ function handleUndo() {
   if (mainlineMovesUci.value.length > 0) {
     mainlineMovesUci.value = mainlineMovesUci.value.slice(0, -1)
     cursorPly.value = mainlineMovesUci.value.length
-    // A kept variation that leaves the game after the taken-back move no longer has a place to start.
-    if (parked.value && parked.value.originPly > mainlineMovesUci.value.length) session.discardVariation()
+    // The replay session stores a kept variation again against the shorter game, or removes it with a notice.
   }
 }
 
