@@ -1267,7 +1267,11 @@ describe('replay session', () => {
       vi.stubGlobal('indexedDB', memory)
       release()
       await saving
-      await vi.waitFor(() => expect(storedRows(memory).length).toBeGreaterThanOrEqual(1), { interval: 1 })
+      // Guest A's held save reached storage: a successful write, for another key than the failed removal.
+      await vi.waitFor(
+        () => expect(storedRows(memory).some((row) => (row as { ownerScope?: string }).ownerScope === 'guest-a')).toBe(true),
+        { interval: 1 },
+      )
       expect(s.draftNotice.value).toContain('could not be removed')
     } finally {
       vi.unstubAllGlobals()
