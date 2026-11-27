@@ -1295,7 +1295,18 @@ describe('replay session', () => {
       const line = ref([...recorded])
       const s = await parkedSession(memory, line)
       s.selectPly(3)
-      if (resume) s.resumeDraft()
+      if (resume) {
+        const parkedPuts = memory.puts.length
+        s.resumeDraft()
+        // The resumed line reaches storage as the active variation before the record changes.
+        await vi.waitFor(
+          () => {
+            expect(memory.puts.length).toBeGreaterThan(parkedPuts)
+            expect(memory.puts.at(-1)).toMatchObject({ activeMode: 'variation' })
+          },
+          { interval: 1 },
+        )
+      }
       await vi.waitFor(() => expect(s.saveState.value).toEqual({ state: 'saved' }), { interval: 1 })
       const puts = memory.puts.length
       line.value = line.value.slice(0, 2)
