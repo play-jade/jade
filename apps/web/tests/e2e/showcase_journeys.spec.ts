@@ -1006,6 +1006,59 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     }
   })
 
+  test('14. A tab that missed a takeback and its replacement move takes the new turn\'s clocks', async ({ browser }) => {
+    const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const redPage = await redContext.newPage()
+      const blkPage = await blkContext.newPage()
+      await redPage.goto('/')
+      await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await redPage.getByTestId('create-invite-btn').click()
+      await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      const room = new URL(redPage.url()).pathname
+      await blkPage.goto(room)
+      await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
+
+      // A second tab of Red's guest watches the match; its stream can be cut off as a network would.
+      const watcher = await redContext.newPage()
+      const watcherStreams: WebSocketRoute[] = []
+      let cutOff = false
+      await watcher.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        watcherStreams.push(stream)
+        const server = stream.connectToServer()
+        server.onMessage((message) => {
+          if (!cutOff) stream.send(message)
+        })
+      })
+      await watcher.goto(room)
+      await expect(watcher.getByTestId('match-status-badge')).toContainText('You play red')
+      await playBoardSquares(redPage, 'h2', 'e2')
+      await expect(watcher.getByTestId('match-moves-card')).toContainText('C2=5')
+
+      // The watcher misses the takeback, its acceptance, and the same move played again after Red thinks a while.
+      cutOff = true
+      await redPage.getByTestId('btn-request-takeback').click()
+      await blkPage.getByTestId('btn-accept-takeback').click()
+      await expect(redPage.getByTestId('match-moves-card')).not.toContainText('C2=5')
+      await redPage.waitForTimeout(3_000)
+      await playBoardSquares(redPage, 'h2', 'e2')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
+
+      // It reconnects: the snapshot looks like the turn it was timing, but it is a new turn, so the watcher takes its
+      // clocks, Red's credited time included.
+      await watcherStreams[watcherStreams.length - 1]!.close()
+      cutOff = false
+      await expect.poll(() => watcherStreams.length).toBeGreaterThan(1)
+      await expect
+        .poll(async () => (await watcher.getByTestId('clock-red').innerText()).trim())
+        .toBe((await redPage.getByTestId('clock-red').innerText()).trim())
+    } finally {
+      await redContext.close()
+      await blkContext.close()
+    }
+  })
+
   test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({
     page,
   }) => {

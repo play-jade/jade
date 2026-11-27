@@ -37,6 +37,8 @@ interface MatchSnapshot {
   visibility: 'private' | 'unlisted' | 'public'
   /** Advances with every change the server stores for the match; orders snapshots across routes. */
   state_version?: number
+  /** Advances only when a new turn begins; tells the room whether the turn it is timing is still the server's. */
+  turn_generation?: number
   /** This participant's own saved choices; the effective `visibility` needs both players. */
   viewer_choices?: {
     side: 'red' | 'black'
@@ -292,7 +294,8 @@ function isSnapshotOf(data: unknown, matchId: string | undefined): data is Match
     text(d.next_rematch_invitation_code) &&
     text(d.outcome) &&
     text(d.reason_code) &&
-    typeof d.visibility === 'string'
+    typeof d.visibility === 'string' &&
+    (d.turn_generation === undefined || (Number.isSafeInteger(d.turn_generation) && (d.turn_generation as number) >= 0))
   )
 }
 
@@ -356,14 +359,16 @@ function install(snap: MatchSnapshot): boolean {
       return false
     }
   }
-  // The turn continues while the phase, the side to move, and the moves are unchanged (a draw offer or a takeback
-  // request adds an event but not a turn), so its clocks only run down.
+  // Within one turn the clocks only run down. The server names the turn: a takeback and the move replacing it start a
+  // new turn even when the side to move and the moves look as before. A server that does not name turns is read by
+  // phase, side to move, and moves instead.
   const sameTurn =
     current !== null &&
     sameMatch &&
     current.status === snap.status &&
-    current.side_to_move === snap.side_to_move &&
-    current.moves_uci.length === snap.moves_uci.length
+    (current.turn_generation !== undefined && snap.turn_generation !== undefined
+      ? current.turn_generation === snap.turn_generation
+      : current.side_to_move === snap.side_to_move && current.moves_uci.length === snap.moves_uci.length)
   snapshot.value = snap
   shownVersion = versioned ? { matchId: snap.match_id, version: version as number } : null
   refreshConfirmation()

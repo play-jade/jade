@@ -206,6 +206,10 @@ pub struct MatchSnapshotResponse {
     /// snapshot newer than the one it shows, whichever route each came by.
     #[serde(default)]
     pub state_version: i64,
+    /// Advances each time a new turn begins (play starting, a move, an accepted takeback) and at no other change, so a
+    /// client that missed updates still knows whether the turn it is timing is the server's current one.
+    #[serde(default)]
+    pub turn_generation: i64,
     /// The viewer's own saved choices when the viewer holds a seat; the effective `visibility` needs both players.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_choices: Option<ParticipantChoices>,
@@ -265,6 +269,7 @@ async fn add_missing_choice_revisions(db: &SqlitePool) -> Result<(), sqlx::Error
         "red_choices_revision",
         "black_choices_revision",
         "state_version",
+        "turn_generation",
     ] {
         if !columns.iter().any(|c| c == column) {
             sqlx::query(&format!(
@@ -1039,10 +1044,11 @@ async fn join_invitation(
             None
         };
         let res = sqlx::query(
-            "UPDATE matches SET state_version = state_version + 1, red_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND red_account_id IS NULL",
+            "UPDATE matches SET state_version = state_version + 1, red_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND ? IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = ? WHERE match_id = ? AND red_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
+        .bind(turn_utc)
         .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
@@ -1072,10 +1078,11 @@ async fn join_invitation(
             None
         };
         let res = sqlx::query(
-            "UPDATE matches SET state_version = state_version + 1, black_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), updated_at_ms = ? WHERE match_id = ? AND black_account_id IS NULL",
+            "UPDATE matches SET state_version = state_version + 1, black_account_id = ?, status = ?, turn_started_utc_ms = COALESCE(turn_started_utc_ms, ?), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND ? IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = ? WHERE match_id = ? AND black_account_id IS NULL",
         )
         .bind(&joiner_id)
         .bind(next_status)
+        .bind(turn_utc)
         .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
@@ -1886,6 +1893,7 @@ async fn expire_active_clock_if_due(
         Some(winner),
         Some("timeout"),
         now_utc_ms(),
+        false,
     )
     .await?;
     *turn_started_mono = None;
@@ -2135,6 +2143,7 @@ async fn process_single_command(
                     Some(winner),
                     Some("timeout"),
                     received_utc_ms,
+                    false,
                 )
                 .await?;
                 *turn_started_mono = None;
@@ -2211,6 +2220,7 @@ async fn process_single_command(
                 outcome_str.as_deref(),
                 reason_str.as_deref(),
                 received_utc_ms,
+                true,
             )
             .await?;
 
@@ -2245,6 +2255,7 @@ async fn process_single_command(
                 Some(winner),
                 Some("resignation"),
                 received_utc_ms,
+                false,
             )
             .await?;
             *draw_offered_by = None;
@@ -2266,6 +2277,7 @@ async fn process_single_command(
                 None,
                 None,
                 received_utc_ms,
+                false,
             )
             .await?;
             *draw_offered_by = Some(actor_side);
@@ -2294,6 +2306,7 @@ async fn process_single_command(
                 Some("draw"),
                 Some("agreed_draw"),
                 received_utc_ms,
+                false,
             )
             .await?;
             *draw_offered_by = None;
@@ -2330,6 +2343,7 @@ async fn process_single_command(
                 None,
                 None,
                 received_utc_ms,
+                false,
             )
             .await?;
             *takeback_requested_by = Some(actor_side);
@@ -2374,6 +2388,7 @@ async fn process_single_command(
                 None,
                 None,
                 received_utc_ms,
+                true,
             )
             .await?;
             *game = staged_game;
@@ -2422,6 +2437,7 @@ async fn commit_match_event_tx(
     outcome: Option<&str>,
     reason_code: Option<&str>,
     utc_ms: i64,
+    starts_turn: bool,
 ) -> Result<(), ApiError> {
     let mut tx = db.begin().await.map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -2452,7 +2468,8 @@ async fn commit_match_event_tx(
         "UPDATE matches SET state_version = state_version + 1,
             current_seq = ?, current_fen = ?, status = ?,
             red_remaining_ms = ?, black_remaining_ms = ?,
-            turn_started_utc_ms = ?, outcome = ?, reason_code = ?, updated_at_ms = ?
+            turn_started_utc_ms = ?, turn_generation = turn_generation + ?,
+            outcome = ?, reason_code = ?, updated_at_ms = ?
          WHERE match_id = ?",
     )
     .bind(next_seq as i64)
@@ -2461,6 +2478,7 @@ async fn commit_match_event_tx(
     .bind(red_rem)
     .bind(blk_rem)
     .bind(utc_ms)
+    .bind(i64::from(starts_turn))
     .bind(outcome)
     .bind(reason_code)
     .bind(utc_ms)
@@ -2634,6 +2652,7 @@ async fn load_match_snapshot(
         reason_code: m.get("reason_code"),
         visibility: vis,
         state_version: m.get("state_version"),
+        turn_generation: m.get("turn_generation"),
         missing_events,
         viewer_choices: None,
     })

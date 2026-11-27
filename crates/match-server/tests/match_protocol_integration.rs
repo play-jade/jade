@@ -1682,6 +1682,8 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
                 && !line.contains("advance a revision")
                 && !line.contains("state_version")
                 && !line.contains("Advances with every change to the match")
+                && !line.contains("turn_generation")
+                && !line.contains("Advances only when a new turn begins")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -1710,6 +1712,7 @@ async fn an_existing_database_gains_the_choice_revisions_at_startup() {
     assert!(after.iter().any(|c| c == "red_choices_revision"));
     assert!(after.iter().any(|c| c == "black_choices_revision"));
     assert!(after.iter().any(|c| c == "state_version"));
+    assert!(after.iter().any(|c| c == "turn_generation"));
     drop(state);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2114,4 +2117,104 @@ async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
         snap.missing_events.iter().all(|e| e.seq <= 1),
         "so do the missing events"
     );
+}
+
+#[tokio::test]
+async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!("jade-turns-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("game.sqlite3");
+    let _ = std::fs::remove_file(&path);
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let state = build_app_state(&url).await.unwrap();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let generation = |snap: &MatchSnapshotResponse| snap.turn_generation;
+    let view = |app: axum::Router| {
+        let token = red.access_token.clone();
+        let id = match_id.clone();
+        async move { snapshot_for(&app, &token, &id).await }
+    };
+    assert_eq!(
+        generation(&view(app.clone()).await),
+        1,
+        "play starting is the first turn"
+    );
+    let command = |cmd: MatchCommandRequest, token: String| {
+        let app = app.clone();
+        let id = match_id.clone();
+        async move {
+            assert_eq!(
+                post_command(&app, &token, &id, &cmd).await.status(),
+                StatusCode::OK
+            )
+        }
+    };
+    let mv = |command_id: &str, seq: u64| MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: command_id.to_string(),
+        expected_seq: seq,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+
+    // A move starts Black's turn.
+    command(mv("r1", 0), red.access_token.clone()).await;
+    let after_move = view(app.clone()).await;
+    assert_eq!(generation(&after_move), 2);
+
+    // A privacy save and a takeback request change the match but not the turn.
+    save_choices(
+        &app,
+        &red.access_token,
+        &match_id,
+        Visibility::Public,
+        [false; 3],
+    )
+    .await;
+    command(
+        MatchCommandRequest::RequestTakeback {
+            protocol: 1,
+            match_id: match_id.clone(),
+            command_id: "tb1".to_string(),
+            expected_seq: 1,
+        },
+        red.access_token.clone(),
+    )
+    .await;
+    let requested = view(app.clone()).await;
+    assert!(requested.state_version > after_move.state_version);
+    assert_eq!(generation(&requested), 2);
+
+    // The accepted takeback returns the turn to Red, and the same move played again starts Black's turn anew: the
+    // snapshot has the side to move and move count it had before, and a later turn generation.
+    command(
+        MatchCommandRequest::AcceptTakeback {
+            protocol: 1,
+            match_id: match_id.clone(),
+            command_id: "tb1-accept".to_string(),
+            expected_seq: 2,
+        },
+        blk.access_token.clone(),
+    )
+    .await;
+    assert_eq!(generation(&view(app.clone()).await), 3);
+    command(mv("r1-again", 3), red.access_token.clone()).await;
+    let replayed = view(app.clone()).await;
+    assert_eq!(replayed.side_to_move, after_move.side_to_move);
+    assert_eq!(replayed.moves_uci, after_move.moves_uci);
+    assert_eq!(generation(&replayed), 4);
+
+    // The generation is stored with the match, so a restarted server reports the same turn.
+    drop(app);
+    let restarted = build_router(build_app_state(&url).await.unwrap());
+    let after_restart = snapshot_for(&restarted, &red.access_token, &match_id).await;
+    assert_eq!(generation(&after_restart), 4);
+    drop(restarted);
+    let _ = std::fs::remove_dir_all(&dir);
 }
