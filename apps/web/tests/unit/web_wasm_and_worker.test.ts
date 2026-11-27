@@ -1247,6 +1247,60 @@ describe('replay session', () => {
     }
   })
 
+  it('keeps the retained line when a later replacement is undone before its save lands', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const s = session({ persist: true, ownerScope: ref('guest-1') })
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      s.returnToRecordedLine()
+      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+      const release = heldDigest()
+      s.selectPly(0)
+      const first = s.tryMove('b0c2')
+      await vi.waitFor(() => expect(release.isHolding()).toBe(true), { interval: 1 })
+      s.undoVariationMove()
+      const second = s.tryMove('h0g2')
+      release()
+      await first
+      // The first replacement's late save does not retire the line that the Undo kept.
+      expect(s.parked.value?.movesUci).toEqual(['b9c7'])
+      s.undoVariationMove()
+      await second
+      await vi.waitFor(() => expect(storedRows(memory)[0]).toMatchObject({ variationMovesUci: ['b9c7'] }), {
+        interval: 1,
+      })
+      expect(s.parked.value?.movesUci).toEqual(['b9c7'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('stores a cursor restore accepts when a resumed variation outlives a shortened record', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const line = ref([...recorded])
+      const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      s.returnToRecordedLine()
+      s.selectPly(3)
+      s.resumeDraft()
+      await vi.waitFor(() => expect(memory.puts.length).toBeGreaterThanOrEqual(3), { interval: 1 })
+      const puts = memory.puts.length
+      line.value = line.value.slice(0, 2)
+      await vi.waitFor(() => expect(memory.puts.length).toBeGreaterThan(puts), { interval: 1 })
+      const reopened = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: ref([...line.value]) })
+      await reopened.restoreDraft()
+      expect(reopened.draftNotice.value).toBeNull()
+      expect(reopened.variation.value?.movesUci ?? reopened.parked.value?.movesUci).toEqual(['b9c7'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('says so when the saved variation cannot be removed after Undo', async () => {
     const memory = memoryIndexedDb()
     vi.stubGlobal('indexedDB', memory)
@@ -1257,6 +1311,12 @@ describe('replay session', () => {
       vi.stubGlobal('indexedDB', undefined)
       s.undoVariationMove()
       await vi.waitFor(() => expect(s.draftNotice.value).toContain('could not be removed'), { interval: 1 })
+      // Once storage works again, a stored line replaces the old row, so the warning goes.
+      vi.stubGlobal('indexedDB', memory)
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      await vi.waitFor(() => expect(s.saveState.value).toEqual({ state: 'saved' }), { interval: 1 })
+      expect(s.draftNotice.value).toBeNull()
     } finally {
       vi.unstubAllGlobals()
     }

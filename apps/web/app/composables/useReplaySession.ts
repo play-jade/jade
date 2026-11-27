@@ -102,6 +102,10 @@ export function useReplaySession(options: ReplaySessionOptions) {
   const feedback = ref<string | null>(null)
   /** Counts variation edits and navigation separately, so a late restore never overrides newer input. */
   let edits = 0
+  /** Counts replacements of a retained line and Undos of them, so a late save knows whether it is still current. */
+  let replacements = 0
+  /** The notice shown when a stored variation could not be removed; a later successful write makes it obsolete. */
+  let removalWarning: string | null = null
   let navigations = 0
   let writes = 0
   /** A position already handed back for extension; a second move validated against it is refused. */
@@ -183,9 +187,18 @@ export function useReplaySession(options: ReplaySessionOptions) {
     } else {
       // A new variation replaces the retained one, which stays in memory until the replacement is stored.
       const superseded = parked.value
+      const replacement = ++replacements
       variation.value = { originPly: cursor.value, movesUci: [uci] }
-      // An Undo meanwhile removed the replacement and stored the retained line again, so that line then stays.
-      if ((await persist()) && parked.value === superseded && variation.value) parked.value = null
+      // Only this replacement, still active when its save lands, retires the retained line: an Undo meanwhile stored
+      // that line again, and a later replacement retires it only through its own save.
+      if (
+        (await persist()) &&
+        parked.value === superseded &&
+        replacements === replacement &&
+        variation.value
+      ) {
+        parked.value = null
+      }
       return { kind: 'variation', applied }
     }
     await persist()
@@ -202,6 +215,7 @@ export function useReplaySession(options: ReplaySessionOptions) {
     } else {
       cursor.value = variation.value.originPly
       variation.value = null
+      replacements++
       // The stored copy follows: a retained line is stored in its place, and with none the saved variation is removed,
       // so a reload cannot bring the undone move back.
       if (parked.value) void persist()
@@ -240,6 +254,11 @@ export function useReplaySession(options: ReplaySessionOptions) {
     forgetStoredDraft()
   }
 
+  function clearRemovalWarning() {
+    if (removalWarning !== null && draftNotice.value === removalWarning) draftNotice.value = null
+    removalWarning = null
+  }
+
   /** Removes this source's stored variation after any earlier write for it. */
   function forgetStoredDraft() {
     const source = options.source.value
@@ -252,8 +271,10 @@ export function useReplaySession(options: ReplaySessionOptions) {
       if (!result.ok && write === writes) {
         saveState.value = { state: 'unsaved', reason: result.reason }
         // With no line left the save status is hidden, so the failure is also a notice: a reload may bring it back.
-        draftNotice.value = `The saved variation could not be removed (${result.reason}); it may return on reload.`
+        removalWarning = `The saved variation could not be removed (${result.reason}); it may return on reload.`
+        draftNotice.value = removalWarning
       }
+      if (result.ok) clearRemovalWarning()
       return result.ok
     })
   }
@@ -336,6 +357,8 @@ export function useReplaySession(options: ReplaySessionOptions) {
     }
     const result = await saveReplayDraft({ ...snapshot.draft, recordedMovesDigest: digest })
     report(result.ok ? { state: 'saved' } : { state: 'unsaved', reason: result.reason })
+    // A stored line replaces the row that could not be removed, so that warning no longer holds.
+    if (result.ok) clearRemovalWarning()
     return result.ok
   }
 
@@ -443,8 +466,8 @@ export function useReplaySession(options: ReplaySessionOptions) {
     (length, before) => {
       const line = variation.value ?? parked.value
       if (length === before || !line) return
-      // A selected ply past the shortened record is not on it; the stored cursor must be one restore accepts.
-      if (activeMode.value === 'recorded' && cursor.value > length) cursor.value = length
+      // A cursor past the shortened record, in either mode, is one restore refuses, so it is brought onto the record.
+      if (cursor.value > length) cursor.value = length
       if (line.originPly <= Math.min(length, before)) {
         void persist()
         return
