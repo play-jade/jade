@@ -7,9 +7,9 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use jade_match_server::{
-    CoordMovePayload, CurrentSessionResponse, GuestSessionResponse, InvitationCreatedResponse,
-    JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest,
-    build_app_state, build_router, mark_interrupted_timed_matches_on_startup,
+    AllowedOrigins, CoordMovePayload, CurrentSessionResponse, GuestSessionResponse,
+    InvitationCreatedResponse, JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse,
+    PrivacyUpdateRequest, build_app_state, build_router, mark_interrupted_timed_matches_on_startup,
 };
 use tokio::io::DuplexStream;
 use tokio_tungstenite::{
@@ -2775,7 +2775,7 @@ async fn a_configured_origin_replaces_the_local_ones() {
     let state = build_app_state(&test_db.url)
         .await
         .unwrap()
-        .with_allowed_origins(vec!["https://play.example".to_string()]);
+        .with_allowed_origins(AllowedOrigins::parse("https://play.example").unwrap());
     let app = build_router(state);
     let (red, _) = new_guest(&app, "Red").await;
     let (blk, _) = new_guest(&app, "Black").await;
@@ -2801,5 +2801,38 @@ async fn a_configured_origin_replaces_the_local_ones() {
             .await
             .is_err(),
         "the local default is no longer accepted"
+    );
+    // HTTP answers the configured origin's preflight, and no longer names the replaced local one.
+    let preflight = |origin: &str| {
+        Request::builder()
+            .method("OPTIONS")
+            .uri("/api/v1/invitations")
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let allowed = app
+        .clone()
+        .oneshot(preflight("https://play.example"))
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("https://play.example")
+    );
+    let replaced = app
+        .clone()
+        .oneshot(preflight("http://localhost:3180"))
+        .await
+        .unwrap();
+    assert!(
+        replaced
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
     );
 }

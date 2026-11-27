@@ -43,7 +43,7 @@ pub struct AppState {
     pub archive: Arc<SampleArchiveProvider>,
     pub matches: Arc<RwLock<HashMap<String, MatchActorHandle>>>,
     pub rematch_lock: Arc<tokio::sync::Mutex<()>>,
-    pub allowed_origins: Arc<Vec<String>>,
+    allowed_origins: Arc<AllowedOrigins>,
     pub backend: Backend,
     _db_owner_lock: Option<DbOwnerLock>,
 }
@@ -638,7 +638,7 @@ pub async fn build_app_state(setting: &str) -> Result<AppState, sqlx::Error> {
         archive: Arc::new(SampleArchiveProvider::new_embedded()),
         matches: Arc::new(RwLock::new(HashMap::new())),
         rematch_lock: Arc::new(tokio::sync::Mutex::new(())),
-        allowed_origins: Arc::new(LOCAL_ORIGINS.iter().map(|o| o.to_string()).collect()),
+        allowed_origins: Arc::new(AllowedOrigins::local()),
         backend,
         _db_owner_lock: owner_lock,
     })
@@ -654,31 +654,48 @@ pub const LOCAL_ORIGINS: [&str; 6] = [
     "http://127.0.0.1:4180",
 ];
 
-/// Reads an allowed-origins setting (`JADE_ALLOWED_ORIGINS`): a comma-separated list of exact browser origins, such as
-/// a hosted deployment's own `https://` address, which replaces the local defaults. Each entry must be an origin and
-/// nothing more (an `http` or `https` scheme, a host, and an optional port), so a mistyped entry stops startup rather
-/// than silently refusing every browser.
-pub fn parse_allowed_origins(setting: &str) -> Result<Vec<String>, String> {
-    let mut origins = Vec::new();
-    for entry in setting.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        let parsed = url::Url::parse(entry).map_err(|e| format!("{entry:?} is not a URL: {e}"))?;
-        let origin = parsed.origin().ascii_serialization();
-        if !matches!(parsed.scheme(), "http" | "https") || origin != entry {
-            return Err(format!(
-                "{entry:?} is not an exact http or https origin (for example https://play.example)"
-            ));
+/// The exact browser origins a match server accepts, for both CORS and the match WebSocket. It is only ever built from
+/// validated entries, so every route sees the same well-formed list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllowedOrigins(Vec<String>);
+
+impl AllowedOrigins {
+    /// The local development and test addresses.
+    pub fn local() -> Self {
+        AllowedOrigins(LOCAL_ORIGINS.iter().map(|o| o.to_string()).collect())
+    }
+
+    /// Reads an allowed-origins setting (`JADE_ALLOWED_ORIGINS`): a comma-separated list of exact browser origins, such
+    /// as a hosted deployment's own `https://` address, which replaces the local defaults. Each entry must be an origin
+    /// and nothing more (an `http` or `https` scheme, a host, and an optional port), and none may be empty, so a mistyped
+    /// or missing entry stops startup rather than silently refusing browsers.
+    pub fn parse(setting: &str) -> Result<Self, String> {
+        let mut origins = Vec::new();
+        for entry in setting.split(',').map(str::trim) {
+            if entry.is_empty() {
+                return Err("the allowed-origins setting has an empty entry".to_string());
+            }
+            let parsed =
+                url::Url::parse(entry).map_err(|e| format!("{entry:?} is not a URL: {e}"))?;
+            let origin = parsed.origin().ascii_serialization();
+            if !matches!(parsed.scheme(), "http" | "https") || origin != entry {
+                return Err(format!(
+                    "{entry:?} is not an exact http or https origin (for example https://play.example)"
+                ));
+            }
+            origins.push(origin);
         }
-        origins.push(origin);
+        Ok(AllowedOrigins(origins))
     }
-    if origins.is_empty() {
-        return Err("the allowed-origins setting names no origin".to_string());
+
+    fn contains(&self, origin: &str) -> bool {
+        self.0.iter().any(|o| o == origin)
     }
-    Ok(origins)
 }
 
 impl AppState {
     /// The same state, accepting browsers from `origins` instead of the local defaults.
-    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+    pub fn with_allowed_origins(mut self, origins: AllowedOrigins) -> Self {
         self.allowed_origins = Arc::new(origins);
         self
     }
@@ -687,6 +704,7 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     let origins: Vec<HeaderValue> = state
         .allowed_origins
+        .0
         .iter()
         .filter_map(|o| o.parse::<HeaderValue>().ok())
         .collect();
@@ -1830,7 +1848,7 @@ async fn ws_match_stream(
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
-        && !state.allowed_origins.iter().any(|o| o == origin)
+        && !state.allowed_origins.contains(origin)
     {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -3206,25 +3224,29 @@ pub fn server_ready() -> bool {
 mod session_cookie_tests {
     #[test]
     fn an_allowed_origins_setting_names_exact_origins_only() {
-        use super::parse_allowed_origins;
+        use super::AllowedOrigins;
         assert_eq!(
-            parse_allowed_origins(" https://play.example , http://127.0.0.1:8443").unwrap(),
-            vec![
+            AllowedOrigins::parse(" https://play.example , http://127.0.0.1:8443").unwrap(),
+            AllowedOrigins(vec![
                 "https://play.example".to_string(),
                 "http://127.0.0.1:8443".to_string()
-            ]
+            ])
         );
         for bad in [
             "",
             " , ",
+            "https://play.example,",
+            "https://play.example,,http://127.0.0.1:8443",
             "play.example",
             "https://play.example/",
             "https://play.example/app",
             "https://user@play.example",
             "ftp://play.example",
             "https://play.example?x=1",
+            "*",
+            "null",
         ] {
-            assert!(parse_allowed_origins(bad).is_err(), "{bad:?}");
+            assert!(AllowedOrigins::parse(bad).is_err(), "{bad:?}");
         }
     }
 
