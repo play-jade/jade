@@ -2848,8 +2848,11 @@ fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
             .as_nanos();
         let candidate =
             std::env::temp_dir().join(format!("jade-origins-{}-{nanos}", std::process::id()));
-        if std::fs::create_dir(&candidate).is_ok() {
-            break candidate;
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            // Only a name already taken is retried; any other failure is reported at once.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot create {}: {e}", candidate.display()),
         }
     };
     let start = |origins: &std::ffi::OsStr| {
@@ -2904,7 +2907,7 @@ fn a_bad_origins_setting_stops_the_server_before_it_touches_the_database() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A setting that is present but not UTF-8, which only Unix environments can hold.
+/// A setting that is present but not Unicode: invalid UTF-8 bytes on Unix, an unpaired surrogate on Windows.
 fn non_unicode_setting() -> Option<std::ffi::OsString> {
     #[cfg(unix)]
     {
@@ -2914,7 +2917,11 @@ fn non_unicode_setting() -> Option<std::ffi::OsString> {
             ]),
         )
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        Some(<std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[0xD800]))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         None
     }
