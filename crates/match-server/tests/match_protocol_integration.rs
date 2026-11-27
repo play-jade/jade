@@ -47,7 +47,12 @@ async fn fresh_postgres_url() -> Option<String> {
         .filter(|u| !u.is_empty())?;
     sqlx::any::install_default_drivers();
     let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = format!("jade_test_{}_{seq}", std::process::id());
+    // Unique across runs as well as within one, so a reused process ID never meets an earlier run's database.
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let name = format!("jade_test_{}_{started}_{seq}", std::process::id());
     let mut conn = <sqlx::AnyConnection as sqlx::Connection>::connect(&admin)
         .await
         .expect("connect to the PostgreSQL test server");
@@ -55,8 +60,15 @@ async fn fresh_postgres_url() -> Option<String> {
         .execute(&mut conn)
         .await
         .expect("create a test database");
-    let (server, _) = admin.rsplit_once('/').expect("a URL that names a database");
-    Some(format!("{server}/{name}"))
+    // Only the database name changes: the server, credentials, and connection options stay as configured.
+    let (location, options) = match admin.split_once('?') {
+        Some((location, options)) => (location, format!("?{options}")),
+        None => (admin.as_str(), String::new()),
+    };
+    let (server, _) = location
+        .rsplit_once('/')
+        .expect("a URL that names a database");
+    Some(format!("{server}/{name}{options}"))
 }
 
 /// The database a test runs on: a fresh PostgreSQL database when one is configured, else private in-memory SQLite.
@@ -2315,4 +2327,172 @@ async fn an_existing_postgres_database_gains_the_added_counters_at_startup() {
     ] {
         assert!(after.iter().any(|c| c == added), "{added}");
     }
+}
+
+#[tokio::test]
+async fn a_server_that_lost_postgres_ownership_writes_nothing_after_a_new_owner_starts() {
+    let Some(url) = fresh_postgres_url().await else {
+        return;
+    };
+    let first = build_router(build_app_state(&url).await.unwrap());
+    let (red, _) = new_guest(&first, "Red").await;
+    let (blk, _) = new_guest(&first, "Black").await;
+    // An untimed match, so the new owner's startup recovery leaves it playing and only the fence can refuse the write.
+    let invite: InvitationCreatedResponse = post_json(
+        &first,
+        &red.access_token,
+        "/api/v1/invitations".to_string(),
+        serde_json::json!({ "preferred_side": "red" }),
+    )
+    .await;
+    let joined: JoinInvitationResponse = post_json(
+        &first,
+        &blk.access_token,
+        format!("/api/v1/invitations/{}/join", invite.invitation_code),
+        serde_json::json!({}),
+    )
+    .await;
+    let match_id = joined.match_id;
+
+    // The first server's lock session ends, as a database restart or an idle timeout would end it, and a second
+    // server takes ownership.
+    let mut admin = <sqlx::AnyConnection as sqlx::Connection>::connect(&url)
+        .await
+        .unwrap();
+    let ended: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) FROM pg_locks
+         WHERE locktype = 'advisory' AND granted AND pid <> pg_backend_pid()
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())) ended",
+    )
+    .fetch_one(&mut admin)
+    .await
+    .unwrap();
+    assert_eq!(ended, 1, "the owner's lock session ends");
+    let second = build_router(build_app_state(&url).await.unwrap());
+
+    // The first server still answers, but its writes of match state are refused and change nothing.
+    let mv = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "stale-owner".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    let refused = post_command(&first, &red.access_token, &match_id, &mv).await;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let refused: serde_json::Value = json_body(refused).await;
+    assert_eq!(refused["error"]["code"], "ownership_lost");
+    assert_eq!(
+        save_choices(
+            &first,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3]
+        )
+        .await
+        .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let now = snapshot_for(&second, &red.access_token, &match_id).await;
+    assert_eq!(now.seq, 0);
+    assert_eq!(now.visibility, Visibility::Private);
+    // The new owner plays the same move.
+    assert_eq!(
+        post_command(&second, &red.access_token, &match_id, &mv)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn command_ids_have_one_bound_on_every_backend() {
+    let app = build_router(build_app_state(&test_db_url().await).await.unwrap());
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let mv = |id: String| MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: id,
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    let too_long = post_command(&app, &red.access_token, &match_id, &mv("x".repeat(129))).await;
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+    let too_long: serde_json::Value = json_body(too_long).await;
+    assert_eq!(too_long["error"]["code"], "invalid_command_id");
+    assert_eq!(
+        post_command(&app, &red.access_token, &match_id, &mv("x".repeat(128)))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
+    let seq = TEST_DB_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("jade-bare-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let setting = format!("{}?mode=rwc", dir.join("game.db").display());
+    let app = build_router(build_app_state(&setting).await.unwrap());
+    let (guest, _) = new_guest(&app, "Guest").await;
+    drop(app);
+    let reopened = build_router(build_app_state(&setting).await.unwrap());
+    let req = Request::builder()
+        .uri("/api/v1/auth/session")
+        .header("authorization", format!("Bearer {}", guest.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let _ = reopened.clone().oneshot(req).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM accounts")
+        .fetch_one(
+            &sqlx::AnyPool::connect(&format!("sqlite:{setting}"))
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "the reopened server reads the same file");
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
+    // Runs only against a TLS-enabled PostgreSQL server whose certificate authority `JADE_TEST_POSTGRES_CA` names.
+    let Some(ca) = std::env::var("JADE_TEST_POSTGRES_CA")
+        .ok()
+        .filter(|p| !p.is_empty())
+    else {
+        return;
+    };
+    let Some(url) = fresh_postgres_url().await else {
+        return;
+    };
+    // Checked against the server's authority, the connection is made and is encrypted.
+    let state = build_app_state(&format!("{url}?sslmode=verify-full&sslrootcert={ca}"))
+        .await
+        .unwrap();
+    let encrypted: bool =
+        sqlx::query_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(encrypted);
+    drop(state);
+    // Checked only against the public authorities the server ships with, an unknown certificate is refused.
+    assert!(
+        build_app_state(&format!("{url}?sslmode=verify-full"))
+            .await
+            .is_err()
+    );
 }

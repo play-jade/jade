@@ -6,10 +6,11 @@ review:
 commands:
   rust-lint: cargo clippy --workspace --all-targets -- -D warnings
   rust-test: cargo test -p xiangqi-core -p jade-match-server
+  rust-test-postgres: ./dev/test-postgres.sh
 process:
   stages:
     - name: publish
-      steps: [check, {verify: [rust-lint, rust-test]}, submit, {ready: {wait: 30}}]
+      steps: [check, {verify: [rust-lint, rust-test, rust-test-postgres]}, submit, {ready: {wait: 30}}]
 branches:
   pattern: "{user}/{type}/{scope}/{slug}"
   worktrees: .claude/worktrees

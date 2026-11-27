@@ -55,14 +55,30 @@ pub enum Backend {
     Postgres,
 }
 
-impl Backend {
-    /// The backend a database URL names; anything not PostgreSQL is SQLite, as the standalone default.
-    pub fn of_url(url: &str) -> Self {
-        if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-            Backend::Postgres
-        } else {
-            Backend::Sqlite
-        }
+/// The longest command ID accepted, in bytes.
+pub const MAX_COMMAND_ID_BYTES: usize = 128;
+
+/// Reads a database setting into the backend it names and the URL to open it by. A `postgres:` or `postgresql:` URL
+/// (any letter case) is PostgreSQL; a `sqlite:` URL, or a bare file name as earlier settings allowed, is SQLite. Any
+/// other scheme is refused before anything touches the filesystem.
+pub fn parse_database_url(setting: &str) -> Result<(Backend, String), sqlx::Error> {
+    let unsupported = || {
+        sqlx::Error::Configuration(format!("unsupported database URL scheme in {setting:?}").into())
+    };
+    let scheme_end = setting.find(':');
+    let scheme = scheme_end.map(|end| setting[..end].to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("postgres" | "postgresql") => Ok((
+            Backend::Postgres,
+            format!("postgres{}", &setting[scheme_end.unwrap()..]),
+        )),
+        Some("sqlite") => Ok((
+            Backend::Sqlite,
+            format!("sqlite{}", &setting[scheme_end.unwrap()..]),
+        )),
+        // A scheme followed by `//` names some other service; a bare file name has none.
+        Some(_) if setting[scheme_end.unwrap()..].starts_with("://") => Err(unsupported()),
+        _ => Ok((Backend::Sqlite, format!("sqlite:{setting}"))),
     }
 }
 
@@ -81,7 +97,9 @@ enum DbOwnerLock {
 /// The PostgreSQL advisory lock key that marks the database's single owning match server.
 const POSTGRES_OWNER_LOCK_KEY: i64 = 0x4A41_4445_4D41_5443; // "JADEMATC"
 
-async fn acquire_postgres_owner_lock(url: &str) -> Result<DbOwnerLock, sqlx::Error> {
+/// Takes the PostgreSQL owner lock and, on the same connection, creates the schema and advances the owner epoch,
+/// returning the lock and this owner's epoch.
+async fn acquire_postgres_owner_lock(url: &str) -> Result<(DbOwnerLock, i64), sqlx::Error> {
     let mut conn = AnyConnection::connect(url).await?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(POSTGRES_OWNER_LOCK_KEY)
@@ -93,9 +111,53 @@ async fn acquire_postgres_owner_lock(url: &str) -> Result<DbOwnerLock, sqlx::Err
             "the PostgreSQL database is already owned by a running match-server",
         )));
     }
-    Ok(DbOwnerLock::Postgres(Arc::new(tokio::sync::Mutex::new(
-        conn,
-    ))))
+    sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&mut conn).await?;
+    // A new epoch for this owner. A server that lost its lock session keeps the older epoch on its pooled connections,
+    // so its writes are refused once this one starts.
+    let epoch: i64 = sqlx::query_scalar(
+        "INSERT INTO match_server_owner (singleton, epoch) VALUES (1, 1)
+         ON CONFLICT (singleton) DO UPDATE SET epoch = match_server_owner.epoch + 1
+         RETURNING epoch",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    Ok((
+        DbOwnerLock::Postgres(Arc::new(tokio::sync::Mutex::new(conn))),
+        epoch,
+    ))
+}
+
+/// Refuses a write of match state from a server that no longer owns the database. On PostgreSQL the owner's epoch is
+/// set on each of its connections and checked against the owner row, which is share-locked until the write commits,
+/// so a newer owner advances the epoch only between writes. SQLite's file lock cannot be lost while the process runs.
+async fn fence(conn: &mut AnyConnection) -> Result<(), ApiError> {
+    if conn.backend_name() != "PostgreSQL" {
+        return Ok(());
+    }
+    let owned: Option<i64> = sqlx::query_scalar(
+        "SELECT epoch FROM match_server_owner
+         WHERE singleton = 1 AND epoch = current_setting('jade.owner_epoch')::bigint
+         FOR SHARE",
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+    if owned.is_none() {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "ownership_lost",
+            message: "This match server no longer owns the database; another server has taken over"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// A transaction for a write of match state, fenced against loss of ownership.
+async fn begin_fenced(db: &AnyPool) -> Result<sqlx::Transaction<'static, sqlx::Any>, ApiError> {
+    let mut tx = db.begin().await.map_err(db_error)?;
+    fence(&mut tx).await?;
+    Ok(tx)
 }
 
 pub struct MailboxEnvelope {
@@ -413,17 +475,26 @@ fn extract_sqlite_file_path(sqlite_url: &str) -> Option<std::path::PathBuf> {
 
 /// The URL the pool opens. The generic driver parses its URL again for every connection, and each parse of an
 /// in-memory SQLite URL names a new database, so that URL is resolved once here into one shared in-memory database that
-/// every pooled connection opens.
-fn pool_url(db_url: &str, backend: Backend) -> String {
-    if backend == Backend::Sqlite && extract_sqlite_file_path(db_url).is_none() {
-        static IN_MEMORY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = IN_MEMORY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return format!(
-            "sqlite:file:jade-in-memory-{}-{seq}?mode=memory&cache=shared",
-            std::process::id()
-        );
+/// every pooled connection opens. The setting's other options are checked by the SQLite driver and kept.
+fn pool_url(db_url: &str, backend: Backend) -> Result<String, sqlx::Error> {
+    if backend != Backend::Sqlite || extract_sqlite_file_path(db_url).is_some() {
+        return Ok(db_url.to_string());
     }
-    db_url.to_string()
+    let _: sqlx::sqlite::SqliteConnectOptions = db_url.parse()?;
+    let options = db_url
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("")
+        .split('&')
+        .filter(|kv| !kv.is_empty() && !kv.starts_with("mode=") && !kv.starts_with("cache="))
+        .map(|kv| format!("&{kv}"))
+        .collect::<String>();
+    static IN_MEMORY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = IN_MEMORY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(format!(
+        "sqlite:file:jade-in-memory-{}-{seq}?mode=memory&cache=shared{options}",
+        std::process::id()
+    ))
 }
 
 fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>, sqlx::Error> {
@@ -457,27 +528,39 @@ fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>
     Ok(Some(DbOwnerLock::File(Arc::new(file))))
 }
 
-pub async fn build_app_state(db_url: &str) -> Result<AppState, sqlx::Error> {
+pub async fn build_app_state(setting: &str) -> Result<AppState, sqlx::Error> {
     sqlx::any::install_default_drivers();
-    let backend = Backend::of_url(db_url);
+    let (backend, db_url) = parse_database_url(setting)?;
+    let db_url = db_url.as_str();
     // Establish exclusive ownership BEFORE opening or interrupting any stored matches!
-    let owner_lock = match backend {
-        Backend::Sqlite => acquire_exclusive_sqlite_lock(db_url)?,
-        Backend::Postgres => Some(acquire_postgres_owner_lock(db_url).await?),
+    let (owner_lock, epoch) = match backend {
+        Backend::Sqlite => (acquire_exclusive_sqlite_lock(db_url)?, 0),
+        Backend::Postgres => {
+            let (lock, epoch) = acquire_postgres_owner_lock(db_url).await?;
+            (Some(lock), epoch)
+        }
     };
     let db = AnyPoolOptions::new()
         .max_connections(8)
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
-                if backend == Backend::Sqlite {
-                    sqlx::query("PRAGMA busy_timeout = 5000;")
-                        .execute(conn)
-                        .await?;
+                match backend {
+                    Backend::Sqlite => {
+                        sqlx::query("PRAGMA busy_timeout = 5000;")
+                            .execute(conn)
+                            .await?;
+                    }
+                    // Every connection carries this owner's epoch, for the fence on writes of match state.
+                    Backend::Postgres => {
+                        sqlx::query(&format!("SET jade.owner_epoch = '{epoch}'"))
+                            .execute(conn)
+                            .await?;
+                    }
                 }
                 Ok(())
             })
         })
-        .connect(&pool_url(db_url, backend))
+        .connect(&pool_url(db_url, backend)?)
         .await?;
     sqlx::raw_sql(INITIAL_SCHEMA_SQL).execute(&db).await?;
     add_missing_choice_revisions(&db, backend).await?;
@@ -978,6 +1061,7 @@ async fn create_invitation(
 
     let ts = now_utc_ms();
     let start_fen = xiangqi_core::STARTING_FEN;
+    let mut fenced = begin_fenced(&state.db).await?;
     sqlx::query(
         "INSERT INTO matches (
             match_id, invitation_code, rules_profile, is_friendly, initial_fen, current_fen,
@@ -999,13 +1083,10 @@ async fn create_invitation(
     .bind(clock_initial_ms)
     .bind(ts)
     .bind(ts)
-    .execute(&state.db)
+    .execute(&mut *fenced)
     .await
-    .map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    .map_err(db_error)?;
+    fenced.commit().await.map_err(db_error)?;
 
     ensure_match_actor(&state, &match_id).await?;
 
@@ -1126,6 +1207,7 @@ async fn join_invitation(
         } else {
             None
         };
+        let mut fenced = begin_fenced(&state.db).await?;
         let res = sqlx::query(
             "UPDATE matches SET state_version = state_version + 1, red_account_id = $1, status = $2, turn_started_utc_ms = COALESCE(turn_started_utc_ms, $3), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND $4 IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = $5 WHERE match_id = $6 AND red_account_id IS NULL",
         )
@@ -1135,13 +1217,10 @@ async fn join_invitation(
         .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
-        .execute(&state.db)
+        .execute(&mut *fenced)
         .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+        .map_err(db_error)?;
+        fenced.commit().await.map_err(db_error)?;
         if res.rows_affected() == 1 {
             transitioned_to_playing = next_status == "playing";
             Some(Side::Red)
@@ -1160,6 +1239,7 @@ async fn join_invitation(
         } else {
             None
         };
+        let mut fenced = begin_fenced(&state.db).await?;
         let res = sqlx::query(
             "UPDATE matches SET state_version = state_version + 1, black_account_id = $1, status = $2, turn_started_utc_ms = COALESCE(turn_started_utc_ms, $3), turn_generation = turn_generation + CASE WHEN turn_started_utc_ms IS NULL AND $4 IS NOT NULL THEN 1 ELSE 0 END, updated_at_ms = $5 WHERE match_id = $6 AND black_account_id IS NULL",
         )
@@ -1169,13 +1249,10 @@ async fn join_invitation(
         .bind(turn_utc)
         .bind(now)
         .bind(&match_id)
-        .execute(&state.db)
+        .execute(&mut *fenced)
         .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
-            message: e.to_string(),
-        })?;
+        .map_err(db_error)?;
+        fenced.commit().await.map_err(db_error)?;
         if res.rows_affected() == 1 {
             transitioned_to_playing = next_status == "playing";
             Some(Side::Black)
@@ -1495,6 +1572,7 @@ async fn update_match_privacy(
         code: "db_error",
         message: e.to_string(),
     })?;
+    fence(&mut tx).await?;
 
     let seats =
         sqlx::query("SELECT red_account_id, black_account_id FROM matches WHERE match_id = $1")
@@ -2123,6 +2201,14 @@ async fn process_single_command(
             ..
         } => (command_id.as_str(), *expected_seq),
     };
+    // Command IDs are stored and indexed for idempotency; one bound keeps every backend accepting the same IDs.
+    if cmd_id.is_empty() || cmd_id.len() > MAX_COMMAND_ID_BYTES {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_command_id",
+            message: format!("A command ID is 1 to {MAX_COMMAND_ID_BYTES} bytes"),
+        });
+    }
 
     // 1. Load current match seats, sequence, status, and clocks
     let mrow = sqlx::query(
@@ -2523,11 +2609,7 @@ async fn commit_match_event_tx(
     utc_ms: i64,
 ) -> Result<(), ApiError> {
     let starts_turn = starts_turn(event_type, next_status);
-    let mut tx = db.begin().await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    let mut tx = begin_fenced(db).await?;
 
     sqlx::query(
         "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
@@ -2750,11 +2832,7 @@ async fn create_or_get_rematch(
     let caller_id = authenticate_request(&state, &headers, true).await?;
     // Serialize rematch lookup + creation so simultaneous requests from both seats never race on `next_rematch_id`!
     let _rematch_guard = state.rematch_lock.lock().await;
-    let mut tx = state.db.begin().await.map_err(|e| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        code: "db_error",
-        message: e.to_string(),
-    })?;
+    let mut tx = begin_fenced(&state.db).await?;
 
     let m = sqlx::query(
         "SELECT status, is_friendly, red_account_id, black_account_id, clock_initial_ms, clock_increment_ms, next_rematch_id
@@ -3022,6 +3100,37 @@ pub fn server_ready() -> bool {
 
 #[cfg(test)]
 mod session_cookie_tests {
+    #[test]
+    fn database_settings_name_their_backend() {
+        use super::{Backend, parse_database_url};
+        let parsed = |s: &str| parse_database_url(s).unwrap();
+        assert_eq!(
+            parsed("POSTGRES://u:p@h/game"),
+            (Backend::Postgres, "postgres://u:p@h/game".to_string())
+        );
+        assert_eq!(parsed("postgresql://h/game").0, Backend::Postgres);
+        assert_eq!(
+            parsed("sqlite:jade.db?mode=rwc"),
+            (Backend::Sqlite, "sqlite:jade.db?mode=rwc".to_string())
+        );
+        assert_eq!(
+            parsed("/var/lib/jade/game.db?mode=rwc"),
+            (
+                Backend::Sqlite,
+                "sqlite:/var/lib/jade/game.db?mode=rwc".to_string()
+            )
+        );
+        assert!(parse_database_url("mysql://h/game").is_err());
+    }
+
+    #[test]
+    fn an_in_memory_database_keeps_and_checks_its_options() {
+        use super::{Backend, pool_url};
+        let url = pool_url("sqlite::memory:?vfs=unix-none", Backend::Sqlite).unwrap();
+        assert!(url.ends_with("&vfs=unix-none"), "{url}");
+        assert!(pool_url("sqlite::memory:?not_an_option=1", Backend::Sqlite).is_err());
+    }
+
     #[test]
     fn only_a_move_or_accepted_takeback_that_continues_play_starts_a_turn() {
         assert!(super::starts_turn("move", "playing"));

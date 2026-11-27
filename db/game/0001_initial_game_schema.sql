@@ -100,3 +100,10 @@ CREATE TABLE IF NOT EXISTS studies (
 
 CREATE INDEX IF NOT EXISTS idx_matches_invitation ON matches(invitation_code);
 CREATE INDEX IF NOT EXISTS idx_studies_owner ON studies(owner_account_id);
+
+-- The epoch of the match server that owns this database. Each owner advances it when it starts, and every write of
+-- match state checks it, so a server that lost ownership cannot write once a newer owner has started.
+CREATE TABLE IF NOT EXISTS match_server_owner (
+    singleton BIGINT PRIMARY KEY CHECK (singleton = 1),
+    epoch BIGINT NOT NULL
+);

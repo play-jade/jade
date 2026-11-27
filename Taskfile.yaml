@@ -26,6 +26,11 @@ tasks:
     cmds:
       - cargo test -p jade-match-server -p jade-uci-host
 
+  server:test:postgres:
+    desc: Run the match-server behaviour suite against a disposable PostgreSQL cluster made with the mise-pinned binaries
+    cmds:
+      - ./dev/test-postgres.sh
+
   server:dev:
     desc: Start local authoritative Axum match server with SQLite development storage
     cmds:
