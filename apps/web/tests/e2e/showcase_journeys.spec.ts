@@ -604,13 +604,22 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       // Red's live streams pass through to the server; the test can drop the current one as a network would.
       const redStreams: WebSocketRoute[] = []
       let withholdRedFrames = false
+      const heldRedFrames: string[] = []
+      let lastRedFrame = ''
       await redPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
         redStreams.push(stream)
         const server = stream.connectToServer()
         server.onMessage((message) => {
-          if (!withholdRedFrames) stream.send(message)
+          if (typeof message !== 'string') return stream.send(message)
+          lastRedFrame = message
+          if (withholdRedFrames) heldRedFrames.push(message)
+          else stream.send(message)
         })
       })
+      const releaseRedFrames = () => {
+        withholdRedFrames = false
+        for (const frame of heldRedFrames.splice(0)) redStreams[redStreams.length - 1]!.send(frame)
+      }
       await redPage.goto('/')
       await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
       await redPage.getByTestId('create-invite-btn').click()
@@ -712,6 +721,29 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
 
       // Red's session ends on the server while the page still holds it; when the stream drops, the room asks the
       // server, learns the session has ended, and stops instead of reconnecting.
+      // A save's acknowledgment alone leaves the sharing summary unconfirmed; a read below the version it wrote does not
+      // confirm it, and a snapshot at that version does.
+      withholdRedFrames = true
+      await redPage.route(
+        /\/api\/v1\/matches\/[^/?]+$/,
+        async (route) => {
+          if (route.request().method() !== 'GET') return route.fallback()
+          const response = await route.fetch()
+          const body = await response.json()
+          body.state_version -= 1
+          await route.fulfill({ response, json: body })
+        },
+        { times: 1 },
+      )
+      save = saved(redPage)
+      await redPage.getByLabel('Allow published research analysis').check()
+      expect((await save).status()).toBe(200)
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      releaseRedFrames()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
       // A successful command reply that lacks a clock is not installed: the room says so and reads the match again.
       // Red's stream withholds the move, so Red can catch up only through that read.
       withholdRedFrames = true
@@ -731,6 +763,7 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
       await expect(redPage.locator('body')).not.toContainText('NaN')
       withholdRedFrames = false
+      heldRedFrames.length = 0
 
       // The same state arriving again changes nothing: Red's move reaches Red's stream first, the stream drops, and the
       // late reply to the move does not wind Black's running clock back.
@@ -738,12 +771,15 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(redPage.getByTestId('match-moves-card')).toContainText('H8+7')
       let releaseReply: () => void = () => {}
       const replyGate = new Promise<void>((resolve) => (releaseReply = resolve))
+      let heldBlackMs = -1
       await redPage.route(
         /\/commands$/,
         async (route) => {
           const response = await route.fetch()
+          const body = await response.json()
+          heldBlackMs = body.black_remaining_ms
           await replyGate
-          await route.fulfill({ response })
+          await route.fulfill({ response, json: body })
         },
         { times: 1 },
       )
@@ -756,11 +792,14 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(redPage.getByTestId('match-moves-card')).toContainText('2.H8+7')
       const streamsBefore = redStreams.length
       await redStreams[streamsBefore - 1]!.close()
-      await redPage.waitForTimeout(2_000)
-      const seconds = async () => {
-        const [m, sec] = (await redPage.getByTestId('clock-black').innerText()).trim().split(':').map(Number)
+      const clockSeconds = async (side: 'red' | 'black') => {
+        const [m, sec] = (await redPage.getByTestId(`clock-${side}`).innerText()).trim().split(':').map(Number)
         return m! * 60 + sec!
       }
+      const seconds = () => clockSeconds('black')
+      // Black's clock runs until it shows less than the reading in the held reply, so replaying that reading would show.
+      await expect.poll(() => heldBlackMs).toBeGreaterThan(0)
+      await expect.poll(seconds, { timeout: 10_000 }).toBeLessThan(Math.floor(heldBlackMs / 1000))
       const beforeReply = await seconds()
       const replied = redPage.waitForEvent('requestfinished', { predicate: (r) => r.url().endsWith('/commands') })
       releaseReply()
@@ -773,6 +812,17 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       expect(redStreams.length).toBe(streamsBefore)
       blockRecovery = false
       await expect.poll(() => redStreams.length).toBe(streamsBefore + 1)
+
+      // A reading of the same state may lower the running clock, and never moves the stopped one.
+      await expect.poll(() => lastRedFrame.length).toBeGreaterThan(0)
+      const stoppedBefore = await clockSeconds('red')
+      const running = await seconds()
+      const sameState = JSON.parse(lastRedFrame)
+      sameState.black_remaining_ms = (running - 30) * 1000
+      sameState.red_remaining_ms += 90_000
+      redStreams[redStreams.length - 1]!.send(JSON.stringify(sameState))
+      await expect.poll(seconds).toBeLessThanOrEqual(running - 29)
+      expect(await clockSeconds('red')).toBe(stoppedBefore)
 
       // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
       let releaseSave: () => void = () => {}

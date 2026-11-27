@@ -296,28 +296,40 @@ function isSnapshotOf(data: unknown, matchId: string | undefined): data is Match
   )
 }
 
-/** A version this room's own save wrote; the effective visibility shown stays unconfirmed until a snapshot that new. */
-let awaitingVersion: number | null = null
+/**
+ * The version the effective visibility shown must reach to count as confirmed: raised by this room's own save and by a
+ * newer snapshot whose visibility could not be read, and met only by a valid snapshot at least that new.
+ */
+let requiredVersion = 0
+
+/** Whether the shown effective visibility is the server's at a version no older than any change known to follow it. */
+function refreshConfirmation() {
+  visibilityConfirmed.value = shownVersion !== null && shownVersion.version >= requiredVersion
+}
 
 /**
- * Installs a snapshot from the stream or any HTTP reply and reports whether it was taken; a taken snapshot sets the
- * clocks too. The server advances a match's state version with every change it stores, so a snapshot of the shown match
- * is taken only when its version is newer: whatever order the routes deliver them in, the room never goes back. The
- * same version again is the same stored state, read at another moment, so it can only bring a running clock down to
- * the server's fresher reading. A server that sends no version is ordered by event sequence instead. Another match (a
- * rematch) starts its own order.
+ * Installs a snapshot from the stream or any HTTP reply and reports whether it was taken. The server advances a match's
+ * state version with every change it stores, so a snapshot of the shown match is taken only when its version is newer:
+ * whatever order the routes deliver them in, the room never goes back. Within one turn (same sequence and phase) the
+ * clocks only run down: a reading sampled earlier never gives time back, and only the running clock takes a lower
+ * reading. A server that sends no version is ordered by event sequence instead. Another match (a rematch) starts its own
+ * order.
  */
 function install(snap: MatchSnapshot): boolean {
   const current = snapshot.value
   const sameMatch = current?.match_id === snap.match_id
-  // A snapshot with an unknown effective visibility is malformed; it does not use up its version, so a valid copy of
-  // the same state can still be shown.
-  if (!VISIBILITIES.includes(snap.visibility)) {
-    if (sameMatch) visibilityConfirmed.value = false
-    return false
-  }
+  if (!sameMatch) requiredVersion = 0
   const version = snap.state_version
   const versioned = Number.isSafeInteger(version) && (version as number) >= 0
+  // A snapshot whose effective visibility cannot be read is not shown. A newer one means the visibility shown may be
+  // superseded, so it stays unconfirmed until a valid snapshot that new; a stale one changes nothing.
+  if (!VISIBILITIES.includes(snap.visibility)) {
+    if (sameMatch && versioned && (!shownVersion || (version as number) > shownVersion.version)) {
+      requiredVersion = Math.max(requiredVersion, version as number)
+      refreshConfirmation()
+    }
+    return false
+  }
   if (current && sameMatch) {
     if (shownVersion) {
       if (!versioned || (version as number) < shownVersion.version) return false
@@ -328,25 +340,35 @@ function install(snap: MatchSnapshot): boolean {
     } else if (snap.seq < current.seq) {
       return false
     }
-  } else {
-    awaitingVersion = null
   }
+  const sameTurn = current !== null && sameMatch && current.seq === snap.seq && current.status === snap.status
   snapshot.value = snap
   shownVersion = versioned ? { matchId: snap.match_id, version: version as number } : null
-  const caughtUp = versioned && (awaitingVersion === null || (version as number) >= awaitingVersion)
-  if (caughtUp) awaitingVersion = null
-  // A snapshot without a version cannot be ordered, so its effective visibility is shown as not confirmed.
-  visibilityConfirmed.value = caughtUp
-  syncClocksFromSnapshot(snap)
+  refreshConfirmation()
+  if (sameTurn) lowerRunningClock(snap)
+  else syncClocksFromSnapshot(snap)
   return true
 }
 
-/** Brings the running clock down to the server's reading of the same stored state when that reading is lower. */
+/** Brings the running clock, and only it, down to a reading of the same turn when that reading is lower. */
 function lowerRunningClock(snap: MatchSnapshot) {
   if (snap.status !== 'playing') return
-  const incoming = snap.side_to_move === 'red' ? snap.red_remaining_ms : snap.black_remaining_ms
-  const shown = snap.side_to_move === 'red' ? displayRedMs.value : displayBlackMs.value
-  if (incoming !== null && shown !== null && incoming < shown) syncClocksFromSnapshot(snap)
+  const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  if (snap.side_to_move === 'red') {
+    const incoming = snap.red_remaining_ms
+    if (incoming !== null && displayRedMs.value !== null && incoming < displayRedMs.value) {
+      baseRedMs = incoming
+      clockAnchorPerfMs = now
+      displayRedMs.value = incoming
+    }
+  } else {
+    const incoming = snap.black_remaining_ms
+    if (incoming !== null && displayBlackMs.value !== null && incoming < displayBlackMs.value) {
+      baseBlackMs = incoming
+      clockAnchorPerfMs = now
+      displayBlackMs.value = incoming
+    }
+  }
 }
 
 /**
@@ -497,12 +519,9 @@ async function saveChoice(field: ChoiceField, value: string | boolean) {
       shownRevision = madeAgainst + 1
       // The save changed what the match's effective visibility may be; until a snapshot at least as new as the version
       // it wrote is shown, the summary says it is not confirmed rather than show the state before the save.
-      if (
-        Number.isSafeInteger(ack.state_version) &&
-        (!shownVersion || (ack.state_version as number) > shownVersion.version)
-      ) {
-        awaitingVersion = Math.max(awaitingVersion ?? 0, ack.state_version as number)
-        visibilityConfirmed.value = false
+      if (Number.isSafeInteger(ack.state_version)) {
+        requiredVersion = Math.max(requiredVersion, ack.state_version as number)
+        refreshConfirmation()
       }
       // The effective visibility is shown in one place, the summary above, which the read-back keeps current.
       outcome = `${CHOICE_LABELS[field]} saved. Sharing takes effect only when both players choose it.`
@@ -693,8 +712,10 @@ async function joinAndSubscribe() {
     const joined = await joinResp.json()
     assignedSide.value = joined.assigned_side
     const first: unknown = joined.snapshot
-    if (!isSnapshotOf(first, undefined)) throw new Error('The match server sent an unreadable match')
-    install(first)
+    // The room opens only on a match it can show; otherwise it says so rather than wait on nothing.
+    if (!isSnapshotOf(first, undefined) || (!install(first) && !snapshot.value)) {
+      throw new Error('The match server sent a match this page cannot read; reload to try again')
+    }
     hydrateChoices(first)
     if (assignedSide.value === 'black') {
       redBelow.value = false

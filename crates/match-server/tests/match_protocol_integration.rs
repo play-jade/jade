@@ -2062,3 +2062,56 @@ async fn a_read_only_session_check_sets_no_cookie() {
     assert_eq!(read_only.status(), StatusCode::OK);
     assert!(!read_only.headers().contains_key("set-cookie"));
 }
+
+#[tokio::test]
+async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let mv = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "r1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    assert_eq!(
+        post_command(&app, &red.access_token, &match_id, &mv)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // An event past the row's sequence, as a commit landing between a snapshot's read of the row and of its events
+    // would leave it.
+    sqlx::query(
+        "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
+         SELECT match_id, seq + 1, 'planted', actor_side, event_type, payload_json, created_at_ms
+         FROM match_events WHERE match_id = ? AND seq = 1",
+    )
+    .bind(&match_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let req = Request::builder()
+        .uri(format!("/api/v1/matches/{match_id}?since_seq=0"))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let snap: MatchSnapshotResponse = json_body(app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(snap.seq, 1);
+    assert_eq!(
+        snap.moves_uci,
+        vec!["h0g2"],
+        "the move list stops at the row's sequence"
+    );
+    assert!(
+        snap.missing_events.iter().all(|e| e.seq <= 1),
+        "so do the missing events"
+    );
+}
