@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type { Page, WebSocketRoute } from '@playwright/test'
+import type { Browser, BrowserContext, Page, Request, WebSocketRoute } from '@playwright/test'
 import { expect, test } from '@playwright/test'
 
 const VISUAL_REF_DIR = resolve(process.cwd(), '../../docs/visual-reference')
@@ -36,7 +36,84 @@ async function playBoardSquares(page: Page, fromSq: string, toSq: string) {
   await page.locator(`[data-square="${toSq}"]`).dispatchEvent('click')
 }
 
+// Against a deployed origin (PLAYWRIGHT_BASE_URL), every journey's match traffic must stay on that origin: each browser
+// context reports any hop of a request that began at a match endpoint (under any base path),
+// wherever it was redirected, and any match stream that leaves it, and the journey fails afterwards. Journeys that
+// intercept match requests and fetch them again themselves (11 to 14) rewrite responses on purpose and are not routing
+// evidence; the journeys that do not intercept are.
+const deployedOrigin = process.env.PLAYWRIGHT_BASE_URL === undefined ? undefined : new URL(process.env.PLAYWRIGHT_BASE_URL)
+const strayMatchTraffic: string[] = []
+let matchRequestsSeen = 0
+let matchStreamsSeen = 0
+// The match server's routes (crates/match-server: auth, invitations, matches, and each match's stream), after any
+// prefix the deployment mounts it under.
+const isMatchEndpoint = (url: URL) => /\/api\/v1\/(auth|invitations|matches)(\/|$)/.test(url.pathname)
+const isMatchStream = (url: URL) => /\/api\/v1\/matches\/[^/]+\/ws$/.test(url.pathname)
+const guardedContexts = new WeakSet<BrowserContext>()
+const guardedBrowsers = new WeakSet<Browser>()
+
+function guardMatchTraffic(context: BrowserContext) {
+  if (deployedOrigin === undefined || guardedContexts.has(context)) return
+  guardedContexts.add(context)
+  const origin = deployedOrigin
+  const socketScheme = origin.protocol === 'https:' ? 'wss:' : 'ws:'
+  context.on('request', (request) => {
+    let first: Request = request
+    for (let previous = first.redirectedFrom(); previous; previous = previous.redirectedFrom()) first = previous
+    if (!isMatchEndpoint(new URL(first.url()))) return
+    matchRequestsSeen++
+    if (new URL(request.url()).origin !== origin.origin) strayMatchTraffic.push(`request ${request.url()}`)
+  })
+  const watchSockets = (page: Page) =>
+    page.on('websocket', (socket) => {
+      const url = new URL(socket.url())
+      if (!isMatchStream(url)) return
+      matchStreamsSeen++
+      if (url.protocol !== socketScheme || url.host !== origin.host) strayMatchTraffic.push(`socket ${socket.url()}`)
+    })
+  context.pages().forEach(watchSockets)
+  context.on('page', watchSockets)
+}
+
+test.beforeEach(async ({ browser, context }) => {
+  if (deployedOrigin === undefined) return
+  guardMatchTraffic(context)
+  if (guardedBrowsers.has(browser)) return
+  guardedBrowsers.add(browser)
+  const newContext = browser.newContext.bind(browser)
+  browser.newContext = async (options) => {
+    const created = await newContext(options)
+    guardMatchTraffic(created)
+    return created
+  }
+})
+
+test.afterEach(() => {
+  expect(strayMatchTraffic.splice(0), 'match traffic that left the deployed origin').toEqual([])
+})
+
 test.describe('Jade Slice A Web Showcase Journeys', () => {
+  test('15. A deployed origin serves the match API and an open match stream itself', async ({ browser }) => {
+    test.skip(deployedOrigin === undefined, 'runs only against a deployed origin (PLAYWRIGHT_BASE_URL)')
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const requestsBefore = matchRequestsSeen
+    const streamsBefore = matchStreamsSeen
+    try {
+      // An invitation takes a guest session and a new match over HTTP, and its waiting room opens the match stream;
+      // the origin guard checks where each went.
+      await page.goto('/')
+      await page.getByTestId('create-invite-btn').click()
+      await page.waitForURL(/\/invite\/[a-z0-9]+/)
+      await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
+      await expect(page.getByTestId('match-status-badge')).toHaveAttribute('data-connection-state', 'connected')
+      expect(matchStreamsSeen, 'the origin guard saw the match stream').toBeGreaterThan(streamsBefore)
+      expect(matchRequestsSeen, 'the origin guard saw the invitation\'s match requests').toBeGreaterThan(requestsBefore)
+    } finally {
+      await context.close()
+    }
+  })
+
   test('0. Home board renders on first load without any interaction', async ({ page, request }) => {
     const ssr = await request.get('/')
     const html = await ssr.text()
