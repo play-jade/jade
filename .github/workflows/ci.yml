@@ -39,6 +39,31 @@ jobs:
           cargo test --manifest-path apps/linux/Cargo.toml
           cargo build --release --manifest-path apps/linux/Cargo.toml
 
+  match-server-postgres:
+    name: Match server on PostgreSQL
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        # The PostgreSQL version pinned through mise, which the hosted database is to match.
+        image: postgres:18.7
+        env:
+          POSTGRES_USER: jade
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jade"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - name: Run the match-server behaviour suite against PostgreSQL
+        env:
+          JADE_TEST_POSTGRES_URL: postgres://jade@127.0.0.1:5432/postgres
+        run: cargo test -p jade-match-server --test match_protocol_integration
+
   web-nuxt-and-playwright:
     name: Web (Nuxt 4 + WASM + Playwright)
     runs-on: ubuntu-24.04
