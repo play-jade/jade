@@ -21,6 +21,7 @@ rust-version = "1.89"
 repository = "https://github.com/play-jade/jade"
 
 [workspace.dependencies]
+url = "2.5"
 xiangqi-core = { path = "crates/xiangqi-core", version = "0.1.0" }
 archive-client = { path = "crates/archive-client", version = "0.1.0" }
 jade-inference = { path = "crates/inference", version = "0.1.0" }

@@ -536,9 +536,12 @@ fn pool_url(db_url: &str, backend: Backend) -> Result<String, sqlx::Error> {
 }
 
 fn acquire_exclusive_sqlite_lock(sqlite_url: &str) -> Result<Option<DbOwnerLock>, sqlx::Error> {
-    let Some(db_path) = extract_sqlite_file_path(sqlite_url) else {
+    if extract_sqlite_file_path(sqlite_url).is_none() {
         return Ok(None);
-    };
+    }
+    // The lock sits beside the file the driver opens: the name its own parser reads from the setting.
+    let options: sqlx::sqlite::SqliteConnectOptions = sqlite_url.parse()?;
+    let db_path = options.get_filename().to_path_buf();
     // SQLite reads a `file:` name as a URI and opens the file it names, which the owner lock could not follow, so a
     // durable database is named by its plain file name.
     if db_path.to_string_lossy().starts_with("file:") {

@@ -54,6 +54,7 @@ impl Drop for TestDb {
         }
         if let Some((admin, name)) = self.postgres.take() {
             // Dropping runs outside the test's runtime, on a thread of its own; FORCE ends sessions still open.
+            let leftover = name.clone();
             let dropped = std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -73,7 +74,7 @@ impl Drop for TestDb {
             .join()
             .unwrap_or_else(|_| Err("the cleanup thread panicked".to_string()));
             if let Err(error) = dropped {
-                let report = format!("test database was not dropped: {error}");
+                let report = format!("test database {leftover} was not dropped: {error}");
                 // A test already failing reports the leftover; a passing one fails, naming it.
                 if std::thread::panicking() {
                     eprintln!("{report}");
@@ -85,58 +86,69 @@ impl Drop for TestDb {
     }
 }
 
-/// A URL component with its `%XX` escapes decoded, as the database drivers read it.
-fn decoded(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let hex = |b: u8| (b as char).to_digit(16);
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
-        {
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+/// Sets query options on a URL, replacing any it already has with the same names as the URL parser reads them.
+fn with_query(url: &str, set: &[(&str, &str)]) -> String {
+    let mut parsed = url::Url::parse(url).expect("a database URL");
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !set.iter().any(|(name, _)| key.eq_ignore_ascii_case(name)))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.clear();
+        query.extend_pairs(kept);
+        query.extend_pairs(set.iter().copied());
     }
-    String::from_utf8_lossy(&out).into_owned()
+    parsed.to_string()
 }
 
-/// Sets query options on a URL, replacing any it already has with the same names; values are percent-encoded.
-fn with_query(url: &str, set: &[(&str, &str)]) -> String {
-    let (location, query) = url.split_once('?').unwrap_or((url, ""));
-    let encode = |v: &str| {
-        v.bytes()
-            .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                    (b as char).to_string()
-                }
-                _ => format!("%{b:02X}"),
-            })
-            .collect::<String>()
-    };
-    let mut pairs: Vec<String> = query
-        .split('&')
-        .filter(|kv| !kv.is_empty())
-        .filter(|kv| {
-            let key = decoded(kv.split('=').next().unwrap_or(""));
-            !set.iter().any(|(name, _)| key.eq_ignore_ascii_case(name))
-        })
-        .map(str::to_string)
+/// The URL of database `name` on the server `admin` names: only the database changes, and a `dbname` option, which
+/// would otherwise override the path, is removed however it is spelled.
+fn fixture_url(admin: &str, name: &str) -> String {
+    let mut parsed = url::Url::parse(admin).expect("a database URL");
+    parsed.set_path(&format!("/{name}"));
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !key.eq_ignore_ascii_case("dbname"))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
-    pairs.extend(
-        set.iter()
-            .map(|(name, value)| format!("{name}={}", encode(value))),
-    );
-    if pairs.is_empty() {
-        location.to_string()
+    if kept.is_empty() {
+        parsed.set_query(None);
     } else {
-        format!("{location}?{}", pairs.join("&"))
+        parsed.query_pairs_mut().clear().extend_pairs(kept);
     }
+    parsed.to_string()
+}
+
+#[test]
+fn a_fixture_url_names_only_its_own_database() {
+    let url = fixture_url(
+        "postgres://jade@127.0.0.1:5432/postgres?db%6Eame=postgres&application_name=t",
+        "jade_x",
+    );
+    let parsed = url::Url::parse(&url).unwrap();
+    assert_eq!(parsed.path(), "/jade_x");
+    assert!(
+        parsed
+            .query_pairs()
+            .all(|(k, _)| !k.eq_ignore_ascii_case("dbname")),
+        "{url}"
+    );
+    assert!(
+        parsed
+            .query_pairs()
+            .any(|(k, v)| k == "application_name" && v == "t")
+    );
+    let replaced = with_query(&url, &[("sslmode", "verify-full"), ("SSLMODE", "require")]);
+    assert_eq!(
+        url::Url::parse(&replaced)
+            .unwrap()
+            .query_pairs()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("sslmode"))
+            .count(),
+        2
+    );
 }
 
 /// A fresh database on the PostgreSQL server `JADE_TEST_POSTGRES_URL` names (a URL ending in a database to connect to
@@ -160,24 +172,7 @@ async fn fresh_postgres() -> Option<TestDb> {
         .execute(&mut conn)
         .await
         .expect("create a test database");
-    // Only the database changes: the server, credentials, and other options stay as configured, and a `dbname` option,
-    // which would otherwise override the path, is removed.
-    let (location, query) = admin.split_once('?').unwrap_or((admin.as_str(), ""));
-    let (server, _) = location
-        .rsplit_once('/')
-        .expect("a URL that names a database");
-    let options: Vec<&str> = query
-        .split('&')
-        .filter(|kv| {
-            !kv.is_empty()
-                && !decoded(kv.split('=').next().unwrap_or("")).eq_ignore_ascii_case("dbname")
-        })
-        .collect();
-    let url = if options.is_empty() {
-        format!("{server}/{name}")
-    } else {
-        format!("{server}/{name}?{}", options.join("&"))
-    };
+    let url = fixture_url(&admin, &name);
     let db = TestDb {
         url,
         postgres: Some((admin, name.clone())),
@@ -2669,10 +2664,25 @@ async fn a_bare_sqlite_filename_setting_still_opens_and_reopens_its_database() {
     // While it runs, the same file spelled another way is the same database, and a second server is refused.
     let respelled = format!("{}?mode=rwc", dir.join("game%2Edb").display());
     assert!(build_app_state(&respelled).await.is_err());
-    // A `file:` URI, which SQLite would open as the same file under a lock the server could not follow, is refused.
-    let uri = format!("sqlite:file:{}?mode=rwc", dir.join("game.db").display());
-    assert!(build_app_state(&uri).await.is_err());
+    // So is the same file behind a repeated scheme prefix, which the driver strips.
+    let reprefixed = format!("sqlite:sqlite:{}?mode=rwc", dir.join("game.db").display());
+    assert!(build_app_state(&reprefixed).await.is_err());
     drop(reopened);
+    // A `file:` URI, which SQLite would open as the same file under a lock the server could not follow, is refused as
+    // a setting, with no server running, before any lock is taken.
+    let uri = format!("sqlite:file:{}?mode=rwc", dir.join("game.db").display());
+    assert!(matches!(
+        build_app_state(&uri).await,
+        Err(sqlx::Error::Configuration(_))
+    ));
+    let reprefixed_uri = format!(
+        "sqlite:sqlite:file:{}?mode=rwc",
+        dir.join("game.db").display()
+    );
+    assert!(matches!(
+        build_app_state(&reprefixed_uri).await,
+        Err(sqlx::Error::Configuration(_))
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
