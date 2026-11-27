@@ -164,19 +164,24 @@ async function guestFetch(path: string, init: RequestInit = {}, mutation = false
     })
   if (roomStopped.value) throw new Error(stopReason)
   const bound = guestSession
-  // A session the server confirms has ended stops the room, so nothing queued or reconnecting acts or reads for it; a
-  // network failure only fails this request.
-  const session = await browserSession.current().catch((error: unknown) => {
-    if (error instanceof SessionEndedError) stopRoom(error.message)
-    throw error
-  })
-  // The room belongs to the guest that opened it; a browser now holding another guest stops rather than act for it.
-  if (bound && session.account_id !== bound.account_id) {
-    stopRoom()
-    throw new Error(ANOTHER_GUEST)
+  let session = bound
+  // A mutation needs the current CSRF token, so it checks the session first; a read in an open room travels with the
+  // cookie alone, and a refusal below says whether the session changed.
+  if (mutation || !bound) {
+    // A session the server confirms has ended stops the room, so nothing queued or reconnecting acts or reads for it;
+    // a network failure only fails this request.
+    session = await browserSession.current().catch((error: unknown) => {
+      if (error instanceof SessionEndedError) stopRoom(error.message)
+      throw error
+    })
+    // The room belongs to the guest that opened it; a browser now holding another guest stops rather than act for it.
+    if (bound && session.account_id !== bound.account_id) {
+      stopRoom()
+      throw new Error(ANOTHER_GUEST)
+    }
+    guestSession = session
   }
-  guestSession = session
-  const resp = await send(session)
+  const resp = await send(session!)
   if (!(await browserSession.refusedBy(resp))) return resp
   const again = await browserSession.recover({ fresh: true, readOnly: true })
   if (!again) {
@@ -184,7 +189,7 @@ async function guestFetch(path: string, init: RequestInit = {}, mutation = false
     stopRoom(ended.message)
     throw ended
   }
-  if (again.account_id !== session.account_id) {
+  if (again.account_id !== session!.account_id) {
     stopRoom()
     throw new Error(ANOTHER_GUEST)
   }
@@ -268,26 +273,45 @@ function newerPrivacy(matchId: string, revision: unknown): boolean {
 function isSnapshotOf(data: unknown, matchId: string | undefined): data is MatchSnapshot {
   if (typeof data !== 'object' || data === null) return false
   const d = data as Record<string, unknown>
+  const strings = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === 'string')
+  const clock = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v))
   return (
     typeof d.match_id === 'string' &&
     (matchId === undefined || d.match_id === matchId) &&
     Number.isSafeInteger(d.seq) &&
     typeof d.status === 'string' &&
-    typeof d.side_to_move === 'string' &&
+    d.status in PHASE &&
+    (d.side_to_move === 'red' || d.side_to_move === 'black') &&
     typeof d.fen === 'string' &&
-    Array.isArray(d.moves_uci) &&
-    Array.isArray(d.moves_chinese)
+    strings(d.moves_uci) &&
+    strings(d.moves_chinese) &&
+    clock(d.red_remaining_ms) &&
+    clock(d.black_remaining_ms) &&
+    clock(d.clock_initial_ms) &&
+    typeof d.clock_increment_ms === 'number'
   )
 }
 
+/** A match's phases in the only order they move; a snapshot never takes the room back to an earlier one. */
+const PHASE: Record<MatchSnapshot['status'], number> = { waiting: 0, playing: 1, finished: 2, interrupted: 2 }
+
 /**
- * Installs a snapshot from any route (stream, poll, or command reply) and reports whether its game state was taken.
- * Game state older than the board shown is not taken, so a late HTTP reply cannot roll back a newer live move; a newer
- * privacy state it carries is still taken.
+ * Installs a snapshot from the stream or an HTTP reply and reports whether its game state was taken. Game state moves
+ * forward by event sequence, then by phase (a seat joining starts play without a new event); at the same sequence and
+ * phase the open stream is the authority, so a late HTTP reply cannot reverse a join or rewind a running clock. A
+ * newer privacy state is taken from any snapshot.
  */
-function install(snap: MatchSnapshot): boolean {
+function install(snap: MatchSnapshot, route: 'stream' | 'http'): boolean {
   const current = snapshot.value
-  if (current && current.match_id === snap.match_id && snap.seq < current.seq) {
+  const streamOpen = ws?.readyState === WebSocket.OPEN
+  const older =
+    current &&
+    current.match_id === snap.match_id &&
+    (snap.seq < current.seq ||
+      (snap.seq === current.seq &&
+        (PHASE[snap.status] < PHASE[current.status] ||
+          (PHASE[snap.status] === PHASE[current.status] && route === 'http' && streamOpen))))
+  if (current && older) {
     const read = ordered(snap)
     snapshot.value = { ...current, visibility: read.visibility, privacy_revision: read.privacy_revision }
     return false
@@ -540,7 +564,7 @@ function connectMatchWebSocket(matchId: string) {
       const data = JSON.parse(String(ev.data))
       if (isSnapshotOf(data, snapshot.value?.match_id)) {
         const prevLen = snapshot.value?.moves_uci.length ?? 0
-        const taken = install(data)
+        const taken = install(data, 'stream')
         hydrateChoices(data)
         if (roomStopped.value) return
         if (taken) syncClocksFromSnapshot(snapshot.value!)
@@ -607,14 +631,17 @@ async function recoverGapAndReconnect(matchId: string) {
     if (resp.ok) {
       const snap: unknown = await resp.json().catch(() => null)
       // A read answered after the room stopped belongs to the guest it no longer holds; it is dropped.
-      if (roomStopped.value || !isSnapshotOf(snap, matchId)) return
-      const taken = install(snap)
-      hydrateChoices(snap)
       if (roomStopped.value) return
-      if (taken) syncClocksFromSnapshot(snapshot.value!)
-      if (snap.status === 'finished') {
-        connectionState.value = 'connected'
-        return
+      // An unreadable read installs nothing, and the stream can still be reopened below.
+      if (isSnapshotOf(snap, matchId)) {
+        const taken = install(snap, 'http')
+        hydrateChoices(snap)
+        if (roomStopped.value) return
+        if (taken) syncClocksFromSnapshot(snapshot.value!)
+        if (snapshot.value?.status === 'finished') {
+          connectionState.value = 'connected'
+          return
+        }
       }
     } else {
       // A refused read can mean the browser's session ended or changed; the server says which, and the room stops
@@ -699,7 +726,7 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
     if (matchId) void recoverGapAndReconnect(matchId)
     return
   }
-  const taken = install(data)
+  const taken = install(data, 'http')
   hydrateChoices(data)
   if (roomStopped.value) return
   if (taken) syncClocksFromSnapshot(snapshot.value!)

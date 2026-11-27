@@ -708,6 +708,23 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
 
       // Red's session ends on the server while the page still holds it; when the stream drops, the room asks the
       // server, learns the session has ended, and stops instead of reconnecting.
+      // A successful command reply that lacks a clock is not installed: the room says so and reads the match again.
+      await redPage.route(
+        /\/commands$/,
+        async (route) => {
+          const response = await route.fetch()
+          const body = await response.json()
+          delete body.red_remaining_ms
+          await route.fulfill({ response, json: body })
+        },
+        { times: 1 },
+      )
+      await playBoardSquares(redPage, 'h2', 'e2')
+      await expect(redPage.getByTestId('match-error')).toContainText('could not be read')
+      await expect(blkPage.getByTestId('match-moves-card')).toContainText('C2=5')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
+      await expect(redPage.locator('body')).not.toContainText('NaN')
+
       // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
       let releaseSave: () => void = () => {}
       const saveGate = new Promise<void>((resolve) => (releaseSave = resolve))
@@ -737,11 +754,16 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       redPage.on('request', (request) => {
         if (request.method() === 'GET' && /\/api\/v1\/matches\/[^/?]+$/.test(request.url())) readsAfterStop++
       })
-      const delivered = redPage.waitForEvent('requestfinished', { predicate: (r) => r.url().endsWith('/privacy') })
+      // The page's own leave guard holds while the save or its read-back is pending, and lets go once it is handled.
+      const leavingGuarded = () =>
+        redPage.evaluate(() => {
+          const leaving = new Event('beforeunload', { cancelable: true })
+          window.dispatchEvent(leaving)
+          return leaving.defaultPrevented
+        })
+      expect(await leavingGuarded()).toBe(true)
       releaseSave()
-      await delivered
-      // The page has the late reply; its handler runs to completion before the checks below.
-      await redPage.waitForTimeout(1_000)
+      await expect.poll(leavingGuarded).toBe(false)
       expect(readsAfterStop).toBe(0)
       await expect(redPage.getByTestId('privacy-status')).not.toContainText('Open dataset release')
       await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
@@ -792,10 +814,29 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
         },
         { times: 1 },
       )
+      // The probe's answer is held too: no new stream opens until the server has said the session stands.
+      let answer: () => void = () => {}
+      const answerGate = new Promise<void>((resolve) => (answer = resolve))
+      let asked: () => void = () => {}
+      const probed = new Promise<void>((resolve) => (asked = resolve))
+      await page.route(
+        /\/api\/v1\/auth\/session\?reissue=false$/,
+        async (route) => {
+          const response = await route.fetch()
+          asked()
+          await answerGate
+          await route.fulfill({ response })
+        },
+        { times: 1 },
+      )
       await held
       events.length = 0
       await streams[0]!.close()
       release()
+      await probed
+      await page.waitForTimeout(1_000)
+      expect(streams.length).toBe(1)
+      answer()
       await expect.poll(() => streams.length).toBe(2)
       expect(events.indexOf('probe')).toBeGreaterThanOrEqual(0)
       expect(events.indexOf('probe')).toBeLessThan(events.indexOf('stream'))
