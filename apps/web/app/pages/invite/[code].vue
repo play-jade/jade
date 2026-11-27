@@ -193,6 +193,30 @@ async function guestFetch(path: string, init: RequestInit = {}, mutation = false
 }
 
 const ANOTHER_GUEST = 'This browser is now signed in as another guest; reload the room to continue as that guest'
+const SEAT_LOST = 'This room no longer shows your seat; reload the room to continue'
+
+/**
+ * Stops the room at once for a snapshot that does not show this guest's seat, then asks the server, without setting
+ * the cookie again, which it was: the session ended, or the browser now holds another guest.
+ */
+function stopForLostSeat() {
+  stopRoom(SEAT_LOST)
+  const room = guestSession
+  void browserSession.recover({ fresh: true, readOnly: true }).then(
+    (fresh) => {
+      const reason = !fresh
+        ? new SessionEndedError().message
+        : room && fresh.account_id !== room.account_id
+          ? ANOTHER_GUEST
+          : null
+      if (reason && stopReason === SEAT_LOST) {
+        stopReason = reason
+        errorBanner.value = reason
+      }
+    },
+    () => undefined,
+  )
+}
 
 /** The server's own explanation of a refusal, or a plain fallback with the status. */
 async function refusalMessage(resp: Response, fallback: string): Promise<string> {
@@ -307,7 +331,7 @@ function hydrateChoices(snap: MatchSnapshot): boolean {
   if (!assignedSide.value) return false
   const latest = snap.viewer_choices
   if (latest?.side !== assignedSide.value) {
-    stopRoom()
+    stopForLostSeat()
     return false
   }
   if (!wellFormedChoices(latest)) {
@@ -514,28 +538,37 @@ function connectMatchWebSocket(matchId: string) {
   }
 }
 
+/**
+ * Asks the server, without setting the cookie again, whether this browser still holds the room's guest; stops the
+ * room when it does not. True only when the session stands; a network failure answers false without stopping, so the
+ * caller retries later.
+ */
+async function confirmSessionOrStop(): Promise<boolean> {
+  let fresh: BrowserSession | null
+  try {
+    fresh = await browserSession.recover({ fresh: true, readOnly: true })
+  } catch {
+    return false
+  }
+  if (roomStopped.value) return false
+  if (!fresh) {
+    stopRoom(new SessionEndedError().message)
+    return false
+  }
+  if (guestSession && fresh.account_id !== guestSession.account_id) {
+    stopRoom()
+    return false
+  }
+  return true
+}
+
 async function recoverGapAndReconnect(matchId: string) {
   if (isUnmounted || reconnectingInFlight || roomStopped.value) return
   reconnectingInFlight = true
   try {
-    // A dropped stream can mean the session ended, so before reopening it the server is asked afresh, without setting
-    // the cookie again: a confirmed absence stops the room, and a network failure leaves it retrying. A routine poll
-    // with the stream open asks nothing extra.
-    const reopening = !ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)
-    if (reopening) {
-      const fresh = await browserSession.recover({ fresh: true, readOnly: true })
-      if (roomStopped.value) return
-      if (!fresh) {
-        stopRoom(new SessionEndedError().message)
-        return
-      }
-      if (guestSession && fresh.account_id !== guestSession.account_id) {
-        stopRoom()
-        return
-      }
-    }
     const since = snapshot.value?.seq ?? 0
     const resp = await guestFetch(`/api/v1/matches/${matchId}?since_seq=${since}`)
+    if (roomStopped.value) return
     if (resp.ok) {
       const snap = (await resp.json()) as MatchSnapshot
       // A read answered after the room stopped belongs to the guest it no longer holds; it is dropped.
@@ -547,12 +580,21 @@ async function recoverGapAndReconnect(matchId: string) {
         connectionState.value = 'connected'
         return
       }
+    } else if (!(await confirmSessionOrStop())) {
+      // A refused read can mean the browser's session ended or changed; the server says which, and the room stops
+      // rather than keep a stream open for a guest the browser no longer holds.
+      return
     }
-    // Reopen a live WebSocket if none is currently open or connecting; keep `reconnecting` until `onopen` fires!
+    // Reopen a live WebSocket if none is currently open or connecting, deciding now and asking the server first, since
+    // a dropped stream can mean the session ended; keep `reconnecting` until `onopen` fires.
+    const streamDown = () => !ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING)
     if (
       !isUnmounted &&
       snapshot.value?.status !== 'finished' &&
-      (!ws || (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING))
+      streamDown() &&
+      (await confirmSessionOrStop()) &&
+      // Another path may have reopened the stream while the server was asked.
+      streamDown()
     ) {
       connectMatchWebSocket(matchId)
     }
@@ -591,7 +633,8 @@ async function joinAndSubscribe() {
 }
 
 async function sendMatchCommand(payload: Record<string, unknown>) {
-  if (!snapshot.value) return
+  // A stopped room sends nothing, and the reason it stopped stays in view.
+  if (!snapshot.value || roomStopped.value) return
   errorBanner.value = null
   let resp: Response
   try {
@@ -610,6 +653,12 @@ async function sendMatchCommand(payload: Record<string, unknown>) {
   if (roomStopped.value) return
   if (!resp.ok) {
     errorBanner.value = data?.error?.message || `Command rejected (${resp.status})`
+    return
+  }
+  if (typeof data?.match_id !== 'string') {
+    // The command may have been played; the match is read again rather than guessed.
+    errorBanner.value = 'The reply to that move could not be read; showing the match as the server has it.'
+    void recoverGapAndReconnect(snapshot.value?.match_id ?? '')
     return
   }
   snapshot.value = ordered(data as MatchSnapshot)

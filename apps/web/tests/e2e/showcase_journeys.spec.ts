@@ -611,10 +611,35 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
       await redPage.getByTestId('create-invite-btn').click()
       await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      // Black's first snapshots arrive without a privacy revision, as from a server that does not send one.
+      let stripRevision = true
+      const withoutRevision = (text: string) => {
+        const data = JSON.parse(text)
+        if (data.snapshot) delete data.snapshot.privacy_revision
+        delete data.privacy_revision
+        return data
+      }
+      await blkPage.route(
+        /\/api\/v1\/invitations\/[^/]+\/join$/,
+        async (route) => {
+          const response = await route.fetch()
+          await route.fulfill({ response, json: withoutRevision(await response.text()) })
+        },
+        { times: 1 },
+      )
+      await blkPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        const server = stream.connectToServer()
+        server.onMessage((message) =>
+          stream.send(stripRevision && typeof message === 'string' ? JSON.stringify(withoutRevision(message)) : message),
+        )
+      })
       await blkPage.goto(new URL(redPage.url()).pathname)
       await expect(blkPage.getByTestId('match-status-badge')).toContainText('You play black')
       await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
       for (const page of [redPage, blkPage]) await page.getByTestId('privacy-consent-card').locator('summary').click()
+      // Without a revision the effective visibility is not confirmed; the first versioned update confirms it.
+      await expect(blkPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      stripRevision = false
       const saved = (page: typeof redPage) =>
         page.waitForResponse((r) => r.url().endsWith('/privacy') && r.request().method() === 'POST')
 
@@ -647,6 +672,7 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       let save = saved(redPage)
       await redPage.getByTestId('privacy-visibility').selectOption('public')
       expect((await save).status()).toBe(200)
+      await expect(blkPage.getByTestId('privacy-effective')).toContainText('Private')
       await blackChooses('public')
       await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
 
@@ -676,12 +702,37 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
 
       // Red's session ends on the server while the page still holds it; when the stream drops, the room asks the
       // server, learns the session has ended, and stops instead of reconnecting.
+      // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
+      let releaseSave: () => void = () => {}
+      const saveGate = new Promise<void>((resolve) => (releaseSave = resolve))
+      let saveApplied: () => void = () => {}
+      const applied = new Promise<void>((resolve) => (saveApplied = resolve))
+      await redPage.route(
+        /\/privacy$/,
+        async (route) => {
+          const response = await route.fetch()
+          saveApplied()
+          await saveGate
+          await route.fulfill({ response })
+        },
+        { times: 1 },
+      )
+      await redPage.getByLabel('Allow open dataset release').check()
+      await applied
       await expect.poll(() => redStreams.length).toBeGreaterThan(0)
       await redContext.clearCookies()
       const opened = redStreams.length
       await redStreams[opened - 1]!.close()
       await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
+      let readsAfterStop = 0
+      redPage.on('request', (request) => {
+        if (request.method() === 'GET' && /\/api\/v1\/matches\/[^/?]+$/.test(request.url())) readsAfterStop++
+      })
+      releaseSave()
       await redPage.waitForTimeout(2_000)
+      expect(readsAfterStop).toBe(0)
+      await expect(redPage.getByTestId('privacy-status')).not.toContainText('Open dataset release')
+      await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
       expect(redStreams.length).toBe(opened)
       await expect(redPage.getByTestId('privacy-visibility')).toBeDisabled()
     } finally {

@@ -2008,10 +2008,12 @@ async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
         format!("Bearer {}", blk.access_token).parse().unwrap(),
     );
     let mut ws = connect_ws_duplex(&revoking, req).await.unwrap();
-    assert_eq!(
-        next_delivery(&mut ws).await,
-        None,
-        "no snapshot for a session that ended"
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("the server answers within five seconds");
+    assert!(
+        matches!(first, Some(Ok(Message::Close(_)))),
+        "the first frame for a session that ended is a close, not {first:?}"
     );
 }
 
