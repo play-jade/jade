@@ -37,14 +37,18 @@ async function playBoardSquares(page: Page, fromSq: string, toSq: string) {
 }
 
 // Against a deployed origin (PLAYWRIGHT_BASE_URL), every journey's match traffic must stay on that origin: each browser
-// context reports any hop of a request that began at a match endpoint (its path holds /api/v1/, under any base path),
+// context reports any hop of a request that began at a match endpoint (under any base path),
 // wherever it was redirected, and any match stream that leaves it, and the journey fails afterwards. Journeys that
 // intercept match requests and fetch them again themselves (11 to 14) rewrite responses on purpose and are not routing
 // evidence; the journeys that do not intercept are.
 const deployedOrigin = process.env.PLAYWRIGHT_BASE_URL === undefined ? undefined : new URL(process.env.PLAYWRIGHT_BASE_URL)
 const strayMatchTraffic: string[] = []
 let matchRequestsSeen = 0
-const isMatchEndpoint = (url: URL) => url.pathname.includes('/api/v1/')
+let matchStreamsSeen = 0
+// The match server's routes (crates/match-server: auth, invitations, matches, and each match's stream), after any
+// prefix the deployment mounts it under.
+const isMatchEndpoint = (url: URL) => /\/api\/v1\/(auth|invitations|matches)(\/|$)/.test(url.pathname)
+const isMatchStream = (url: URL) => /\/api\/v1\/matches\/[^/]+\/ws$/.test(url.pathname)
 const guardedContexts = new WeakSet<BrowserContext>()
 const guardedBrowsers = new WeakSet<Browser>()
 
@@ -63,7 +67,8 @@ function guardMatchTraffic(context: BrowserContext) {
   const watchSockets = (page: Page) =>
     page.on('websocket', (socket) => {
       const url = new URL(socket.url())
-      if (!isMatchEndpoint(url)) return
+      if (!isMatchStream(url)) return
+      matchStreamsSeen++
       if (url.protocol !== socketScheme || url.host !== origin.host) strayMatchTraffic.push(`socket ${socket.url()}`)
     })
   context.pages().forEach(watchSockets)
@@ -92,9 +97,8 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     test.skip(deployedOrigin === undefined, 'runs only against a deployed origin (PLAYWRIGHT_BASE_URL)')
     const context = await browser.newContext()
     const page = await context.newPage()
-    let sockets = 0
-    page.on('websocket', () => sockets++)
     const requestsBefore = matchRequestsSeen
+    const streamsBefore = matchStreamsSeen
     try {
       // An invitation takes a guest session and a new match over HTTP, and its waiting room opens the match stream;
       // the origin guard checks where each went.
@@ -103,7 +107,7 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
       await page.waitForURL(/\/invite\/[a-z0-9]+/)
       await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
       await expect(page.getByTestId('match-status-badge')).toHaveAttribute('data-connection-state', 'connected')
-      expect(sockets).toBeGreaterThan(0)
+      expect(matchStreamsSeen, 'the origin guard saw the match stream').toBeGreaterThan(streamsBefore)
       expect(matchRequestsSeen, 'the origin guard saw the invitation\'s match requests').toBeGreaterThan(requestsBefore)
     } finally {
       await context.close()
