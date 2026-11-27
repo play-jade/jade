@@ -112,6 +112,7 @@ jobs:
         run: |
           (cd packages/apple && swift run JadeCoreBindingsTests)
           ./dev/run-macos.sh --build-only
+          JADE_REPO_ROOT="$PWD" target/macos-app/Jade.app/Contents/MacOS/JadeMacOS --replay-list-proof
           chmod +x ./dev/build-ios-sim.sh
           ./dev/build-ios-sim.sh
 
