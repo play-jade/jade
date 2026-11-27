@@ -7,16 +7,20 @@ const currentDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(currentDir, '../..')
 const fastTargetDir = existsSync('/tmp/jade-target-core') ? '/tmp/jade-target-core' : undefined
 
+// With PLAYWRIGHT_BASE_URL set, the journeys run against that deployed origin (its match server and web application
+// behind one host) and start no local servers.
+const deployedOrigin = process.env.PLAYWRIGHT_BASE_URL
+
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: false,
   workers: 1,
   timeout: 45_000,
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3180',
+    baseURL: deployedOrigin || 'http://127.0.0.1:3180',
     trace: 'off',
   },
-  webServer: [
+  webServer: deployedOrigin ? [] : [
     {
       command: 'cargo run -p jade-match-server',
       cwd: repoRoot,
