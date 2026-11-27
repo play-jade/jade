@@ -32,9 +32,15 @@ async fn main() {
     let listener = TcpListener::bind(bind_addr)
         .await
         .expect("bind match-server listener");
-    let state = build_app_state(&db_url)
+    let mut state = build_app_state(&db_url)
         .await
         .expect("initialize match-server SQLx state");
+    // A hosted deployment names its own browser origins; local development keeps the local defaults.
+    if let Ok(setting) = std::env::var("JADE_ALLOWED_ORIGINS") {
+        let origins =
+            jade_match_server::parse_allowed_origins(&setting).expect("valid JADE_ALLOWED_ORIGINS");
+        state = state.with_allowed_origins(origins);
+    }
     let app = build_router(state);
 
     tracing::info!("Jade authoritative match server listening on http://{bind_addr}");

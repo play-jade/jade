@@ -2768,3 +2768,38 @@ async fn every_in_memory_spelling_is_one_database_shared_by_the_pool() {
         assert_eq!(seen, 1, "{spelling}");
     }
 }
+
+#[tokio::test]
+async fn a_configured_origin_replaces_the_local_ones() {
+    let test_db = test_db().await;
+    let state = build_app_state(&test_db.url)
+        .await
+        .unwrap()
+        .with_allowed_origins(vec!["https://play.example".to_string()]);
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let stream_from = |origin: &str| {
+        let mut req = format!("ws://play.example/api/v1/matches/{match_id}/ws")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("Origin", origin.parse().unwrap());
+        req.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {}", red.access_token).parse().unwrap(),
+        );
+        req
+    };
+    assert!(
+        connect_ws_duplex(&app, stream_from("https://play.example"))
+            .await
+            .is_ok()
+    );
+    assert!(
+        connect_ws_duplex(&app, stream_from("http://localhost:3180"))
+            .await
+            .is_err(),
+        "the local default is no longer accepted"
+    );
+}

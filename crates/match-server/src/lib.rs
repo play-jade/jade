@@ -638,17 +638,50 @@ pub async fn build_app_state(setting: &str) -> Result<AppState, sqlx::Error> {
         archive: Arc::new(SampleArchiveProvider::new_embedded()),
         matches: Arc::new(RwLock::new(HashMap::new())),
         rematch_lock: Arc::new(tokio::sync::Mutex::new(())),
-        allowed_origins: Arc::new(vec![
-            "http://localhost:3000".to_string(),
-            "http://127.0.0.1:3000".to_string(),
-            "http://localhost:3180".to_string(),
-            "http://127.0.0.1:3180".to_string(),
-            "http://localhost:4180".to_string(),
-            "http://127.0.0.1:4180".to_string(),
-        ]),
+        allowed_origins: Arc::new(LOCAL_ORIGINS.iter().map(|o| o.to_string()).collect()),
         backend,
         _db_owner_lock: owner_lock,
     })
+}
+
+/// The browser origins a match server accepts unless configured otherwise: the local development and test addresses.
+pub const LOCAL_ORIGINS: [&str; 6] = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3180",
+    "http://127.0.0.1:3180",
+    "http://localhost:4180",
+    "http://127.0.0.1:4180",
+];
+
+/// Reads an allowed-origins setting (`JADE_ALLOWED_ORIGINS`): a comma-separated list of exact browser origins, such as
+/// a hosted deployment's own `https://` address, which replaces the local defaults. Each entry must be an origin and
+/// nothing more (an `http` or `https` scheme, a host, and an optional port), so a mistyped entry stops startup rather
+/// than silently refusing every browser.
+pub fn parse_allowed_origins(setting: &str) -> Result<Vec<String>, String> {
+    let mut origins = Vec::new();
+    for entry in setting.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let parsed = url::Url::parse(entry).map_err(|e| format!("{entry:?} is not a URL: {e}"))?;
+        let origin = parsed.origin().ascii_serialization();
+        if !matches!(parsed.scheme(), "http" | "https") || origin != entry {
+            return Err(format!(
+                "{entry:?} is not an exact http or https origin (for example https://play.example)"
+            ));
+        }
+        origins.push(origin);
+    }
+    if origins.is_empty() {
+        return Err("the allowed-origins setting names no origin".to_string());
+    }
+    Ok(origins)
+}
+
+impl AppState {
+    /// The same state, accepting browsers from `origins` instead of the local defaults.
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::new(origins);
+        self
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -3171,6 +3204,30 @@ pub fn server_ready() -> bool {
 
 #[cfg(test)]
 mod session_cookie_tests {
+    #[test]
+    fn an_allowed_origins_setting_names_exact_origins_only() {
+        use super::parse_allowed_origins;
+        assert_eq!(
+            parse_allowed_origins(" https://play.example , http://127.0.0.1:8443").unwrap(),
+            vec![
+                "https://play.example".to_string(),
+                "http://127.0.0.1:8443".to_string()
+            ]
+        );
+        for bad in [
+            "",
+            " , ",
+            "play.example",
+            "https://play.example/",
+            "https://play.example/app",
+            "https://user@play.example",
+            "ftp://play.example",
+            "https://play.example?x=1",
+        ] {
+            assert!(parse_allowed_origins(bad).is_err(), "{bad:?}");
+        }
+    }
+
     #[test]
     fn database_settings_name_their_backend() {
         use super::{Backend, parse_database_url};
