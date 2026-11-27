@@ -201,6 +201,10 @@ export function useReplaySession(options: ReplaySessionOptions) {
     } else {
       cursor.value = variation.value.originPly
       variation.value = null
+      // The stored copy follows: a retained line is stored in its place, and with none the saved variation is removed,
+      // so a reload cannot bring the undone move back.
+      if (parked.value) void persist()
+      else forgetStoredDraft()
     }
   }
 
@@ -227,12 +231,16 @@ export function useReplaySession(options: ReplaySessionOptions) {
     void persist()
   }
 
-  /** Drops the active or retained variation without touching the recorded line. */
   /** Drops the active and retained variation, and the copy this device keeps of it. */
   function discardVariation() {
     edits++
     variation.value = null
     parked.value = null
+    forgetStoredDraft()
+  }
+
+  /** Removes this source's stored variation after any earlier write for it. */
+  function forgetStoredDraft() {
     const source = options.source.value
     if (!persistEnabled() || !source) return
     const write = ++writes
@@ -417,13 +425,24 @@ export function useReplaySession(options: ReplaySessionOptions) {
     return draft ? new Blob([JSON.stringify(draft, null, 2)], { type: 'application/json' }) : null
   }
 
-  // A recorded line that grows (local play extends its game) still holds a kept variation, so its copy is
-  // stored again against the longer record; otherwise the next restore would find a different record.
+  // A recorded line that grows (local play) or shortens (Undo) changes the record a kept variation is checked
+  // against. A line that still starts on the record is stored again against it, so the next restore accepts it; a
+  // line whose origin was taken back has no place to start, so it is removed, with its stored copy, and says so.
   watch(
     () => options.recordedMovesUci.value.length,
     (length, before) => {
       const line = variation.value ?? parked.value
-      if (length > before && line && line.originPly <= before) void persist()
+      if (length === before || !line) return
+      if (line.originPly <= Math.min(length, before)) {
+        void persist()
+        return
+      }
+      edits++
+      variation.value = null
+      parked.value = null
+      if (cursor.value > length) cursor.value = length
+      draftNotice.value = 'The variation started from a move that was taken back, so it was removed.'
+      forgetStoredDraft()
     },
   )
 

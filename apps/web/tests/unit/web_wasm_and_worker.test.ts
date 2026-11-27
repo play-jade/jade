@@ -1163,6 +1163,66 @@ describe('replay session', () => {
     }
   })
 
+  it('removes the saved variation when Undo takes back its only move, so reload does not restore it', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const s = session({ persist: true, ownerScope: ref('guest-1') })
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      expect(storedRows(memory)).toHaveLength(1)
+      s.undoVariationMove()
+      expect(s.variation.value).toBeNull()
+      await vi.waitFor(() => expect(storedRows(memory)).toHaveLength(0), { interval: 1 })
+      const reopened = session({ persist: true, ownerScope: ref('guest-1') })
+      await reopened.restoreDraft()
+      expect(reopened.variation.value).toBeNull()
+      expect(reopened.parked.value).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('stores a kept variation again when Undo shortens the recorded line, so reload still restores it', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const line = ref([...recorded])
+      const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
+      s.selectPly(1)
+      await s.tryMove('b9c7')
+      s.returnToRecordedLine()
+      await vi.waitFor(() => expect(memory.puts).toHaveLength(2), { interval: 1 })
+      line.value = line.value.slice(0, -1)
+      await vi.waitFor(() => expect(memory.puts).toHaveLength(3), { interval: 1 })
+      const reopened = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: ref([...line.value]) })
+      await reopened.restoreDraft()
+      expect(reopened.draftNotice.value).toBeNull()
+      expect(reopened.parked.value?.movesUci).toEqual(['b9c7'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('removes a kept variation, and its saved copy, when Undo takes back the move it started from', async () => {
+    const memory = memoryIndexedDb()
+    vi.stubGlobal('indexedDB', memory)
+    try {
+      const line = ref([...recorded])
+      const s = session({ persist: true, ownerScope: ref('guest-1'), recordedMovesUci: line })
+      s.selectPly(3)
+      expect((await s.tryMove('b9c7')).kind).toBe('variation')
+      s.returnToRecordedLine()
+      await vi.waitFor(() => expect(storedRows(memory)).toHaveLength(1), { interval: 1 })
+      line.value = line.value.slice(0, -1)
+      await vi.waitFor(() => expect(storedRows(memory)).toHaveLength(0), { interval: 1 })
+      expect(s.parked.value).toBeNull()
+      expect(s.draftNotice.value).toContain('taken back')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('keeps an edit made during a restore over the stored line', async () => {
     const memory = memoryIndexedDb()
     vi.stubGlobal('indexedDB', memory)
