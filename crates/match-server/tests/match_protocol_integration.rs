@@ -7,9 +7,9 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
 use jade_match_server::{
-    CoordMovePayload, GuestSessionResponse, InvitationCreatedResponse, JoinInvitationResponse,
-    MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest, build_app_state,
-    build_router,
+    CoordMovePayload, CurrentSessionResponse, GuestSessionResponse, InvitationCreatedResponse,
+    JoinInvitationResponse, MatchCommandRequest, MatchSnapshotResponse, PrivacyUpdateRequest,
+    build_app_state, build_router,
 };
 use tokio::io::DuplexStream;
 use tokio_tungstenite::{
@@ -82,6 +82,46 @@ async fn set_visibility(
     match_id: &str,
     visibility: Visibility,
 ) -> serde_json::Value {
+    json_body(save_choices(app, token, match_id, visibility, [false; 3]).await).await
+}
+
+/// Posts `body` as JSON to `uri` as the bearer of `token` and reads the answer.
+async fn post_json<T: serde::de::DeserializeOwned>(
+    app: &axum::Router,
+    token: &str,
+    uri: String,
+    body: serde_json::Value,
+) -> T {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    json_body(app.clone().oneshot(req).await.unwrap()).await
+}
+
+/// Red invites and Black joins a 10+5 match; returns the match ID.
+async fn start_match(app: &axum::Router, red_token: &str, blk_token: &str) -> String {
+    let terms = serde_json::json!({ "preferred_side": "red", "clock_initial_ms": 600_000, "clock_increment_ms": 5_000 });
+    let invite: InvitationCreatedResponse =
+        post_json(app, red_token, "/api/v1/invitations".to_string(), terms).await;
+    let path = format!("/api/v1/invitations/{}/join", invite.invitation_code);
+    let joined: JoinInvitationResponse =
+        post_json(app, blk_token, path, serde_json::json!({})).await;
+    joined.match_id
+}
+
+/// Saves all four of a participant's choices against their current revision: visibility, then training, research,
+/// and dataset consent.
+async fn save_choices(
+    app: &axum::Router,
+    token: &str,
+    match_id: &str,
+    visibility: Visibility,
+    consents: [bool; 3],
+) -> axum::response::Response {
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/matches/{match_id}/privacy"))
@@ -89,15 +129,31 @@ async fn set_visibility(
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_string(&PrivacyUpdateRequest {
-                visibility,
-                allow_internal_training: false,
-                allow_published_research: false,
-                allow_dataset_release: false,
+                visibility: Some(visibility),
+                allow_internal_training: Some(consents[0]),
+                allow_published_research: Some(consents[1]),
+                allow_dataset_release: Some(consents[2]),
+                expected_revision: Some(current_revision(app, token, match_id).await),
             })
             .unwrap(),
         ))
         .unwrap();
-    json_body(app.clone().oneshot(req).await.unwrap()).await
+    app.clone().oneshot(req).await.unwrap()
+}
+
+/// The caller's own choices revision for a match, read from their snapshot; 0 when they hold no seat.
+async fn current_revision(app: &axum::Router, token: &str, match_id: &str) -> i64 {
+    let req = Request::builder()
+        .uri(format!("/api/v1/matches/{match_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    if !resp.status().is_success() {
+        return 0;
+    }
+    let snap: MatchSnapshotResponse = json_body(resp).await;
+    snap.viewer_choices.map(|c| c.revision).unwrap_or(0)
 }
 
 async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, String) {
@@ -120,6 +176,8 @@ async fn new_guest(app: &axum::Router, name: &str) -> (GuestSessionResponse, Str
         .to_string();
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
+    // The cookie outlives a closed browser for exactly the session's lifetime (7 days).
+    assert!(set_cookie.contains("Max-Age=604800"), "{set_cookie}");
     let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
     let guest: GuestSessionResponse = json_body(resp).await;
     (guest, cookie_pair)
@@ -257,23 +315,16 @@ async fn cookie_csrf_enforcement_and_friendly_invitation_lifecycle() {
 
     // Once both participants opt into `unlisted`, 3rd user joins as Spectator (`assigned_side == None`)!
     for token in [&red_guest.access_token, &blk_guest.access_token] {
-        let share_req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/v1/matches/{}/privacy", created.match_id))
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::to_string(&PrivacyUpdateRequest {
-                    visibility: Visibility::Unlisted,
-                    allow_internal_training: false,
-                    allow_published_research: false,
-                    allow_dataset_release: false,
-                })
-                .unwrap(),
-            ))
-            .unwrap();
         assert_eq!(
-            app.clone().oneshot(share_req).await.unwrap().status(),
+            save_choices(
+                &app,
+                token,
+                &created.match_id,
+                Visibility::Unlisted,
+                [false; 3]
+            )
+            .await
+            .status(),
             StatusCode::OK
         );
     }
@@ -467,45 +518,33 @@ async fn duplicate_idempotency_stale_seq_reconnect_gap_and_dual_privacy_consent(
     );
 
     // Only Red sets `public` + consents -> match MUST stay `private` and ineligible!
-    let red_priv = Request::builder()
-        .method("POST")
-        .uri(format!("/api/v1/matches/{}/privacy", inv.match_id))
-        .header("authorization", format!("Bearer {}", red.access_token))
-        .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::to_string(&PrivacyUpdateRequest {
-                visibility: Visibility::Public,
-                allow_internal_training: true,
-                allow_published_research: true,
-                allow_dataset_release: true,
-            })
-            .unwrap(),
-        ))
-        .unwrap();
-    let red_priv_json: serde_json::Value =
-        json_body(app.clone().oneshot(red_priv).await.unwrap()).await;
+    let red_priv_json: serde_json::Value = json_body(
+        save_choices(
+            &app,
+            &red.access_token,
+            &inv.match_id,
+            Visibility::Public,
+            [true; 3],
+        )
+        .await,
+    )
+    .await;
     assert_eq!(red_priv_json["effective_visibility"], "private");
     assert_eq!(red_priv_json["eligible_for_internal_training"], false);
     assert_eq!(red_priv_json["eligible_for_dataset_release"], false);
 
     // Now Black ALSO opts in -> match becomes `public` and eligible!
-    let blk_priv = Request::builder()
-        .method("POST")
-        .uri(format!("/api/v1/matches/{}/privacy", inv.match_id))
-        .header("authorization", format!("Bearer {}", blk.access_token))
-        .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::to_string(&PrivacyUpdateRequest {
-                visibility: Visibility::Public,
-                allow_internal_training: true,
-                allow_published_research: true,
-                allow_dataset_release: true,
-            })
-            .unwrap(),
-        ))
-        .unwrap();
-    let blk_priv_json: serde_json::Value =
-        json_body(app.clone().oneshot(blk_priv).await.unwrap()).await;
+    let blk_priv_json: serde_json::Value = json_body(
+        save_choices(
+            &app,
+            &blk.access_token,
+            &inv.match_id,
+            Visibility::Public,
+            [true; 3],
+        )
+        .await,
+    )
+    .await;
     assert_eq!(blk_priv_json["effective_visibility"], "public");
     assert_eq!(blk_priv_json["eligible_for_internal_training"], true);
     assert_eq!(blk_priv_json["eligible_for_dataset_release"], true);
@@ -782,10 +821,11 @@ async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_string(&PrivacyUpdateRequest {
-                    visibility: Visibility::Public,
-                    allow_internal_training: true,
-                    allow_published_research: false,
-                    allow_dataset_release: false,
+                    visibility: Some(Visibility::Public),
+                    allow_internal_training: Some(true),
+                    allow_published_research: Some(false),
+                    allow_dataset_release: Some(false),
+                    expected_revision: Some(current_revision(&app, tok, &g2.match_id).await),
                 })
                 .unwrap(),
             ))
@@ -813,10 +853,13 @@ async fn proactive_flag_fall_draw_offer_recovery_and_spectator_ws_revocation() {
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_string(&PrivacyUpdateRequest {
-                visibility: Visibility::Private,
-                allow_internal_training: false,
-                allow_published_research: false,
-                allow_dataset_release: false,
+                visibility: Some(Visibility::Private),
+                allow_internal_training: Some(false),
+                allow_published_research: Some(false),
+                allow_dataset_release: Some(false),
+                expected_revision: Some(
+                    current_revision(&app, &red.access_token, &g2.match_id).await,
+                ),
             })
             .unwrap(),
         ))
@@ -1191,27 +1234,7 @@ async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protect
 
     // Make match `public` so spectators can view it once finished/interrupted
     for tok in [&red.access_token, &blk.access_token] {
-        let _ = app1
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/v1/matches/{}/privacy", inv.match_id))
-                    .header("authorization", format!("Bearer {tok}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::to_string(&PrivacyUpdateRequest {
-                            visibility: Visibility::Public,
-                            allow_internal_training: false,
-                            allow_published_research: false,
-                            allow_dataset_release: false,
-                        })
-                        .unwrap(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let _ = save_choices(&app1, tok, &inv.match_id, Visibility::Public, [false; 3]).await;
     }
 
     // Now drop `app1` and `state1` (simulating process exit) -> restarted server acquires lock & interrupts orphaned timed match!
@@ -1301,4 +1324,904 @@ async fn exclusive_db_ownership_concurrent_rematch_and_spectator_rematch_protect
 
     let _ = std::fs::remove_file(&tmp_db);
     let _ = std::fs::remove_file(format!("{tmp_db}.owner.lock"));
+}
+
+/// Reads a match snapshot as the holder of `cookie` (or anonymously).
+async fn snapshot_as(
+    app: &axum::Router,
+    cookie: Option<&str>,
+    match_id: &str,
+) -> axum::response::Response {
+    let mut req = Request::builder().uri(format!("/api/v1/matches/{match_id}"));
+    if let Some(cookie) = cookie {
+        req = req.header("cookie", cookie);
+    }
+    app.clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn session_as(app: &axum::Router, cookie: Option<&str>) -> axum::response::Response {
+    let mut req = Request::builder().uri("/api/v1/auth/session");
+    if let Some(cookie) = cookie {
+        req = req.header("cookie", cookie);
+    }
+    app.clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn browser_session_recovery_expiry_and_each_participants_saved_choices() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+
+    let (red, red_cookie) = new_guest(&app, "Red Host").await;
+    let (blk, blk_cookie) = new_guest(&app, "Black Joiner").await;
+    let (_spec, spec_cookie) = new_guest(&app, "Spectator").await;
+
+    // 1. A returning tab recovers its own session and CSRF token from the cookie, creating nothing. The answer is
+    //    never cached, and it reissues the cookie with the session's remaining lifetime, not a fresh one.
+    let resp = session_as(&app, Some(&red_cookie)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
+    let reissued = resp
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let max_age: i64 = reissued.split("Max-Age=").nth(1).unwrap().parse().unwrap();
+    assert!(max_age > 0 && max_age <= 604_800, "{reissued}");
+    assert!(
+        reissued.starts_with(&red_cookie),
+        "the same session cookie is reissued: {reissued}"
+    );
+    let recovered: CurrentSessionResponse = json_body(resp).await;
+    assert_eq!(recovered.account_id, red.account_id);
+    assert_eq!(recovered.csrf_token, red.csrf_token);
+    assert_eq!(recovered.display_name, "Red Host");
+    assert!(recovered.expires_at_ms > 0);
+    assert_eq!(
+        session_as(&app, None).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Recovery reads the cookie alone: another guest's bearer token on the same request changes nothing.
+    let mixed = Request::builder()
+        .uri("/api/v1/auth/session")
+        .header("cookie", &red_cookie)
+        .header("authorization", format!("Bearer {}", blk.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let mixed: CurrentSessionResponse = json_body(app.clone().oneshot(mixed).await.unwrap()).await;
+    assert_eq!(mixed.account_id, red.account_id);
+    assert_eq!(mixed.csrf_token, red.csrf_token);
+
+    // 2. A match between the two guests; each saves different choices.
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    assert_eq!(
+        save_choices(
+            &app,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [true, false, true]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    // 3. Each participant sees their own saved choices; the effective visibility still needs both. A snapshot is
+    //    personal, so it is never cached.
+    let red_resp = snapshot_as(&app, Some(&red_cookie), &match_id).await;
+    assert_eq!(red_resp.headers().get("cache-control").unwrap(), "no-store");
+    let red_view: MatchSnapshotResponse = json_body(red_resp).await;
+    let red_choices = red_view.viewer_choices.expect("red's own choices");
+    assert_eq!(red_choices.visibility, Visibility::Public);
+    assert!(red_choices.allow_internal_training && !red_choices.allow_published_research);
+    assert!(red_choices.allow_dataset_release);
+    assert_eq!(red_view.visibility, Visibility::Private);
+    let blk_view: MatchSnapshotResponse =
+        json_body(snapshot_as(&app, Some(&blk_cookie), &match_id).await).await;
+    let blk_choices = blk_view.viewer_choices.expect("black's own choices");
+    assert_eq!(blk_choices.visibility, Visibility::Private);
+    assert!(!blk_choices.allow_internal_training);
+
+    // A move's reply is the mover's own view, with their choices.
+    let move1 = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "cmd_choices_1".to_string(),
+        expected_seq: red_view.seq,
+        mv: CoordMovePayload {
+            from: [7, 2],
+            to: [4, 2],
+        },
+    };
+    let moved = post_command(&app, &red.access_token, &match_id, &move1).await;
+    assert_eq!(moved.status(), StatusCode::OK);
+    let moved: MatchSnapshotResponse = json_body(moved).await;
+    assert_eq!(
+        moved
+            .viewer_choices
+            .expect("the mover's choices")
+            .visibility,
+        Visibility::Public
+    );
+
+    // 4. Once both choose public, a spectator may read it but sees no participant's choices.
+    set_visibility(&app, &blk.access_token, &match_id, Visibility::Public).await;
+    let spec_resp = snapshot_as(&app, Some(&spec_cookie), &match_id).await;
+    assert_eq!(spec_resp.status(), StatusCode::OK);
+    let spec_view: MatchSnapshotResponse = json_body(spec_resp).await;
+    assert_eq!(spec_view.visibility, Visibility::Public);
+    assert!(spec_view.viewer_choices.is_none());
+
+    // A save names only what changed: withdrawing one consent keeps the others and the visibility as saved, so a
+    // save from another tab that changed something else cannot bring a withdrawn consent back.
+    let privacy_post = |body: serde_json::Value| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/matches/{match_id}/privacy"))
+            .header("authorization", format!("Bearer {}", red.access_token))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let revision = current_revision(&app, &red.access_token, &match_id).await;
+    let withdraw = app
+        .clone()
+        .oneshot(privacy_post(
+            serde_json::json!({ "allow_internal_training": false, "expected_revision": revision }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(withdraw.status(), StatusCode::OK);
+
+    // A patch with a misspelled field or an explicit null is refused whole, even beside a valid change, and so is
+    // a JSON array (which would assign choices by position) or an object naming no choice.
+    let revision = current_revision(&app, &red.access_token, &match_id).await;
+    for body in [
+        serde_json::json!({ "allow_dataset_release": false, "allow_dataset_releases": false, "expected_revision": revision }),
+        serde_json::json!({ "allow_dataset_release": false, "allow_published_research": null, "expected_revision": revision }),
+        serde_json::json!(["private", false, false, false, revision]),
+    ] {
+        let refused = app
+            .clone()
+            .oneshot(privacy_post(body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{body}");
+        let refused: serde_json::Value = json_body(refused).await;
+        assert_eq!(refused["error"]["code"], "invalid_privacy_update", "{body}");
+    }
+    // A valid object sent with another media type is refused too.
+    let wrong_type = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{match_id}/privacy"))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "text/plain")
+        .body(Body::from(
+            serde_json::json!({ "allow_dataset_release": false, "expected_revision": revision })
+                .to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(wrong_type).await.unwrap().status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    let revision = current_revision(&app, &red.access_token, &match_id).await;
+    let empty = app
+        .clone()
+        .oneshot(privacy_post(
+            serde_json::json!({ "expected_revision": revision }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+    let empty: serde_json::Value = json_body(empty).await;
+    assert_eq!(empty["error"]["code"], "no_choice_named");
+
+    // A save without a revision is refused, so a page from before revisions existed cannot write unordered.
+    let unordered = app
+        .clone()
+        .oneshot(privacy_post(
+            serde_json::json!({ "allow_dataset_release": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unordered.status(), StatusCode::PRECONDITION_REQUIRED);
+
+    // A choice named twice is ambiguous and refused; a JSON value cannot hold the duplicate, so the body is raw.
+    let duplicate = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/matches/{match_id}/privacy"))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"allow_dataset_release": true, "allow_dataset_release": false, "expected_revision": {revision}}}"#
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(duplicate).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    let unchanged: MatchSnapshotResponse =
+        json_body(snapshot_as(&app, Some(&red_cookie), &match_id).await).await;
+    let unchanged = unchanged.viewer_choices.expect("red's own choices");
+    assert!(
+        unchanged.allow_dataset_release,
+        "a refused patch applies nothing"
+    );
+
+    // A save naming an older revision is refused, so a delayed save cannot overwrite a newer one.
+    let current = unchanged.revision;
+    let stale = app
+        .clone()
+        .oneshot(privacy_post(
+            serde_json::json!({ "allow_dataset_release": false, "expected_revision": current - 1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale: serde_json::Value = json_body(stale).await;
+    assert_eq!(stale["error"]["code"], "stale_choices");
+    let kept: MatchSnapshotResponse =
+        json_body(snapshot_as(&app, Some(&red_cookie), &match_id).await).await;
+    let kept = kept.viewer_choices.expect("red's own choices");
+    assert!(
+        kept.allow_dataset_release,
+        "a refused stale save changes nothing"
+    );
+    assert_eq!(kept.revision, current);
+    let fresh = app
+        .clone()
+        .oneshot(privacy_post(
+            serde_json::json!({ "allow_dataset_release": false, "expected_revision": current }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::OK);
+    let fresh: serde_json::Value = json_body(fresh).await;
+    assert_eq!(fresh["choices_revision"], current + 1);
+    let restore = app
+        .clone()
+        .oneshot(privacy_post(
+            serde_json::json!({ "allow_dataset_release": true, "expected_revision": current + 1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(restore.status(), StatusCode::OK);
+    let after: MatchSnapshotResponse =
+        json_body(snapshot_as(&app, Some(&red_cookie), &match_id).await).await;
+    let after = after.viewer_choices.expect("red's own choices");
+    assert!(!after.allow_internal_training);
+    assert!(after.allow_dataset_release);
+    assert_eq!(after.visibility, Visibility::Public);
+
+    // 5. Revocation by either participant removes the spectator's access again.
+    set_visibility(&app, &blk.access_token, &match_id, Visibility::Private).await;
+    assert_eq!(
+        snapshot_as(&app, Some(&spec_cookie), &match_id)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+
+    // 6. A revoked cookie session recovers nothing.
+    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE account_id = ?")
+        .bind(&blk.account_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_as(&app, Some(&blk_cookie)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A partly elapsed session's cookie is reissued with what remains, and the server's expiry is not extended.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let soon = now_ms + 90_000;
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = ? WHERE account_id = ?")
+        .bind(soon)
+        .bind(&red.account_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let partial = session_as(&app, Some(&red_cookie)).await;
+    let reissued = partial
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let max_age: i64 = reissued.split("Max-Age=").nth(1).unwrap().parse().unwrap();
+    assert!((1..=90).contains(&max_age), "{reissued}");
+    let partial: CurrentSessionResponse = json_body(partial).await;
+    assert_eq!(partial.expires_at_ms, soon);
+
+    // 7. An expired session recovers nothing and no longer reads the private replay.
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE account_id = ?")
+        .bind(&red.account_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        session_as(&app, Some(&red_cookie)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        snapshot_as(&app, Some(&red_cookie), &match_id)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn an_existing_database_gains_the_choice_revisions_at_startup() {
+    // A database created by the schema before the revisions existed: the same tables, without the two columns.
+    let dir = std::env::temp_dir().join(format!("jade-upgrade-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.sqlite3");
+    let _ = std::fs::remove_file(&path);
+    let old_schema = include_str!("../../../db/game/0001_initial_game_schema.sql")
+        .lines()
+        .filter(|line| {
+            !line.contains("_choices_revision")
+                && !line.contains("advance a revision")
+                && !line.contains("state_version")
+                && !line.contains("Advances with every change to the match")
+                && !line.contains("turn_generation")
+                && !line.contains("Advances only when a new turn begins")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    {
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&old_schema).execute(&pool).await.unwrap();
+        let before: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('matches')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(!before.iter().any(|c| c.ends_with("_choices_revision")));
+        pool.close().await;
+    }
+    let state = build_app_state(&format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    let after: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('matches')")
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+    assert!(after.iter().any(|c| c == "red_choices_revision"));
+    assert!(after.iter().any(|c| c == "black_choices_revision"));
+    assert!(after.iter().any(|c| c == "state_version"));
+    assert!(after.iter().any(|c| c == "turn_generation"));
+    drop(state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn concurrent_saves_of_one_revision_apply_once() {
+    // A file-backed database, so the two saves run on separate connections and compete for the write lock.
+    let dir = std::env::temp_dir().join(format!("jade-concurrent-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("game.sqlite3");
+    let _ = std::fs::remove_file(&path);
+    let state = build_app_state(&format!("sqlite://{}?mode=rwc", path.display()))
+        .await
+        .unwrap();
+    let app = build_router(state);
+    let (red, _red_cookie) = new_guest(&app, "Red").await;
+    let (blk, _blk_cookie) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let revision = current_revision(&app, &red.access_token, &match_id).await;
+    let save = |consent: bool| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/matches/{match_id}/privacy"))
+            .header("authorization", format!("Bearer {}", red.access_token))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "allow_dataset_release": consent, "expected_revision": revision }).to_string(),
+            ))
+            .unwrap()
+    };
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(save(true)),
+        app.clone().oneshot(save(false))
+    );
+    let mut statuses = [first.unwrap().status(), second.unwrap().status()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "one applies, the other is stale, none errors"
+    );
+    assert_eq!(
+        current_revision(&app, &red.access_token, &match_id).await,
+        revision + 1
+    );
+    drop(app);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_state_version_advances_with_every_change_by_either_participant() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let joined = snapshot_for(&app, &red.access_token, &match_id)
+        .await
+        .state_version;
+    assert!(joined > 0, "a seat joining is a change");
+
+    // Red's save advances Red's own revision and the match's version; the reply carries the version it wrote.
+    let saved: serde_json::Value = json_body(
+        save_choices(
+            &app,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(saved["choices_revision"], 1);
+    let after_red = saved["state_version"].as_i64().unwrap();
+    assert!(after_red > joined);
+    assert_eq!(
+        snapshot_for(&app, &red.access_token, &match_id)
+            .await
+            .state_version,
+        after_red
+    );
+
+    // Black's save changes the effective visibility without touching Red's revision; Red's next snapshot still
+    // carries a newer version, so a client can order it after the earlier one.
+    save_choices(
+        &app,
+        &blk.access_token,
+        &match_id,
+        Visibility::Public,
+        [false; 3],
+    )
+    .await;
+    let red_view = snapshot_for(&app, &red.access_token, &match_id).await;
+    assert_eq!(red_view.visibility, Visibility::Public);
+    assert!(red_view.state_version > after_red);
+    assert_eq!(red_view.viewer_choices.unwrap().revision, 1);
+
+    // Black withdraws: the match is private again, at a newer version than the public snapshot.
+    let public_version = red_view.state_version;
+    save_choices(
+        &app,
+        &blk.access_token,
+        &match_id,
+        Visibility::Private,
+        [false; 3],
+    )
+    .await;
+    let red_view = snapshot_for(&app, &red.access_token, &match_id).await;
+    assert_eq!(red_view.visibility, Visibility::Private);
+    assert!(red_view.state_version > public_version);
+    assert_eq!(red_view.viewer_choices.unwrap().revision, 1);
+
+    // A move is a change too.
+    let before_move = red_view.state_version;
+    let mv = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "v1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    assert_eq!(
+        post_command(&app, &red.access_token, &match_id, &mv)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        snapshot_for(&app, &red.access_token, &match_id)
+            .await
+            .state_version
+            > before_move
+    );
+}
+
+/// Opens the match's live stream as the bearer of `token` and reads its first snapshot.
+async fn open_stream(
+    app: &axum::Router,
+    token: &str,
+    match_id: &str,
+) -> WebSocketStream<DuplexStream> {
+    let mut req = format!("ws://localhost:3180/api/v1/matches/{match_id}/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let mut ws = connect_ws_duplex(app, req).await.unwrap();
+    let first = ws.next().await.unwrap().unwrap();
+    assert!(first.is_text(), "the stream opens with a snapshot");
+    ws
+}
+
+/// What a live stream delivers next: a snapshot's sequence number, or `None` once the server closes or ends the
+/// stream. Ping and pong frames are passed over; any other frame fails the test.
+async fn next_delivery(ws: &mut WebSocketStream<DuplexStream>) -> Option<u64> {
+    // One deadline for the whole wait, so control frames cannot extend it.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let snap: MatchSnapshotResponse = serde_json::from_str(&text).unwrap();
+                    return Some(snap.seq);
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                Some(Ok(other)) => panic!("unexpected frame on a match stream: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the server answers within five seconds")
+}
+
+#[tokio::test]
+async fn an_open_stream_ends_with_its_session() {
+    use sha2::Digest;
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let hash = |token: &str| hex::encode(sha2::Sha256::digest(token.as_bytes()));
+    let mv = |match_id: &str, command_id: &str, seq: u64, from: [u8; 2], to: [u8; 2]| {
+        MatchCommandRequest::Move {
+            protocol: 1,
+            match_id: match_id.to_string(),
+            command_id: command_id.to_string(),
+            expected_seq: seq,
+            mv: CoordMovePayload { from, to },
+        }
+    };
+
+    // 1. Red's session expires while Red's stream is open: Black's move reaches Black's stream, never Red's.
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let mut red_ws = open_stream(&app, &red.access_token, &match_id).await;
+    let mut blk_ws = open_stream(&app, &blk.access_token, &match_id).await;
+    assert_eq!(
+        post_command(
+            &app,
+            &red.access_token,
+            &match_id,
+            &mv(&match_id, "r1", 0, [7, 0], [6, 2])
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(next_delivery(&mut red_ws).await, Some(1));
+    assert_eq!(next_delivery(&mut blk_ws).await, Some(1));
+    sqlx::query("UPDATE auth_sessions SET expires_at_ms = 0 WHERE session_id_hash = $1")
+        .bind(hash(&red.access_token))
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        post_command(
+            &app,
+            &blk.access_token,
+            &match_id,
+            &mv(&match_id, "b1", 1, [7, 9], [6, 7])
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(next_delivery(&mut blk_ws).await, Some(2));
+    assert_eq!(
+        next_delivery(&mut red_ws).await,
+        None,
+        "an expired session receives no further state"
+    );
+
+    // 2. Black's session is revoked while Black's stream is open: a command on it is not acted on for Black.
+    let (red2, _) = new_guest(&app, "Red 2").await;
+    let (blk2, _) = new_guest(&app, "Black 2").await;
+    let match_id = start_match(&app, &red2.access_token, &blk2.access_token).await;
+    let mut blk_ws = open_stream(&app, &blk2.access_token, &match_id).await;
+    assert_eq!(
+        post_command(
+            &app,
+            &red2.access_token,
+            &match_id,
+            &mv(&match_id, "r1", 0, [7, 0], [6, 2])
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(next_delivery(&mut blk_ws).await, Some(1));
+    sqlx::query("UPDATE auth_sessions SET revoked_at_ms = 1 WHERE session_id_hash = $1")
+        .bind(hash(&blk2.access_token))
+        .execute(&db)
+        .await
+        .unwrap();
+    blk_ws
+        .send(Message::Text(
+            serde_json::to_string(&mv(&match_id, "b1", 1, [7, 9], [6, 7]))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_delivery(&mut blk_ws).await,
+        None,
+        "a revoked session's stream ends"
+    );
+    let after = snapshot_for(&app, &red2.access_token, &match_id).await;
+    assert_eq!(after.seq, 1, "the revoked session's move was not played");
+}
+
+/// The match snapshot as the bearer of `token` sees it.
+async fn snapshot_for(app: &axum::Router, token: &str, match_id: &str) -> MatchSnapshotResponse {
+    let req = Request::builder()
+        .uri(format!("/api/v1/matches/{match_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    json_body(app.clone().oneshot(req).await.unwrap()).await
+}
+
+#[tokio::test]
+async fn a_session_that_ends_during_the_upgrade_gets_no_opening_snapshot() {
+    use sha2::Digest;
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state.clone());
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    // The session is revoked after the upgrade is accepted and before the 101 reaches the client, so the stream's
+    // handler starts with a session that has already ended.
+    let blk_hash = hex::encode(sha2::Sha256::digest(blk.access_token.as_bytes()));
+    let revoking = build_router(state).layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let db = db.clone();
+            let hash = blk_hash.clone();
+            async move {
+                let resp = next.run(req).await;
+                if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+                    sqlx::query(
+                        "UPDATE auth_sessions SET revoked_at_ms = 1 WHERE session_id_hash = $1",
+                    )
+                    .bind(hash)
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                }
+                resp
+            }
+        },
+    ));
+    let mut req = format!("ws://localhost:3180/api/v1/matches/{match_id}/ws")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", blk.access_token).parse().unwrap(),
+    );
+    let mut ws = connect_ws_duplex(&revoking, req).await.unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("the server answers within five seconds");
+    assert!(
+        matches!(first, Some(Ok(Message::Close(_)))),
+        "the first frame for a session that ended is a close, not {first:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_read_only_session_check_sets_no_cookie() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let app = build_router(state);
+    let (_guest, cookie) = new_guest(&app, "Guest").await;
+    let check = |query: &'static str| {
+        Request::builder()
+            .uri(format!("/api/v1/auth/session{query}"))
+            .header("cookie", cookie.clone())
+            .body(Body::empty())
+            .unwrap()
+    };
+    let reissued = app.clone().oneshot(check("")).await.unwrap();
+    assert_eq!(reissued.status(), StatusCode::OK);
+    assert!(reissued.headers().contains_key("set-cookie"));
+    let read_only = app.clone().oneshot(check("?reissue=false")).await.unwrap();
+    assert_eq!(read_only.status(), StatusCode::OK);
+    assert!(!read_only.headers().contains_key("set-cookie"));
+}
+
+#[tokio::test]
+async fn a_snapshot_lists_events_only_up_to_its_own_sequence() {
+    let state = build_app_state("sqlite::memory:").await.unwrap();
+    let db = state.db.clone();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let mv = MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: "r1".to_string(),
+        expected_seq: 0,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+    assert_eq!(
+        post_command(&app, &red.access_token, &match_id, &mv)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // An event past the row's sequence, as a commit landing between a snapshot's read of the row and of its events
+    // would leave it.
+    sqlx::query(
+        "INSERT INTO match_events (match_id, seq, command_id, actor_side, event_type, payload_json, created_at_ms)
+         SELECT match_id, seq + 1, 'planted', actor_side, event_type, payload_json, created_at_ms
+         FROM match_events WHERE match_id = ? AND seq = 1",
+    )
+    .bind(&match_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let req = Request::builder()
+        .uri(format!("/api/v1/matches/{match_id}?since_seq=0"))
+        .header("authorization", format!("Bearer {}", red.access_token))
+        .body(Body::empty())
+        .unwrap();
+    let snap: MatchSnapshotResponse = json_body(app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(snap.seq, 1);
+    assert_eq!(
+        snap.moves_uci,
+        vec!["h0g2"],
+        "the move list stops at the row's sequence"
+    );
+    assert!(
+        snap.missing_events.iter().all(|e| e.seq <= 1),
+        "so do the missing events"
+    );
+}
+
+#[tokio::test]
+async fn the_turn_generation_advances_only_when_a_new_turn_begins_and_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!("jade-turns-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("game.sqlite3");
+    let _ = std::fs::remove_file(&path);
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let state = build_app_state(&url).await.unwrap();
+    let app = build_router(state);
+    let (red, _) = new_guest(&app, "Red").await;
+    let (blk, _) = new_guest(&app, "Black").await;
+    let match_id = start_match(&app, &red.access_token, &blk.access_token).await;
+    let generation = |snap: &MatchSnapshotResponse| snap.turn_generation;
+    let view = |app: axum::Router| {
+        let token = red.access_token.clone();
+        let id = match_id.clone();
+        async move { snapshot_for(&app, &token, &id).await }
+    };
+    assert_eq!(
+        generation(&view(app.clone()).await),
+        1,
+        "play starting is the first turn"
+    );
+    let command = |cmd: MatchCommandRequest, token: String| {
+        let app = app.clone();
+        let id = match_id.clone();
+        async move {
+            assert_eq!(
+                post_command(&app, &token, &id, &cmd).await.status(),
+                StatusCode::OK
+            )
+        }
+    };
+    let mv = |command_id: &str, seq: u64| MatchCommandRequest::Move {
+        protocol: 1,
+        match_id: match_id.clone(),
+        command_id: command_id.to_string(),
+        expected_seq: seq,
+        mv: CoordMovePayload {
+            from: [7, 0],
+            to: [6, 2],
+        },
+    };
+
+    // A move starts Black's turn.
+    command(mv("r1", 0), red.access_token.clone()).await;
+    let after_move = view(app.clone()).await;
+    assert_eq!(generation(&after_move), 2);
+
+    // A privacy save and a takeback request each change the match but not the turn.
+    assert_eq!(
+        save_choices(
+            &app,
+            &red.access_token,
+            &match_id,
+            Visibility::Public,
+            [false; 3]
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let saved = view(app.clone()).await;
+    assert!(saved.state_version > after_move.state_version);
+    assert_eq!(generation(&saved), 2);
+    command(
+        MatchCommandRequest::RequestTakeback {
+            protocol: 1,
+            match_id: match_id.clone(),
+            command_id: "tb1".to_string(),
+            expected_seq: 1,
+        },
+        red.access_token.clone(),
+    )
+    .await;
+    let requested = view(app.clone()).await;
+    assert!(requested.state_version > saved.state_version);
+    assert_eq!(generation(&requested), 2);
+
+    // The accepted takeback returns the turn to Red, and the same move played again starts Black's turn anew: the
+    // snapshot has the side to move and move count it had before, and a later turn generation.
+    command(
+        MatchCommandRequest::AcceptTakeback {
+            protocol: 1,
+            match_id: match_id.clone(),
+            command_id: "tb1-accept".to_string(),
+            expected_seq: 2,
+        },
+        blk.access_token.clone(),
+    )
+    .await;
+    assert_eq!(generation(&view(app.clone()).await), 3);
+    command(mv("r1-again", 3), red.access_token.clone()).await;
+    let replayed = view(app.clone()).await;
+    assert_eq!(replayed.side_to_move, after_move.side_to_move);
+    assert_eq!(replayed.moves_uci, after_move.moves_uci);
+    assert_eq!(generation(&replayed), 4);
+
+    // The generation is stored with the match, so a restarted server reports the same turn.
+    drop(app);
+    let restarted = build_router(build_app_state(&url).await.unwrap());
+    let after_restart = snapshot_for(&restarted, &red.access_token, &match_id).await;
+    assert_eq!(generation(&after_restart), 4);
+    drop(restarted);
+    let _ = std::fs::remove_dir_all(&dir);
 }

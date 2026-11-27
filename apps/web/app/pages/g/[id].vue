@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { parsePlyQuery } from '~/composables/useReplaySession'
 import { computeBoardView } from '~/utils/core-wasm'
 import { capturedFaces, pairMoves, plateOrder, sideName } from '~/utils/side-plates'
+import { matchServerBase, useBrowserSession } from '~/composables/useBrowserSession'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -44,6 +45,14 @@ const redBelow = ref(true)
 const selectedUci = ref<string | null>(null)
 // The guest who owns this private match's local variation; set from the browser session on mount.
 const ownerScope = ref<string | null>(null)
+/** Why this replay keeps no variation, when it keeps none: no session, an ended one, or one that could not be checked. */
+const noSessionReason = ref<string | null>('This browser has no current guest session, so the variation is not kept on this device')
+/** False once the recovered session's expiry passes: later variations are then reported as not kept. */
+const sessionLive = ref(false)
+let sessionEnd: ReturnType<typeof setTimeout> | null = null
+onBeforeUnmount(() => {
+  if (sessionEnd) clearTimeout(sessionEnd)
+})
 
 const session = useReplaySession({
   source: computed(() =>
@@ -55,10 +64,8 @@ const session = useReplaySession({
   ownerScope,
   traditionalGlyphs,
   // A private match's variation is kept only for a known guest; otherwise it stays in this tab.
-  persist: computed(() => ownerScope.value !== null),
-  unpersistedReason: computed(() =>
-    ownerScope.value === null ? 'This tab does not know your guest identity, so the variation is not kept' : null,
-  ),
+  persist: computed(() => ownerScope.value !== null && sessionLive.value),
+  unpersistedReason: computed(() => (ownerScope.value !== null && sessionLive.value ? null : noSessionReason.value)),
 })
 const { cursor: cursorPly, variation, activePath: activeMovesUci } = session
 
@@ -85,18 +92,25 @@ const { data: boardData, refresh: refreshBoard } = await useAsyncData(
 
 onMounted(async () => {
   try {
-    let tokenHeader: Record<string, string> = {}
-    const raw = sessionStorage.getItem('jade_guest_session')
-    if (raw) {
-      const sess = JSON.parse(raw)
-      if (sess?.access_token) {
-        tokenHeader = { authorization: `Bearer ${sess.access_token}` }
-      }
-      ownerScope.value = typeof sess?.account_id === 'string' && sess.account_id.trim() !== '' ? sess.account_id : null
+    // The guest this browser's cookie names, checked afresh and never created: a replay makes no new guest. A check
+    // that fails keeps no variation, rather than claiming a save for a guest it could not confirm.
+    const current = await useBrowserSession()
+      .recover({ fresh: true })
+      .catch(() => {
+        noSessionReason.value = 'The match server could not confirm your guest session, so the variation is not kept'
+        return null
+      })
+    ownerScope.value = current?.account_id ?? null
+    if (current) {
+      sessionLive.value = true
+      // Saving stops when the session ends; the line on screen stays, and later variations say they were not kept.
+      sessionEnd = setTimeout(() => {
+        noSessionReason.value = 'Your guest session has ended, so the variation is no longer kept on this device'
+        sessionLive.value = false
+      }, Math.max(0, current.expires_at_ms - Date.now()))
     }
-    const resp = await fetch(`${config.public.matchServerUrl}/api/v1/matches/${matchId.value}`, {
+    const resp = await fetch(`${matchServerBase()}/api/v1/matches/${matchId.value}`, {
       credentials: 'include',
-      headers: tokenHeader,
     })
     if (resp.status === 403 || resp.status === 401) {
       accessDenied.value = true
@@ -161,20 +175,9 @@ async function exportVariation() {
 
 async function exportMatchPgn() {
   if (!snapshot.value || typeof window === 'undefined') return
-  let tokenHeader: Record<string, string> = {}
-  const raw = sessionStorage.getItem('jade_guest_session')
-  if (raw) {
-    const sess = JSON.parse(raw)
-    if (sess?.access_token) {
-      tokenHeader = { authorization: `Bearer ${sess.access_token}` }
-    }
-  }
   const resp = await fetch(
-    `${config.public.matchServerUrl}/api/v1/matches/${snapshot.value.match_id}/export.pgn`,
-    {
-      credentials: 'include',
-      headers: tokenHeader,
-    },
+    `${matchServerBase()}/api/v1/matches/${snapshot.value.match_id}/export.pgn`,
+    { credentials: 'include' },
   )
   if (!resp.ok) return
   const pgnText = await resp.text()

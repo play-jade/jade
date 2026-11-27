@@ -5,6 +5,7 @@ import { percussionPlayer } from '~/utils/audio'
 import { useArchiveProvider } from '~/utils/archive-provider'
 import { latestArchiveDraft, loadOfflineGame, saveOfflineGame } from '~/utils/offline-store'
 import { capturedFaces, plateOrder, sideName, type Side } from '~/utils/side-plates'
+import { matchServerBase, useBrowserSession } from '~/composables/useBrowserSession'
 
 const STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 
@@ -235,36 +236,19 @@ async function exportVariation() {
   URL.revokeObjectURL(url)
 }
 
+const browserSession = useBrowserSession()
+
 async function createFriendlyInvitation() {
   creatingInvite.value = true
   inviteError.value = null
   try {
-    const base = config.public.matchServerUrl
-    let session = null
-    if (typeof sessionStorage !== 'undefined') {
-      const raw = sessionStorage.getItem('jade_guest_session')
-      if (raw) session = JSON.parse(raw)
-    }
-    if (!session) {
-      const guestResp = await fetch(`${base}/api/v1/auth/guest`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ display_name: 'Jade Guest', transport: 'web_cookie' }),
-      })
-      if (!guestResp.ok) throw new Error(`Guest session failed (${guestResp.status})`)
-      session = await guestResp.json()
-      sessionStorage?.setItem('jade_guest_session', JSON.stringify(session))
-    }
-
+    const base = matchServerBase()
+    // The browser's own guest, recovered from its cookie, or a new one when it has none.
+    const session = await browserSession.ensure('Jade Guest')
     const invResp = await fetch(`${base}/api/v1/invitations`, {
       method: 'POST',
       credentials: 'include',
-      headers: {
-        'content-type': 'application/json',
-        'authorization': `Bearer ${session.access_token}`,
-        'x-csrf-token': session.csrf_token,
-      },
+      headers: browserSession.mutationHeaders(session),
       body: JSON.stringify({
         preferred_side: preferredSide.value === 'random' ? undefined : preferredSide.value,
         preferred_side_mode: preferredSide.value,

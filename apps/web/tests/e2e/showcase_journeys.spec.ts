@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type { Page } from '@playwright/test'
+import type { Page, WebSocketRoute } from '@playwright/test'
 import { expect, test } from '@playwright/test'
 
 const VISUAL_REF_DIR = resolve(process.cwd(), '../../docs/visual-reference')
@@ -519,6 +519,572 @@ test.describe('Jade Slice A Web Showcase Journeys', () => {
     await expect(page).toHaveURL(/q=Chiu/)
     await expect(page.getByTestId('player-search-input')).toHaveValue('Chiu')
     await expect(page.getByTestId('player-list').locator('li')).toHaveCount(1)
+  })
+
+  test('10. Guest return: a new tab, a reopened browser, and saved choices keep the participant', async ({ browser }) => {
+    const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const contexts = [redContext, blkContext]
+    try {
+      const redPage = await redContext.newPage()
+      const blkPage = await blkContext.newPage()
+      await redPage.goto('/')
+      await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await redPage.getByTestId('create-invite-btn').click()
+      await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      const room = new URL(redPage.url()).pathname
+      await blkPage.goto(room)
+      await expect(blkPage.getByTestId('match-status-badge')).toContainText('You play black')
+      await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
+
+      // A second tab of the same browser is the same guest, in the same seat.
+      const tab = await redContext.newPage()
+      await tab.goto(room)
+      await expect(tab.getByTestId('match-status-badge')).toContainText('You play red')
+
+      // The participant's saved choices come back after a reload; the match stays private until both choose.
+      // Each choice saves as soon as it changes; the test waits for each save's own request.
+      const saved = (page: typeof tab) =>
+        page.waitForResponse((r) => r.url().endsWith('/privacy') && r.request().method() === 'POST')
+      await tab.getByTestId('privacy-consent-card').locator('summary').click()
+      let save = saved(tab)
+      await tab.getByTestId('privacy-visibility').selectOption('public')
+      expect((await save).status()).toBe(200)
+      save = saved(tab)
+      await tab.getByLabel('Allow internal model training').check()
+      expect((await save).status()).toBe(200)
+      await expect(tab.getByTestId('privacy-effective')).toContainText('Private')
+      await tab.reload()
+      await expect(tab.getByTestId('match-status-badge')).toContainText('You play red')
+      await tab.getByTestId('privacy-consent-card').locator('summary').click()
+      await expect(tab.getByTestId('privacy-visibility')).toHaveValue('public')
+      await expect(tab.getByLabel('Allow internal model training')).toBeChecked()
+      await expect(tab.getByLabel('Allow open dataset release')).not.toBeChecked()
+
+      // A withdrawal is saved by itself too, and stays withdrawn after a reload.
+      save = saved(tab)
+      await tab.getByLabel('Allow internal model training').uncheck()
+      expect((await save).status()).toBe(200)
+      await tab.reload()
+      await tab.getByTestId('privacy-consent-card').locator('summary').click()
+      await expect(tab.getByLabel('Allow internal model training')).not.toBeChecked()
+      await expect(tab.getByTestId('privacy-visibility')).toHaveValue('public')
+
+      // Closing the browser and opening it again keeps the guest while its session lasts.
+      const kept = await redContext.storageState()
+      await redContext.close()
+      const reopened = await browser.newContext({ storageState: kept, viewport: { width: 1200, height: 840 } })
+      contexts.push(reopened)
+      const back = await reopened.newPage()
+      await back.goto(room)
+      await expect(back.getByTestId('match-status-badge')).toContainText('You play red')
+
+      // A browser without that session is another guest, which takes no seat in this private match.
+      const other = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+      contexts.push(other)
+      const stranger = await other.newPage()
+      const joinAnswered = stranger.waitForResponse((r) => r.url().includes('/join'))
+      await stranger.goto(room)
+      // Both seats are taken and the match is private, so the room is refused to this browser.
+      const join = await joinAnswered
+      expect(join.status()).toBe(403)
+      expect((await join.json()).error.code).toBe('private_match')
+      await expect(stranger.getByTestId('match-status-badge')).not.toContainText('You play')
+    } finally {
+      for (const context of contexts) await context.close().catch(() => undefined)
+    }
+  })
+
+  test('11. The sharing summary keeps the newest state, and a room stops when its session ends', async ({ browser }) => {
+    const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const redPage = await redContext.newPage()
+      const blkPage = await blkContext.newPage()
+      // Red's live streams pass through to the server; the test can drop the current one as a network would.
+      const redStreams: WebSocketRoute[] = []
+      let withholdRedFrames = false
+      const heldRedFrames: string[] = []
+      let lastRedFrame = ''
+      await redPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        redStreams.push(stream)
+        const server = stream.connectToServer()
+        server.onMessage((message) => {
+          if (typeof message !== 'string') return stream.send(message)
+          lastRedFrame = message
+          if (withholdRedFrames) heldRedFrames.push(message)
+          else stream.send(message)
+        })
+      })
+      const releaseRedFrames = () => {
+        withholdRedFrames = false
+        for (const frame of heldRedFrames.splice(0)) redStreams[redStreams.length - 1]!.send(frame)
+      }
+      await redPage.goto('/')
+      await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await redPage.getByTestId('create-invite-btn').click()
+      await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      // Black's first snapshots arrive without a state version, as from a server that does not send one.
+      let stripRevision = true
+      const withoutRevision = (text: string) => {
+        const data = JSON.parse(text)
+        if (data.snapshot) delete data.snapshot.state_version
+        delete data.state_version
+        return data
+      }
+      await blkPage.route(
+        /\/api\/v1\/invitations\/[^/]+\/join$/,
+        async (route) => {
+          const response = await route.fetch()
+          await route.fulfill({ response, json: withoutRevision(await response.text()) })
+        },
+        { times: 1 },
+      )
+      // Its fallback snapshot reads too, so the assertion does not depend on how soon the stream opens.
+      await blkPage.route(/\/api\/v1\/matches\/[^/?]+(\?.*)?$/, async (route) => {
+        if (route.request().method() !== 'GET' || !stripRevision) return route.fallback()
+        const response = await route.fetch()
+        await route.fulfill({ response, json: withoutRevision(await response.text()) })
+      })
+      await blkPage.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        const server = stream.connectToServer()
+        server.onMessage((message) =>
+          stream.send(stripRevision && typeof message === 'string' ? JSON.stringify(withoutRevision(message)) : message),
+        )
+      })
+      await blkPage.goto(new URL(redPage.url()).pathname)
+      await expect(blkPage.getByTestId('match-status-badge')).toContainText('You play black')
+      await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
+      for (const page of [redPage, blkPage]) await page.getByTestId('privacy-consent-card').locator('summary').click()
+      // Without a revision the effective visibility is not confirmed; the first versioned update confirms it.
+      await expect(blkPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      stripRevision = false
+      const saved = (page: typeof redPage) =>
+        page.waitForResponse((r) => r.url().endsWith('/privacy') && r.request().method() === 'POST')
+
+      /** Holds Red's next snapshot read: it is fetched now, so it carries the state now, and delivered on release. */
+      const holdRedRead = async () => {
+        let release: () => void = () => {}
+        const gate = new Promise<void>((resolve) => (release = resolve))
+        let fetched: () => void = () => {}
+        const captured = new Promise<void>((resolve) => (fetched = resolve))
+        await redPage.route(
+          /\/api\/v1\/matches\/[^/?]+$/,
+          async (route) => {
+            if (route.request().method() !== 'GET') return route.fallback()
+            const response = await route.fetch()
+            fetched()
+            await gate
+            await route.fulfill({ response })
+          },
+          { times: 1 },
+        )
+        return { captured, release: () => release() }
+      }
+      const blackChooses = async (visibility: string) => {
+        const save = saved(blkPage)
+        await blkPage.getByTestId('privacy-visibility').selectOption(visibility)
+        expect((await save).status()).toBe(200)
+      }
+
+      // Both choose public: the match is public.
+      let save = saved(redPage)
+      await redPage.getByTestId('privacy-visibility').selectOption('public')
+      expect((await save).status()).toBe(200)
+      await expect(blkPage.getByTestId('privacy-effective')).toContainText('Private')
+      await blackChooses('public')
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
+      // Red's read-back is captured while public; Black withdraws; the older public reply arrives last.
+      let held = await holdRedRead()
+      save = saved(redPage)
+      await redPage.getByLabel('Allow internal model training').check()
+      expect((await save).status()).toBe(200)
+      await held.captured
+      await blackChooses('private')
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Private')
+      held.release()
+      await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Private')
+
+      // The other direction: a private reply captured before Black shares again arrives after the public update.
+      held = await holdRedRead()
+      save = saved(redPage)
+      await redPage.getByLabel('Allow internal model training').uncheck()
+      expect((await save).status()).toBe(200)
+      await held.captured
+      await blackChooses('public')
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+      held.release()
+      await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
+      // Red's session ends on the server while the page still holds it; when the stream drops, the room asks the
+      // server, learns the session has ended, and stops instead of reconnecting.
+      // A save's acknowledgment alone leaves the sharing summary unconfirmed; a read below the version it wrote does not
+      // confirm it, and a snapshot at that version does.
+      withholdRedFrames = true
+      await redPage.route(
+        /\/api\/v1\/matches\/[^/?]+$/,
+        async (route) => {
+          if (route.request().method() !== 'GET') return route.fallback()
+          const response = await route.fetch()
+          const body = await response.json()
+          body.state_version -= 1
+          await route.fulfill({ response, json: body })
+        },
+        { times: 1 },
+      )
+      save = saved(redPage)
+      await redPage.getByLabel('Allow published research analysis').check()
+      expect((await save).status()).toBe(200)
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      await expect(redPage.getByTestId('privacy-visibility')).toBeEnabled()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      releaseRedFrames()
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
+      // A successful command reply that lacks a clock is not installed: the room says so and reads the match again.
+      // Red's stream withholds the move, so Red can catch up only through that read.
+      withholdRedFrames = true
+      await redPage.route(
+        /\/commands$/,
+        async (route) => {
+          const response = await route.fetch()
+          const body = await response.json()
+          delete body.red_remaining_ms
+          await route.fulfill({ response, json: body })
+        },
+        { times: 1 },
+      )
+      await playBoardSquares(redPage, 'h2', 'e2')
+      await expect(redPage.getByTestId('match-error')).toContainText('could not be read')
+      await expect(blkPage.getByTestId('match-moves-card')).toContainText('C2=5')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
+      await expect(redPage.locator('body')).not.toContainText('NaN')
+      withholdRedFrames = false
+      heldRedFrames.length = 0
+
+      // The same state arriving again changes nothing: Red's move reaches Red's stream first, the stream drops, and the
+      // late reply to the move does not wind Black's running clock back.
+      await playBoardSquares(blkPage, 'h9', 'g7')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('H8+7')
+      let releaseReply: () => void = () => {}
+      const replyGate = new Promise<void>((resolve) => (releaseReply = resolve))
+      let heldBlackMs = -1
+      await redPage.route(
+        /\/commands$/,
+        async (route) => {
+          const response = await route.fetch()
+          const body = await response.json()
+          heldBlackMs = body.black_remaining_ms
+          await replyGate
+          await route.fulfill({ response, json: body })
+        },
+        { times: 1 },
+      )
+      // The stream stays closed until the reply is handled: the reconnect's reads fail meanwhile, as offline.
+      let blockRecovery = true
+      await redPage.route(/\/api\/v1\/matches\/[^/?]+\?since_seq=\d+$/, (route) =>
+        blockRecovery ? route.abort() : route.fallback(),
+      )
+      await playBoardSquares(redPage, 'b0', 'c2')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('2.H8+7')
+      const streamsBefore = redStreams.length
+      await redStreams[streamsBefore - 1]!.close()
+      const clockSeconds = async (side: 'red' | 'black') => {
+        const [m, sec] = (await redPage.getByTestId(`clock-${side}`).innerText()).trim().split(':').map(Number)
+        return m! * 60 + sec!
+      }
+      const seconds = () => clockSeconds('black')
+      // Black's clock runs until it shows less than the reading in the held reply, so replaying that reading would show.
+      await expect.poll(() => heldBlackMs).toBeGreaterThan(0)
+      await expect.poll(seconds, { timeout: 10_000 }).toBeLessThan(Math.floor(heldBlackMs / 1000))
+      const beforeReply = await seconds()
+      const replied = redPage.waitForEvent('requestfinished', { predicate: (r) => r.url().endsWith('/commands') })
+      releaseReply()
+      await replied
+      // Sampled across the reply's handling, Black's clock never shows more time than before the reply.
+      for (let i = 0; i < 10; i++) {
+        expect(await seconds()).toBeLessThanOrEqual(beforeReply)
+        await redPage.waitForTimeout(100)
+      }
+      expect(redStreams.length).toBe(streamsBefore)
+      blockRecovery = false
+      await expect.poll(() => redStreams.length).toBe(streamsBefore + 1)
+
+      // A reading of the same state may lower the running clock, and never moves the stopped one.
+      await expect.poll(() => lastRedFrame.length).toBeGreaterThan(0)
+      const stoppedBefore = await clockSeconds('red')
+      const running = await seconds()
+      const sameState = JSON.parse(lastRedFrame)
+      sameState.black_remaining_ms = (running - 30) * 1000
+      sameState.red_remaining_ms += 90_000
+      redStreams[redStreams.length - 1]!.send(JSON.stringify(sameState))
+      await expect.poll(seconds).toBeLessThanOrEqual(running - 29)
+      expect(await clockSeconds('red')).toBe(stoppedBefore)
+
+      // A newer snapshot of the same turn is taken, and its older, higher reading gives no time back.
+      const current = JSON.parse(lastRedFrame)
+      const version: number = current.state_version
+      const send = (frame: object) => redStreams[redStreams.length - 1]!.send(JSON.stringify(frame))
+      const runningNow = await seconds()
+      send({ ...current, state_version: version + 1, visibility: 'unlisted', black_remaining_ms: (runningNow + 20) * 1000 })
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Unlisted')
+      expect(await seconds()).toBeLessThanOrEqual(runningNow)
+
+      // A newer frame without a readable visibility leaves sharing unconfirmed; an older readable one does not confirm
+      // it, and a readable one that new does.
+      send({ ...current, state_version: version + 3, visibility: null })
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      send({ ...current, state_version: version + 2, visibility: 'public' })
+      await redPage.waitForTimeout(300)
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Not confirmed')
+      send({ ...current, state_version: version + 3, visibility: 'public' })
+      await expect(redPage.getByTestId('privacy-effective')).toContainText('Public')
+
+      // A save is answered only after the room stopped: its outcome is not shown, and nothing is read back.
+      let releaseSave: () => void = () => {}
+      const saveGate = new Promise<void>((resolve) => (releaseSave = resolve))
+      let saveApplied: () => void = () => {}
+      const applied = new Promise<void>((resolve) => (saveApplied = resolve))
+      let saveStatus = 0
+      await redPage.route(
+        /\/privacy$/,
+        async (route) => {
+          const response = await route.fetch()
+          saveStatus = response.status()
+          saveApplied()
+          await saveGate
+          await route.fulfill({ response })
+        },
+        { times: 1 },
+      )
+      await redPage.getByLabel('Allow open dataset release').check()
+      await applied
+      expect(saveStatus).toBe(200)
+      await expect.poll(() => redStreams.length).toBeGreaterThan(0)
+      await redContext.clearCookies()
+      const opened = redStreams.length
+      await redStreams[opened - 1]!.close()
+      await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
+      let readsAfterStop = 0
+      redPage.on('request', (request) => {
+        if (request.method() === 'GET' && /\/api\/v1\/matches\/[^/?]+$/.test(request.url())) readsAfterStop++
+      })
+      // The page's own leave guard holds while the save or its read-back is pending, and lets go once it is handled.
+      const leavingGuarded = () =>
+        redPage.evaluate(() => {
+          const leaving = new Event('beforeunload', { cancelable: true })
+          window.dispatchEvent(leaving)
+          return leaving.defaultPrevented
+        })
+      expect(await leavingGuarded()).toBe(true)
+      releaseSave()
+      await expect.poll(leavingGuarded).toBe(false)
+      expect(readsAfterStop).toBe(0)
+      await expect(redPage.getByTestId('privacy-status')).not.toContainText('Open dataset release')
+      await expect(redPage.getByTestId('match-error')).toContainText('session has ended')
+      expect(redStreams.length).toBe(opened)
+      await expect(redPage.getByTestId('privacy-visibility')).toBeDisabled()
+    } finally {
+      await redContext.close()
+      await blkContext.close()
+    }
+  })
+
+  test('12. A waiting room confirms its session before reopening its stream, and stops when it is gone', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const page = await context.newPage()
+      const events: string[] = []
+      const streams: WebSocketRoute[] = []
+      await page.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        streams.push(stream)
+        events.push('stream')
+        stream.connectToServer()
+      })
+      page.on('request', (request) => {
+        if (request.url().includes('/api/v1/auth/session?reissue=false')) events.push('probe')
+      })
+      await page.goto('/')
+      await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await page.getByTestId('create-invite-btn').click()
+      await page.waitForURL(/\/invite\/[a-z0-9]+/)
+      await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
+      await expect.poll(() => streams.length).toBe(1)
+
+      // The stream drops while a waiting-room poll's reply is held; once the reply lands, the room asks the server,
+      // read-only, before it opens a new stream.
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => (release = resolve))
+      let fetched: () => void = () => {}
+      const held = new Promise<void>((resolve) => (fetched = resolve))
+      // Every poll answers with an unreadable snapshot meanwhile: nothing is installed, and the stream still reopens.
+      let breakPolls = true
+      let firstPoll = true
+      await page.route(/\/api\/v1\/matches\/[^/?]+\?since_seq=\d+$/, async (route) => {
+        if (!breakPolls) return route.fallback()
+        if (firstPoll) {
+          firstPoll = false
+          fetched()
+          await gate
+        }
+        await route.fulfill({ status: 200, json: { match_id: 'another-match', status: 'finished' } })
+      })
+      // The probe's answer is held too: no new stream opens until the server has said the session stands.
+      let answer: () => void = () => {}
+      const answerGate = new Promise<void>((resolve) => (answer = resolve))
+      let asked: () => void = () => {}
+      const probed = new Promise<void>((resolve) => (asked = resolve))
+      await page.route(
+        /\/api\/v1\/auth\/session\?reissue=false$/,
+        async (route) => {
+          const response = await route.fetch()
+          asked()
+          await answerGate
+          await route.fulfill({ response })
+        },
+        { times: 1 },
+      )
+      await held
+      events.length = 0
+      await streams[0]!.close()
+      release()
+      await probed
+      await page.waitForTimeout(1_000)
+      expect(streams.length).toBe(1)
+      answer()
+      await expect.poll(() => streams.length).toBe(2)
+      expect(events.indexOf('probe')).toBeGreaterThanOrEqual(0)
+      expect(events.indexOf('probe')).toBeLessThan(events.indexOf('stream'))
+      await expect(page.getByTestId('match-status-badge')).toContainText('Waiting for friend')
+      breakPolls = false
+
+      // The session ends while the stream stays open: the next poll of the private room is refused, the room asks the
+      // server, and it stops and closes its stream.
+      let closedByPage = false
+      streams[1]!.onClose(() => {
+        closedByPage = true
+      })
+      await context.clearCookies()
+      await expect(page.getByTestId('match-error')).toContainText('session has ended')
+      await expect.poll(() => closedByPage).toBe(true)
+      await page.waitForTimeout(1_500)
+      expect(streams.length).toBe(2)
+    } finally {
+      await context.close()
+    }
+  })
+
+  test('13. A room whose opening snapshot cannot be read says so and opens no stream', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const page = await context.newPage()
+      const streams: WebSocketRoute[] = []
+      await page.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        streams.push(stream)
+        stream.connectToServer()
+      })
+      await page.route(/\/api\/v1\/invitations\/[^/]+\/join$/, async (route) => {
+        const response = await route.fetch()
+        const body = await response.json()
+        body.snapshot.visibility = 'unknown'
+        await route.fulfill({ response, json: body })
+      })
+      await page.goto('/')
+      await expect(page.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await page.getByTestId('create-invite-btn').click()
+      await page.waitForURL(/\/invite\/[a-z0-9]+/)
+      await expect(page.getByTestId('match-error')).toContainText('cannot read')
+      await page.waitForTimeout(1_500)
+      expect(streams.length).toBe(0)
+    } finally {
+      await context.close()
+    }
+  })
+
+  test('14. A tab that missed a takeback and its replacement move takes the new turn\'s clocks', async ({ browser }) => {
+    const redContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    const blkContext = await browser.newContext({ viewport: { width: 1200, height: 840 } })
+    try {
+      const redPage = await redContext.newPage()
+      const blkPage = await blkContext.newPage()
+      await redPage.goto('/')
+      await expect(redPage.locator('[data-canvas-ready="true"]')).toBeVisible()
+      await redPage.getByTestId('create-invite-btn').click()
+      await redPage.waitForURL(/\/invite\/[a-z0-9]+/)
+      const room = new URL(redPage.url()).pathname
+      await blkPage.goto(room)
+      await expect(redPage.getByTestId('match-status-badge')).toContainText('You play red', { timeout: 6_000 })
+
+      // A second tab of Red's guest watches the match; its stream can be cut off as a network would.
+      const watcher = await redContext.newPage()
+      const watcherStreams: WebSocketRoute[] = []
+      let cutOff = false
+      // Later the watcher also stands in for a client of a server that sends no turn generation.
+      let withoutGeneration = false
+      let lastFrame = ''
+      await watcher.routeWebSocket(/\/api\/v1\/matches\/[^/]+\/ws$/, (stream) => {
+        watcherStreams.push(stream)
+        const server = stream.connectToServer()
+        server.onMessage((message) => {
+          if (cutOff) return
+          if (typeof message !== 'string') return stream.send(message)
+          lastFrame = message
+          if (!withoutGeneration) return stream.send(message)
+          const frame = JSON.parse(message)
+          delete frame.turn_generation
+          stream.send(JSON.stringify(frame))
+        })
+      })
+      await watcher.goto(room)
+      await expect(watcher.getByTestId('match-status-badge')).toContainText('You play red')
+      await playBoardSquares(redPage, 'h2', 'e2')
+      await expect(watcher.getByTestId('match-moves-card')).toContainText('C2=5')
+
+      // The watcher misses the takeback, its acceptance, and the same move played again after Red thinks a while.
+      cutOff = true
+      await redPage.getByTestId('btn-request-takeback').click()
+      await blkPage.getByTestId('btn-accept-takeback').click()
+      await expect(redPage.getByTestId('match-moves-card')).not.toContainText('C2=5')
+      // Red thinks longer than the increment plus a displayed second, so the replacement move leaves Red a different
+      // time from the first one, and the watcher's stale reading is observably stale.
+      await redPage.waitForTimeout(7_500)
+      await playBoardSquares(redPage, 'h2', 'e2')
+      await expect(redPage.getByTestId('match-moves-card')).toContainText('C2=5')
+      const clock = async (page: typeof redPage, side: 'red' | 'black') =>
+        (await page.getByTestId(`clock-${side}`).innerText()).trim()
+      expect(await clock(watcher, 'red')).not.toBe(await clock(redPage, 'red'))
+
+      // It reconnects: the snapshot looks like the turn it was timing, but it is a new turn, so the watcher takes its
+      // clocks, Red's credited time included.
+      await watcherStreams[watcherStreams.length - 1]!.close()
+      cutOff = false
+      await expect.poll(() => watcherStreams.length).toBeGreaterThan(1)
+      await expect.poll(() => clock(watcher, 'red')).toBe(await clock(redPage, 'red'))
+
+      // From a server that names no turns, a move is still read as a new turn by side to move and moves.
+      withoutGeneration = true
+      await playBoardSquares(blkPage, 'h9', 'g7')
+      await expect(watcher.getByTestId('match-moves-card')).toContainText('H8+7')
+      await expect.poll(() => clock(watcher, 'black')).toBe(await clock(blkPage, 'black'))
+      withoutGeneration = false
+
+      // A frame whose turn generation is invalid is not shown and does not use up its version: the valid frame of the
+      // same version that follows it is the one shown.
+      const frame = JSON.parse(lastFrame)
+      const stream = watcherStreams[watcherStreams.length - 1]!
+      const next = frame.state_version + 1
+      stream.send(JSON.stringify({ ...frame, state_version: next, turn_generation: -1, visibility: 'unlisted' }))
+      stream.send(JSON.stringify({ ...frame, state_version: next, visibility: 'public' }))
+      await expect(watcher.getByTestId('privacy-effective')).toContainText('Public')
+    } finally {
+      await redContext.close()
+      await blkContext.close()
+    }
   })
 
   test('5. Archive replay: locale notation, stable move selection, every ply renders, and an overlaid notice', async ({

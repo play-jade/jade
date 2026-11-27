@@ -324,6 +324,8 @@ export function useReplaySession(options: ReplaySessionOptions) {
   /** Stores the current line after any earlier write; true when stored or the session does not persist. */
   function persist(): Promise<boolean> {
     if (!persistEnabled()) {
+      // A write still pending from before persistence stopped reports nothing about this line.
+      writes++
       const reason = options.unpersistedReason?.value
       if (reason && (variation.value || parked.value)) saveState.value = { state: 'unsaved', reason }
       return Promise.resolve(true)

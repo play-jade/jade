@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS matches (
     black_consent_research INTEGER NOT NULL DEFAULT 0,
     red_consent_dataset INTEGER NOT NULL DEFAULT 0,
     black_consent_dataset INTEGER NOT NULL DEFAULT 0,
+    -- Each participant's choices advance a revision on every save, so an older save cannot overwrite a newer one.
+    red_choices_revision INTEGER NOT NULL DEFAULT 0,
+    black_choices_revision INTEGER NOT NULL DEFAULT 0,
+    -- Advances with every change to the match's stored state, so clients show the newest snapshot they hold.
+    state_version INTEGER NOT NULL DEFAULT 0,
+    -- Advances only when a new turn begins (play starting, a move, an accepted takeback), for clock accounting.
+    turn_generation INTEGER NOT NULL DEFAULT 0,
     rematch_of_match_id TEXT,
     next_rematch_id TEXT,
     created_at_ms INTEGER NOT NULL,
