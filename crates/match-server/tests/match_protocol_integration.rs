@@ -2744,7 +2744,12 @@ async fn a_hosted_postgres_connection_is_encrypted_and_certificate_checked() {
 
 #[tokio::test]
 async fn every_in_memory_spelling_is_one_database_shared_by_the_pool() {
-    for spelling in ["sqlite::memory:", "sqlite://:memory:", "sqlite:"] {
+    for spelling in [
+        "sqlite::memory:",
+        "sqlite://:memory:",
+        "sqlite:",
+        "sqlite:sqlite::memory:",
+    ] {
         let state = build_app_state(spelling).await.unwrap();
         // Two connections held at once: what one writes, the other reads.
         let mut writer = state.db.acquire().await.unwrap();
